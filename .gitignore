@@ -1,0 +1,53 @@
+# Local tool installs and caches
+.local/
+.cache/
+.cx/state.json
+.cx/graph.json
+.cx/tmp/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Logs, temporary files, and coverage output
+*.log
+*.pid
+coverage/
+htmlcov/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python build artifacts
+build/
+dist/
+*.egg-info/
+
+# distrainer runtime outputs (local runs, harness volumes, audit logs)
+runs/
+blocks/
+audit/
+/tmp/
+*.parquet
+!fixtures/**/*.parquet
+
+# Claude desktop app session outputs
+Claude outputs/
