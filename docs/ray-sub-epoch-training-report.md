@@ -134,7 +134,7 @@ Ray Data has no sampler; `iter_batches(batch_size=B)` slices B contiguous rows o
 
 Communication: data moves at block granularity and a block goes to exactly one worker (locality-preferred), so batch composition does not add data movement. The comm that does depend on the contrastive strategy is the loss-side `all_gather` of embeddings for cross-device in-batch negatives (`world_size * B * d` per step, small relative to gradient all-reduce). Local hard negatives per block cost nothing extra; the two can be combined.
 
-Because batches carry a `batch_id`, resumption state becomes "set of completed batch ids" (or a chunk index) instead of a per-rank stream position — the same idea as Anyscale's row-ID mid-epoch resumption, reproducible in OSS with a `filter` on resume.
+Because batches carry a `batch_id`, resumption state becomes "set of completed batch ids" (or, as the distrainer spec rev 2 does it, a position in an append-only log of shuffled segments) instead of a per-rank stream position — the same idea as Anyscale's row-ID mid-epoch resumption, reproducible in OSS with a `filter` on resume.
 
 Hard-negative re-mining every K steps is a natural sub-epoch unit. Plumbing options: (a) chunk-as-epoch, with a `map_batches` stage that reads the latest mined negatives at execution time (the pipeline re-executes each epoch, so it refreshes automatically); (b) `TorchTrainer(datasets={"train": callable})` plus `resume_from_checkpoint=` in a driver loop of mine → fit(chunk) → checkpoint (pays worker-group startup per chunk); (c) rank 0 builds the chunk dataset inside `train_func`, calls `streaming_split(world_size, equal=True, locality_hints=...)`, and distributes the (picklable) iterators via `ray.train.collective.broadcast_from_rank_zero`.
 

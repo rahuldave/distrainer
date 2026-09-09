@@ -1,6 +1,8 @@
 # distrainer — design sketch: block-native distributed training on OSS Ray
 
-*Draft, September 9, 2026. Companion to `research/ray-sub-epoch-training-report.md`.*
+*Draft, September 9, 2026. Companion to `ray-sub-epoch-training-report.md`. Superseded in detail by `distrainer-spec.md` (rev 2).*
+
+> **Revision note (rev 2 of the spec).** The "Planner / BlockStore namespaces" described below were replaced by a single **block log**: an append-only sequence of immutable *segments*, each a file listing `W` blocks in already-shuffled order, stored next to the block Parquet files on a local folder or S3. The writer (batch: everything at t=0; streaming: as blocks arrive; the re-mining hook is a writer too) is the only process that appends; the trainer only reads, and waits at the end of the log if the next segment is not there yet. Batch and streaming ingest therefore share one code path, the ledger becomes `(segment, cursor, world_size)`, and "chunk" is now called "segment". In plain words: the log is the ordered list of batches to train on, written in shuffled groups; the trainer walks it and remembers only how far it got. See spec sections 2–5.
 
 ## Goal
 

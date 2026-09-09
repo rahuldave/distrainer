@@ -185,46 +185,69 @@ distrainer keeps Ray Train for everything it is good at (launching workers, proc
 
 ### The block
 
-In distrainer a block is a pre-built batch of rows with a stable name, its `block_id`, stored as one Parquet file in a **block store** (a folder or an S3 bucket). Blocks are built ahead of time by whatever process you like, typically a Ray Data job. The training loop never sees loose rows; it sees blocks. A block can be exactly one GPU batch, or a larger "super-batch" that the worker cuts into several micro-batches.
+In distrainer a block is a pre-built batch of rows with a stable name, its `block_id`, stored as one Parquet file in a **block store** (a folder or an S3 bucket). Blocks are built ahead of time by whatever process you like, typically a Ray Data job. The training loop never sees loose rows; it sees blocks. A block can be exactly one GPU batch, or a larger "super-batch" that the worker cuts into several micro-batches. Which rows belong to which block is not stored anywhere special: a row belongs to the block whose file it sits in, and each row also carries its `block_id` as a column so you can always tell where it came from.
 
-### The plan and the lane
+### The block log: batch and streaming are the same thing
 
-For each epoch, and for each **chunk** within the epoch (a chunk is just a fixed number of blocks; it is the sub-epoch unit), a **planner** produces an ordered list of block ids. Shuffling is a seeded permutation of that list, so it can be recreated exactly from `(seed, epoch, chunk)`. Blocks are then dealt to ranks like cards: position `i` in the plan goes to rank `i mod world_size`, at step `i div world_size`. Each rank's cards are its **lane**, and it loads them itself from the block store with a small prefetching loader. There is no coordinator and no lockstep; the only meeting point is `report`.
+Somebody has to decide the *order* in which blocks are trained on. distrainer stores that order as a **log**: an append-only list of blocks, written in groups called **segments**. A segment is a fixed number of blocks, `W`, say 256. When a segment is written, its `W` blocks are shuffled amongst each other using a seed, and the shuffled order is saved in a small file, `log/00000007.json` for segment 7. Once written, a segment never changes.
+
+That one structure covers both ways data can arrive. In **batch mode**, all of the data exists before training starts, so the whole log is written up front, every segment at once, and an `_END` marker says "that is everything". In **streaming mode**, blocks are being produced while training runs (by a miner that keeps finding new hard negatives, say), so segments are appended as they fill up and there is no `_END` until the producer stops. The trainer does not care which mode it is in. It reads segment 0, then segment 1, and when it reaches a segment that does not exist yet it waits for it to appear. That waiting is the only difference between the two modes, and it is invisible to the training code.
+
+There is no database and no message broker behind this; a segment is a file, and writing a file is atomic on both a local disk and S3, so a reader either sees a complete segment or none. The only rule is that exactly one process writes to a given log, so the order is never ambiguous.
 
 ```mermaid
 flowchart LR
-  plan["plan for (epoch 0, chunk 2):<br/>b17 b03 b42 b08 b25 b31 b11 b06 b19"]
-  plan --> r0["rank 0 lane: b17 b08 b11"]
-  plan --> r1["rank 1 lane: b03 b25 b06"]
-  plan --> r2["rank 2 lane: b42 b31 b19"]
-  r0 --> s["step 0: b17 b03 b42<br/>step 1: b08 b25 b31<br/>step 2: b11 b06 b19"]
+  subgraph store["block store (folder or S3 bucket)"]
+    direction TB
+    blocks["blocks/<br/>b0001.parquet b0002.parquet … (one file = one batch)"]
+    log["log/<br/>00000000.json  00000001.json  00000002.json  _END?"]
+  end
+  producer["producer / writer<br/>(batch: writes everything at start;<br/>streaming: keeps appending)"] -->|"W blocks, shuffled, then commit"| log
+  producer --> blocks
+  log -->|"read segment k, wait for k+1"| trainer["trainer ranks"]
+  blocks -->|"each rank fetches its own blocks"| trainer
+```
+
+### Dealing a segment to the ranks
+
+Inside a segment, blocks are dealt to ranks like cards: position `i` goes to rank `i mod world_size`, at step `i div world_size`. Each rank's cards are its **lane**, and it fetches them itself from the block store with a small prefetching loader. There is no coordinator and no lockstep beyond the all-reduce that DDP already does. Because `W` is chosen as a multiple of the number of workers, every rank gets exactly `W / world_size` blocks per segment and nothing is left over.
+
+```mermaid
+flowchart LR
+  seg["segment 2 (W = 9, shuffled):<br/>b17 b03 b42 b08 b25 b31 b11 b06 b19"]
+  seg --> r0["rank 0 lane: b17 b08 b11"]
+  seg --> r1["rank 1 lane: b03 b25 b06"]
+  seg --> r2["rank 2 lane: b42 b31 b19"]
+  r0 --> s["step 0: b17 b03 b42 → all-reduce → update<br/>step 1: b08 b25 b31 → all-reduce → update<br/>step 2: b11 b06 b19 → all-reduce → update"]
   r1 --> s
   r2 --> s
 ```
 
+So the units nest like this: a **row** is one example; a **block** is one rank's batch; a **step** is `world_size` blocks, one per rank, ending in the gradient all-reduce and one weight update; a **segment** is `W` blocks shuffled together, and the place where the "ingredients" can change (new hard negatives, a new seed); and the **log** is the whole sequence of segments. Gradients are averaged at every step. Nothing about the model is communicated at segment boundaries; those are purely about data.
+
 ### The ledger
 
-Every checkpoint carries a tiny file called the **ledger**: `epoch`, `chunk`, `cursor` (how many global steps of this chunk are done), and `world_size` at the time. Because `report` is a barrier, all ranks are at the same step whenever a checkpoint is written, so a single integer describes the data position for the whole world. Resuming means rebuilding the same plan from the same seed, skipping the first `cursor × world_size` positions, and re-dealing the rest over however many workers there are *now*.
+Every checkpoint carries a tiny file called the **ledger**: which `segment` we are in, the `cursor` (how many steps of that segment are done), and the `world_size` at the time. Because `report` is a barrier, all ranks are at the same step whenever a checkpoint is written, so this one small number describes the data position for the whole world. Resuming means opening the same segment file, skipping the first `cursor × world_size` positions, and re-dealing the rest, and every later segment, over however many workers there are *now*.
 
 ```mermaid
 flowchart TB
-  ck["checkpoint: weights + ledger {epoch 0, chunk 2, cursor 4, world_size 4}"]
+  ck["checkpoint: weights + ledger {segment 2, cursor 4, world_size 4}"]
   ck --> f["failure, or resize from 4 to 3 workers"]
-  f --> rebuild["rebuild plan(epoch 0, chunk 2) from seed"]
-  rebuild --> skip["skip positions 0 … 15 (4 steps × 4 ranks)"]
-  skip --> deal["deal positions 16 … over 3 ranks"]
-  deal --> go["continue at global step 0 of the remainder"]
+  f --> reopen["reopen log/00000002.json (immutable, so identical)"]
+  reopen --> skip["skip positions 0 … 15 of the segment (4 steps × 4 ranks)"]
+  skip --> deal["deal positions 16 … over 3 ranks, then segment 3, 4, …"]
+  deal --> go["continue"]
 ```
 
-The only data replayed is whatever ran between the last checkpoint and the failure, which you control with the checkpoint cadence. That is the same guarantee Anyscale's mid-epoch resumption gives, without tracking per-row ids, and it survives a change in world size, which per-rank iterator state does not.
+The only data replayed is whatever ran between the last checkpoint and the failure, which you control with the checkpoint cadence. That is the same guarantee Anyscale's mid-epoch resumption gives, without tracking per-row ids, and it survives a change in world size, which per-rank iterator state does not. In streaming mode this adds one requirement: a segment must not be deleted until a later checkpoint exists, so that a replay can still find its blocks. distrainer's garbage collector keeps a configurable number of segments behind the latest checkpoint.
 
 ### The checkpoint policy
 
-Because progress is counted in blocks, "when to checkpoint" becomes a plain rule over block indices: every K steps, at the end of each chunk, at the end of each epoch, or a time budget. Rules based on indices need no communication at all; every rank computes the same answer. A time-based rule is decided by rank 0 and broadcast so the ranks agree. Uploads to S3 run in a background thread so frequent checkpoints do not stall training.
+Because progress is counted in steps, "when to checkpoint" becomes a plain rule: every K steps, at the end of each segment, at the end of each pass over the data, or a time budget. Rules based on indices need no communication at all; every rank computes the same answer. A time-based rule is decided by rank 0 and broadcast so the ranks agree. Uploads to S3 run in a background thread so frequent checkpoints do not stall training.
 
-### Chunk hooks
+### Segment hooks
 
-The end of a chunk is a natural place to do sub-epoch work. distrainer lets rank 0 run a hook there, for example: embed the whole corpus with the current model, find new hard examples, write a fresh set of blocks for the next chunk. The planner picks them up, and the ledger keeps counting.
+The end of a segment is a natural place to do sub-epoch work. distrainer lets rank 0 run a hook there, for example: embed the whole corpus with the current model, find new hard examples, and *append the next segment to the log*. In other words, a hook is just a producer that happens to live inside the training job. The other ranks wait at a barrier until the segment is committed, then everyone reads it. The same hook could equally run as a separate process writing to the same log; the trainer cannot tell the difference.
 
 ## Part 9: Why this is a better fit than Anyscale's approach (for designed-batch training)
 
@@ -232,7 +255,7 @@ Anyscale solves the resume problem by recording every row id that was consumed a
 
 - **World-size independence.** A change from 4 to 3 workers is a re-deal, not a special case. Anyscale's row-id approach also handles this, but per-rank iterator state in general does not.
 - **Nothing to track at row level.** No id column requirement, no sidecar bookkeeping on shared storage, no restriction to map-only pipelines. The pipeline can do anything it likes, because it runs *before* blocks are written.
-- **Batch composition is yours.** A block is a batch you designed. Contrastive training with hard negatives, curriculum ordering, mixing several datasets in a chosen ratio, all become "what the planner emits", not "what the shuffle happened to produce".
+- **Batch composition is yours.** A block is a batch you designed. Contrastive training with hard negatives, curriculum ordering, mixing several datasets in a chosen ratio, all become "what the writer puts in a segment", not "what the shuffle happened to produce".
 - **Shuffling is at block level and reproducible.** Two runs with the same seed consume identical block sequences per rank.
 - **It runs on open-source Ray**, on a laptop, in Docker, or on Kubernetes, and stores blocks and checkpoints on any S3-compatible service.
 
@@ -246,11 +269,13 @@ Because every rank consumes "one block per global step" and nothing else is assu
 
 **Gradient accumulation.** A block holds several micro-batches; `train_step` loops over them, accumulating gradients, and steps the optimizer once. Checkpoint accounting stays per block.
 
-**Contrastive learning with hard negatives.** A block holds anchors, positives, and the hard negatives mined for them. In-block negatives cost no communication. If you also want negatives from other ranks, `train_step` does an all-gather of embeddings across the world, and the planner can place related blocks at adjacent plan positions so they land in the same global step.
+**Contrastive learning with hard negatives.** A block holds anchors, positives, and the hard negatives mined for them. In-block negatives cost no communication. If you also want negatives from other ranks, `train_step` does an all-gather of embeddings across the world, and the writer can place related blocks at adjacent positions in a segment so they land in the same global step.
 
-**Curriculum learning.** The planner orders blocks from easy to hard instead of shuffling uniformly.
+**Curriculum learning.** The writer orders segments from easy to hard instead of shuffling uniformly across the whole corpus.
 
-**Multi-dataset mixing.** The planner interleaves blocks from several namespaces in a chosen ratio; the ledger does not care where a block came from.
+**Multi-dataset mixing.** The writer interleaves blocks from several sources in a chosen ratio when it fills a segment; the ledger does not care where a block came from.
+
+**Streaming data.** Blocks produced while training runs are appended to the same log; the trainer waits for the next segment instead of stopping, and resume works exactly as in batch mode.
 
 **FSDP and other sharded-model schemes.** The data side is unchanged: one block per rank per step. Each rank reports its own checkpoint shard and Ray Train merges them into one checkpoint folder, and the ledger rides along.
 
@@ -274,9 +299,12 @@ Because every rank consumes "one block per global step" and nothing else is assu
 - **Elastic training** — a run whose number of workers can change while it runs.
 - **Preemption** — a cloud provider reclaiming a spot machine.
 - **Block (Ray Data)** — a few thousand rows in shared memory, the unit Ray Data streams.
-- **Block (distrainer)** — a pre-built, named batch stored as a Parquet file.
-- **Chunk** — a fixed number of blocks; the sub-epoch unit where hooks and re-shuffles happen.
-- **Plan, lane** — the ordered block list for a chunk; one rank's share of it.
-- **Ledger, cursor** — the data position stored in a checkpoint; the number of completed global steps.
-- **Checkpoint policy** — the rule that decides at which block boundaries to save.
-- **Chunk hook** — code that rank 0 runs at the end of a chunk, e.g. re-mining hard negatives.
+- **Block (distrainer)** — a pre-built, named batch stored as a Parquet file; a row belongs to the block whose file it is in.
+- **Log** — the ordered, append-only sequence of segments that says in what order blocks are trained on; the same structure for batch and streaming data.
+- **Segment** — `W` blocks shuffled amongst each other and committed as one immutable file; the sub-epoch unit where hooks and re-shuffles happen (also called a chunk).
+- **Writer / producer** — the single process that appends segments to a log; in batch mode it writes everything at the start.
+- **Lane** — one rank's share of a segment, dealt round-robin by position.
+- **Ledger, cursor** — the data position stored in a checkpoint: which segment, and how many steps of it are complete.
+- **Checkpoint policy** — the rule that decides at which step boundaries to save.
+- **Segment hook** — code that rank 0 runs at the end of a segment, e.g. re-mining hard negatives and appending the next segment.
+- **Retention** — how many old segments are kept so a replay after failure can still find its blocks.
