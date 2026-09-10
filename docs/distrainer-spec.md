@@ -32,6 +32,59 @@ The unit hierarchy, smallest to largest:
 
 Progress is one number: how many steps of the current segment are done. Because every rank finishes a step at the same moment (the all-reduce and `report` are barriers), that single number describes the data position for the whole world, and it stays valid when the number of workers changes.
 
+Worked example used throughout this spec: `W = 12`, `world_size = 3`, blocks of 32 rows. Segment 2 holds positions 24–35 and is four steps long.
+
+```mermaid
+flowchart LR
+  s0["segment 0<br/>positions 0–11"] --> s1["segment 1<br/>positions 12–23"] --> s2["segment 2<br/>positions 24–35"] --> s3["segment 3 …<br/>(batch mode ends with _END)"]
+  s2 ==> seg
+  subgraph seg["segment 2 = W = 12 blocks, shuffled together when written (log/00000002.json)"]
+    direction TB
+    st0["step 0 · positions 24 25 26<br/>rank 0: b17 · rank 1: b03 · rank 2: b42<br/>→ all-reduce → update"]
+    st1["step 1 · positions 27 28 29<br/>rank 0: b08 · rank 1: b25 · rank 2: b31<br/>→ all-reduce → update"]
+    st2["step 2 · positions 30 31 32<br/>rank 0: b11 · rank 1: b06 · rank 2: b19<br/>→ all-reduce → update"]
+    st3["step 3 · positions 33 34 35<br/>rank 0: b27 · rank 1: b02 · rank 2: b34<br/>→ all-reduce → update"]
+    st0 --> st1 --> st2 --> st3
+  end
+  seg -.-> blk["one block, e.g. b08 = blocks/b08.parquet<br/>= rank 0's batch at step 1<br/>= 32 rows, each carrying block_id = b08"]
+```
+
+**Reading the diagram.** The bottom row is the log: segments 0, 1, 2, … in the order the writer committed them, each owning twelve consecutive positions. Segment 2 is opened up in the box: its twelve blocks are already in their shuffled order, and they are consumed three at a time, one per rank, as steps 0 to 3. Each step ends with the gradient all-reduce and one weight update, so there are exactly four updates per segment with three workers. The dotted arrow picks out one block, `b08`: it is position 27, it is rank 0's batch at step 1, and on disk it is a single Parquet file of 32 rows that all carry `block_id = b08`. Nothing about the model is communicated at the segment boundary; that boundary is only where the data ingredients may change and where a hook may run.
+
+Every step boundary is a legal checkpoint; the policy chooses which ones to use. Ledger values a checkpoint would carry at each boundary of segment 2:
+
+```mermaid
+flowchart LR
+  subgraph seg["segment 2, world_size = 3 (4 steps of 3 blocks)"]
+    direction LR
+    st0["step 0<br/>b17 b03 b42"] --> c0{{"ledger<br/>{seg 2, cursor 1, ws 3}"}}
+    c0 --> st1["step 1<br/>b08 b25 b31"] --> c1{{"ledger<br/>{seg 2, cursor 2, ws 3}"}}
+    c1 --> st2["step 2<br/>b11 b06 b19"] --> c2{{"ledger<br/>{seg 2, cursor 3, ws 3}"}}
+    c2 --> st3["step 3<br/>b27 b02 b34"] --> c3{{"ledger<br/>{seg 2, cursor 4, ws 3}"}}
+  end
+  c3 --> hook["segment end: hook runs (re-mine, append segment 3),<br/>then everyone reads segment 3"]
+  ek["EveryKSteps(2) saves here"] -.-> c1
+  ek -.-> c3
+  se["SegmentEnd saves here"] -.-> c3
+  ev["EveryKSteps(1) saves at every one"] -.-> c0
+```
+
+**Reading the diagram.** Time runs left to right through segment 2. After each step every rank has finished the same block, so each of the four hexagons is a legal place to write a checkpoint, and the ledger value shown is exactly what that checkpoint would record: the segment, how many steps of it are done, and the world size. The dashed arrows show which of those boundaries three different policies would choose: `EveryKSteps(1)` saves at every hexagon, `EveryKSteps(2)` at the second and fourth, `SegmentEnd` only at the fourth. With `Any([EveryKSteps(2), SegmentEnd])` you get the union. After the last step the segment hook runs on rank 0 (for example re-mining and appending segment 3) while the other ranks wait, and then everyone moves on to segment 3.
+
+Resume from the checkpoint taken after step 1 (`{segment 2, cursor 2, world_size 3}`), including a resize from 3 to 2 workers:
+
+```mermaid
+flowchart TB
+  ck["last checkpoint: weights + ledger {segment 2, cursor 2, world_size 3}<br/>= positions 24–29 (b17 b03 b42 b08 b25 b31) are done"]
+  ck --> f["worker dies during step 3, or the run is resized from 3 to 2 workers"]
+  f --> reopen["reopen log/00000002.json (immutable, so the same 12 blocks in the same order)"]
+  reopen --> skip["skip 2 × 3 = 6 positions (24–29)"]
+  skip --> deal["deal positions 30–35 over 2 ranks:<br/>step 0: b11 b06 · step 1: b19 b27 · step 2: b02 b34<br/>then segment 3, 4, …"]
+  deal --> replay["only b11 b06 b19 (step 2 of the old run) is trained twice;<br/>with EveryKSteps(1) nothing would be"]
+```
+
+**Reading the diagram.** The run last checkpointed after step 1 of segment 2, so the ledger says `cursor 2` with `world_size 3`: six positions, 24 to 29, are done. Then something interrupts the run during step 3 (a worker dies, or the world is resized from three workers to two). On restart the trainer reopens the same segment file, which cannot have changed, skips the six finished positions, and deals the remaining six over the two ranks that exist now: three steps instead of two. The blocks of old step 2 (`b11 b06 b19`) had been trained on but not yet checkpointed, so they are trained a second time; that replay is the whole cost of the failure, and a tighter checkpoint policy makes it smaller. (In the general case the resume rule rounds the finished-position count down to a multiple of the new world size; here 6 is already a multiple of 2, so nothing extra is replayed.)
+
 ### 2.2 Definitions
 
 **Block** — `BlockRef(block_id: str, locator: str, num_rows: int, meta: dict)`. `locator` names one Parquet file under `store/blocks/`. Every row in the file carries its `block_id` (and a `row_id` if the producer has one). Block contents are otherwise opaque to distrainer; the user's `train_step` interprets columns.

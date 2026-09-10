@@ -38,6 +38,8 @@ flowchart LR
   end
 ```
 
+**Reading the diagram.** On the left, three inputs go through the same function `f` at the same time and produce three outputs; no worker needs to know about the others. On the right, the three outputs are combined by one operation, a sum, into a single result. Distributed training uses both shapes: forward and backward passes on different batches are a map, and averaging the gradients is a reduce.
+
 The next four are **collectives**: operations that every worker in the world participates in at the same time. A collective is also a meeting point; no worker can finish it until all of them have arrived. This is what people mean by a **barrier**.
 
 **Broadcast** — one worker sends the same value to everyone. Used to copy the initial model weights from rank 0 to all ranks so everyone starts identical.
@@ -65,6 +67,8 @@ flowchart TB
   end
 ```
 
+**Reading the diagram.** In the broadcast, rank 0 holds the value `W` and afterwards every rank holds the same `W`; nothing is split. In the scatter, rank 0 holds a list of four items and afterwards each rank holds exactly one of them, including rank 0 keeping the first.
+
 ```mermaid
 flowchart TB
   subgraph allgather["all-gather: everyone ends up with everything"]
@@ -89,6 +93,8 @@ flowchart TB
   end
 ```
 
+**Reading the diagram.** In the all-gather each rank starts with one item and every rank ends with the whole list, so it is a gather whose result is delivered to everyone. In the all-reduce each rank starts with its own gradient, the four gradients are averaged, and every rank receives that one mean. The all-reduce is drawn with a single combining node because that is what happens logically; in practice the ranks exchange pieces directly with each other and no single rank holds all four gradients.
+
 Two practical facts about collectives matter for what follows. First, they are only fast on GPUs because of special libraries (NCCL on NVIDIA hardware) that move data directly between GPUs. Second, because a collective is a barrier, every rank must call it the same number of times and in the same order, or the program hangs forever. That rule will show up again when we talk about checkpoints.
 
 ## Part 3: Data-parallel training (DDP)
@@ -108,6 +114,8 @@ sequenceDiagram
   Note over R0,R2: every rank applies W ← W − lr·g
   Note over R0,R2: weights still identical, so the next step starts in sync
 ```
+
+**Reading the diagram.** Three ranks start with identical weights. Each computes a gradient from its own batch; the horizontal arrow is the all-reduce that replaces all three gradients with their mean; then each rank applies the identical update. The final note is the invariant that makes data parallelism work: because the update was identical, the weights are still identical, and the next step can begin without any further synchronization.
 
 The two questions from Part 1 are answered like this: *who works on which data* is solved by giving each rank a different slice, its **shard**, and *how the workers agree* is solved by the all-reduce. The effective batch size is the per-worker batch times the world size, which is why learning rates are usually scaled when you add workers.
 
@@ -129,6 +137,8 @@ flowchart TB
   w0 <-. NCCL all-reduce .-> w1
   w1 <-. NCCL all-reduce .-> w2
 ```
+
+**Reading the diagram.** Your script runs on the head node and asks for three workers. The controller, also on the head node, creates the three worker processes, gives each a rank, sets up the process group, and then watches them; it does no training itself. Each worker runs your training function. The dotted lines between workers are the NCCL collectives (the all-reduce from Part 3), which go directly between GPUs without passing through the controller.
 
 The helpers you use inside the training function:
 
@@ -156,6 +166,8 @@ flowchart LR
   w1 --> b1["iter_torch_batches(batch_size=B)"]
   w2 --> b2["iter_torch_batches(batch_size=B)"]
 ```
+
+**Reading the diagram.** Data flows left to right. The pipeline reads files and applies transformations block by block. The split coordinator is a single process that receives finished blocks and hands each to whichever rank asks next, so the block numbers next to the arrows are arbitrary: rank 0 happened to get block 7, rank 1 block 3. Each rank's shard is therefore the sequence of blocks it happened to receive, and `iter_torch_batches` slices that sequence into fixed-size batches on the fly.
 
 Inside the training function, `shard.iter_torch_batches(batch_size=B)` walks the incoming blocks and slices them into batches of `B` rows, prefetching in the background. When your loop finishes the shard and starts again, that is a new epoch: all ranks wait at a barrier, and the whole pipeline re-executes from the files. This is why expensive preprocessing should be done once and stored, with only cheap per-epoch work such as shuffling left in the pipeline.
 
@@ -208,42 +220,87 @@ flowchart LR
   blocks -->|"each rank fetches its own blocks"| trainer
 ```
 
+**Reading the diagram.** Everything lives in one folder or bucket. The producer writes block files into `blocks/` and, once it has `W` of them, commits one segment file into `log/` listing those blocks in shuffled order; in batch mode it does this for the whole dataset before training starts and adds `_END`, in streaming mode it keeps going. The trainer ranks read the segment files in numerical order, fetch the blocks each segment names, and, if the next segment file does not exist yet, simply wait for it. The producer and the trainer never talk to each other directly; the files are the only channel.
+
 ### Dealing a segment to the ranks
 
-Inside a segment, blocks are dealt to ranks like cards: position `i` goes to rank `i mod world_size`, at step `i div world_size`. Each rank's cards are its **lane**, and it fetches them itself from the block store with a small prefetching loader. There is no coordinator and no lockstep beyond the all-reduce that DDP already does. Because `W` is chosen as a multiple of the number of workers, every rank gets exactly `W / world_size` blocks per segment and nothing is left over.
+Inside a segment, blocks are dealt to ranks like cards: position `i` goes to rank `i mod world_size`, at step `i div world_size`. Each rank's cards are its **lane**, and it fetches them itself from the block store with a small prefetching loader. There is no coordinator and no lockstep beyond the all-reduce that DDP already does. Because `W` is chosen as a multiple of the number of workers, every rank gets exactly `W / world_size` blocks per segment and nothing is left over. The example below uses `W = 12` and three workers, so a segment is four steps long; the same numbers are used in every diagram that follows.
 
 ```mermaid
 flowchart LR
-  seg["segment 2 (W = 9, shuffled):<br/>b17 b03 b42 b08 b25 b31 b11 b06 b19"]
-  seg --> r0["rank 0 lane: b17 b08 b11"]
-  seg --> r1["rank 1 lane: b03 b25 b06"]
-  seg --> r2["rank 2 lane: b42 b31 b19"]
-  r0 --> s["step 0: b17 b03 b42 → all-reduce → update<br/>step 1: b08 b25 b31 → all-reduce → update<br/>step 2: b11 b06 b19 → all-reduce → update"]
+  seg["segment 2 (W = 12, shuffled):<br/>b17 b03 b42 b08 b25 b31 b11 b06 b19 b27 b02 b34"]
+  seg --> r0["rank 0 lane: b17 b08 b11 b27"]
+  seg --> r1["rank 1 lane: b03 b25 b06 b02"]
+  seg --> r2["rank 2 lane: b42 b31 b19 b34"]
+  r0 --> s["step 0: b17 b03 b42 → all-reduce → update<br/>step 1: b08 b25 b31 → all-reduce → update<br/>step 2: b11 b06 b19 → all-reduce → update<br/>step 3: b27 b02 b34 → all-reduce → update"]
   r1 --> s
   r2 --> s
 ```
 
+**Reading the diagram.** The segment's twelve blocks are listed in the order the writer committed them. Dealing is round-robin: the first block goes to rank 0, the second to rank 1, the third to rank 2, the fourth back to rank 0, and so on, which gives each rank a lane of four blocks. The right-hand box regroups the same blocks by step: at step 0 the three ranks train on `b17`, `b03`, `b42` simultaneously, average their gradients, and update; then step 1, and so on. Reading down a lane gives one rank's view; reading across a step gives the whole world's view.
+
 So the units nest like this: a **row** is one example; a **block** is one rank's batch; a **step** is `world_size` blocks, one per rank, ending in the gradient all-reduce and one weight update; a **segment** is `W` blocks shuffled together, and the place where the "ingredients" can change (new hard negatives, a new seed); and the **log** is the whole sequence of segments. Gradients are averaged at every step. Nothing about the model is communicated at segment boundaries; those are purely about data.
+
+Here is the whole hierarchy with the example numbers. Positions count from the start of the log, so segment 2 covers positions 24 to 35; each step takes the next three positions, one per rank; and a position is one block, which is one Parquet file of, say, 32 rows.
+
+```mermaid
+flowchart LR
+  s0["segment 0<br/>positions 0–11"] --> s1["segment 1<br/>positions 12–23"] --> s2["segment 2<br/>positions 24–35"] --> s3["segment 3 …<br/>(batch mode ends with _END)"]
+  s2 ==> seg
+  subgraph seg["segment 2 = W = 12 blocks, shuffled together when written (log/00000002.json)"]
+    direction TB
+    st0["step 0 · positions 24 25 26<br/>rank 0: b17 · rank 1: b03 · rank 2: b42<br/>→ all-reduce → update"]
+    st1["step 1 · positions 27 28 29<br/>rank 0: b08 · rank 1: b25 · rank 2: b31<br/>→ all-reduce → update"]
+    st2["step 2 · positions 30 31 32<br/>rank 0: b11 · rank 1: b06 · rank 2: b19<br/>→ all-reduce → update"]
+    st3["step 3 · positions 33 34 35<br/>rank 0: b27 · rank 1: b02 · rank 2: b34<br/>→ all-reduce → update"]
+    st0 --> st1 --> st2 --> st3
+  end
+  seg -.-> blk["one block, e.g. b08 = blocks/b08.parquet<br/>= rank 0's batch at step 1<br/>= 32 rows, each carrying block_id = b08"]
+```
+
+**Reading the diagram.** The bottom row is the log: segments 0, 1, 2, … in the order the writer committed them, each owning twelve consecutive positions. Segment 2 is opened up in the box: its twelve blocks are already in their shuffled order, and they are consumed three at a time, one per rank, as steps 0 to 3. Each step ends with the gradient all-reduce and one weight update, so there are exactly four updates per segment with three workers. The dotted arrow picks out one block, `b08`: it is position 27, it is rank 0's batch at step 1, and on disk it is a single Parquet file of 32 rows that all carry `block_id = b08`. Nothing about the model is communicated at the segment boundary; that boundary is only where the data ingredients may change and where a hook may run.
 
 ### The ledger
 
-Every checkpoint carries a tiny file called the **ledger**: which `segment` we are in, the `cursor` (how many steps of that segment are done), and the `world_size` at the time. Because `report` is a barrier, all ranks are at the same step whenever a checkpoint is written, so this one small number describes the data position for the whole world. Resuming means opening the same segment file, skipping the first `cursor × world_size` positions, and re-dealing the rest, and every later segment, over however many workers there are *now*.
+Every checkpoint carries a tiny file called the **ledger**: which `segment` we are in, the `cursor` (how many steps of that segment are done), and the `world_size` at the time. Because `report` is a barrier, all ranks are at the same step whenever a checkpoint is written, so this one small number describes the data position for the whole world. Resuming means opening the same segment file, skipping the first `cursor × world_size` positions, and re-dealing the rest, and every later segment, over however many workers there are *now*. Continuing the example: a checkpoint taken after step 1 of segment 2 says `{segment 2, cursor 2, world_size 3}`, meaning positions 24 to 29 are done.
 
 ```mermaid
 flowchart TB
-  ck["checkpoint: weights + ledger {segment 2, cursor 4, world_size 4}"]
-  ck --> f["failure, or resize from 4 to 3 workers"]
-  f --> reopen["reopen log/00000002.json (immutable, so identical)"]
-  reopen --> skip["skip positions 0 … 15 of the segment (4 steps × 4 ranks)"]
-  skip --> deal["deal positions 16 … over 3 ranks, then segment 3, 4, …"]
-  deal --> go["continue"]
+  ck["last checkpoint: weights + ledger {segment 2, cursor 2, world_size 3}<br/>= positions 24–29 (b17 b03 b42 b08 b25 b31) are done"]
+  ck --> f["worker dies during step 3, or the run is resized from 3 to 2 workers"]
+  f --> reopen["reopen log/00000002.json (immutable, so the same 12 blocks in the same order)"]
+  reopen --> skip["skip 2 × 3 = 6 positions (24–29)"]
+  skip --> deal["deal positions 30–35 over 2 ranks:<br/>step 0: b11 b06 · step 1: b19 b27 · step 2: b02 b34<br/>then segment 3, 4, …"]
+  deal --> replay["only b11 b06 b19 (step 2 of the old run) is trained twice;<br/>with EveryKSteps(1) nothing would be"]
 ```
+
+**Reading the diagram.** The run last checkpointed after step 1 of segment 2, so the ledger says `cursor 2` with `world_size 3`: six positions, 24 to 29, are done. Then something interrupts the run during step 3 (a worker dies, or the world is resized from three workers to two). On restart the trainer reopens the same segment file, which cannot have changed, skips the six finished positions, and deals the remaining six over the two ranks that exist now: three steps instead of two. The blocks of old step 2 (`b11 b06 b19`) had been trained on but not yet checkpointed, so they are trained a second time; that replay is the whole cost of the failure, and a tighter checkpoint policy makes it smaller.
 
 The only data replayed is whatever ran between the last checkpoint and the failure, which you control with the checkpoint cadence. That is the same guarantee Anyscale's mid-epoch resumption gives, without tracking per-row ids, and it survives a change in world size, which per-rank iterator state does not. In streaming mode this adds one requirement: a segment must not be deleted until a later checkpoint exists, so that a replay can still find its blocks. distrainer's garbage collector keeps a configurable number of segments behind the latest checkpoint.
 
 ### The checkpoint policy
 
 Because progress is counted in steps, "when to checkpoint" becomes a plain rule: every K steps, at the end of each segment, at the end of each pass over the data, or a time budget. Rules based on indices need no communication at all; every rank computes the same answer. A time-based rule is decided by rank 0 and broadcast so the ranks agree. Uploads to S3 run in a background thread so frequent checkpoints do not stall training.
+
+With the example numbers, here is where each policy would save during segment 2. Every step boundary is a legal checkpoint because every rank has just finished the same step; the policy only decides which of those boundaries to use. Each ledger value shown is what a checkpoint written at that point would contain.
+
+```mermaid
+flowchart LR
+  subgraph seg["segment 2, world_size = 3 (4 steps of 3 blocks)"]
+    direction LR
+    st0["step 0<br/>b17 b03 b42"] --> c0{{"ledger<br/>{seg 2, cursor 1, ws 3}"}}
+    c0 --> st1["step 1<br/>b08 b25 b31"] --> c1{{"ledger<br/>{seg 2, cursor 2, ws 3}"}}
+    c1 --> st2["step 2<br/>b11 b06 b19"] --> c2{{"ledger<br/>{seg 2, cursor 3, ws 3}"}}
+    c2 --> st3["step 3<br/>b27 b02 b34"] --> c3{{"ledger<br/>{seg 2, cursor 4, ws 3}"}}
+  end
+  c3 --> hook["segment end: hook runs (re-mine, append segment 3),<br/>then everyone reads segment 3"]
+  ek["EveryKSteps(2) saves here"] -.-> c1
+  ek -.-> c3
+  se["SegmentEnd saves here"] -.-> c3
+  ev["EveryKSteps(1) saves at every one"] -.-> c0
+```
+
+**Reading the diagram.** Time runs left to right through segment 2. After each step every rank has finished the same block, so each of the four hexagons is a legal place to write a checkpoint, and the ledger value shown is exactly what that checkpoint would record: the segment, how many steps of it are done, and the world size. The dashed arrows show which of those boundaries three different policies would choose: `EveryKSteps(1)` saves at every hexagon, `EveryKSteps(2)` at the second and fourth, `SegmentEnd` only at the fourth. With `Any([EveryKSteps(2), SegmentEnd])` you get the union. After the last step the segment hook runs on rank 0 (for example re-mining and appending segment 3) while the other ranks wait, and then everyone moves on to segment 3.
 
 ### Segment hooks
 
