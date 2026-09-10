@@ -93,7 +93,9 @@ flowchart TB
 
 **Log** — the ordered set of segments plus an optional `store/log/_END` marker meaning "the producer is finished". A reader that reaches the end of the last segment and finds no `_END` waits for the next segment (streaming); if `_END` is present the run is complete.
 
-**Writer** — the single process allowed to append segments to a log. It buffers `W` blocks, permutes them with `random.Random(hash((seed, seq)))`, writes the block files, then commits the segment file atomically (temp name + rename locally; single `put` on S3). Batch mode = a writer that emits the whole corpus at t=0 (one `pass` per epoch, seeds advancing); streaming mode = a writer that runs alongside training; the re-mining hook is a writer too.
+**Writer** — the single process allowed to append segments to a log. It buffers `W` blocks, permutes them with `random.Random(hash((seed, seq)))`, writes the block files, then commits the segment file atomically (temp name + rename locally; single `put` on S3). Batch mode = a writer that emits the whole corpus at t=0, one `pass` per epoch: for each pass it first permutes the *entire* block list with `Random(hash((seed, pass)))` and only then cuts it into segments of `W`, so both segment membership and within-segment order change from pass to pass (positions keep counting up across passes). Streaming mode = a writer that runs alongside training; segment membership is then decided by arrival order, and a writer may hold a **shuffle buffer** of `k*W` blocks and commit each segment by sampling `W` of them to mix beyond the window (config `log.shuffle_buffer_segments`, default 1). The re-mining hook is a writer too.
+
+**Segments are always complete before they are trained on.** A segment file is written only after all of its `W` block files exist, in one atomic operation, and the trainer reads only committed segment files. So in both modes the segment being trained on is fully known, which is what makes resume well defined: the ledger names a segment and a cursor, the segment file cannot have changed, and the blocks it names are retained until a later checkpoint exists. The writer therefore needs to be exactly one segment ahead of the trainer, never more; `W` is also the streaming latency (the trainer cannot start a segment until `W` blocks have arrived), so streaming logs typically use a smaller `W` than batch logs. If a writer crashes mid-segment, block files not referenced from any committed segment are orphans: ignored by readers and removed by `gc`.
 
 **Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (If a final partial segment is allowed at `_END`, its last `len mod n` positions are dropped, `drop_last` semantics.)
 
@@ -254,7 +256,9 @@ class SegmentHook(Protocol):
 
 # writer.py
 class BatchWriter:
-    """Turn a finished corpus of blocks into a log: pass p writes ceil(N/W) segments with seed advanced by p."""
+    """Turn a finished corpus of blocks into a log. For each pass p: globally permute all N blocks with
+    Random(hash((seed, p))), cut into ceil(N/W) segments, append each (within-segment order is then
+    re-shuffled by BlockLog.append). Segment membership therefore differs between passes."""
     def __init__(self, log: BlockLog, blocks: list[BlockRef], passes: int = 1): ...
     def run(self) -> None      # append(...) for each segment, then end()
 
@@ -377,6 +381,7 @@ log:
   passes: 2                 # batch mode: BatchWriter passes over the corpus (epochs); ignored in streaming
   wait_poll_s: 1.0          # streaming: how often ranks poll for the next segment
   retention_segments: 4     # gc keeps this many segments behind the last checkpointed one
+  shuffle_buffer_segments: 1  # streaming writers: buffer k*W blocks and sample W per segment (1 = plain window)
 checkpoint:
   policy: any               # any | every_k | segment_end | pass_end | time
   every_k: 4
