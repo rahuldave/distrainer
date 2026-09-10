@@ -55,9 +55,9 @@ The next four are **collectives**: operations that every worker in the world par
 ```mermaid
 flowchart TB
   subgraph broadcast["broadcast"]
-    b0["rank 0: W"] --> b1["rank 1: W"]
-    b0 --> b2["rank 2: W"]
-    b0 --> b3["rank 3: W"]
+    b0["rank 0: θ"] --> b1["rank 1: θ"]
+    b0 --> b2["rank 2: θ"]
+    b0 --> b3["rank 3: θ"]
   end
   subgraph scatter["scatter"]
     s0["rank 0: [a,b,c,d]"] --> s1["rank 1: b"]
@@ -67,7 +67,7 @@ flowchart TB
   end
 ```
 
-**Reading the diagram.** In the broadcast, rank 0 holds the value `W` and afterwards every rank holds the same `W`; nothing is split. In the scatter, rank 0 holds a list of four items and afterwards each rank holds exactly one of them, including rank 0 keeping the first.
+**Reading the diagram.** In the broadcast, rank 0 holds some value, drawn here as θ (theta, the usual symbol for a model's weights), and afterwards every rank holds the same θ; nothing is split. In the scatter, rank 0 holds a list of four items and afterwards each rank holds exactly one of them, including rank 0 keeping the first.
 
 ```mermaid
 flowchart TB
@@ -106,16 +106,16 @@ sequenceDiagram
   participant R0 as rank 0
   participant R1 as rank 1
   participant R2 as rank 2
-  Note over R0,R2: all hold identical model weights W
+  Note over R0,R2: all hold identical model weights θ
   R0->>R0: forward+backward on batch A → gradient gA
   R1->>R1: forward+backward on batch B → gradient gB
   R2->>R2: forward+backward on batch C → gradient gC
   R0->>R2: all-reduce, g = mean(gA, gB, gC)
-  Note over R0,R2: every rank applies W ← W − lr·g
+  Note over R0,R2: every rank applies θ ← θ − lr·g
   Note over R0,R2: weights still identical, so the next step starts in sync
 ```
 
-**Reading the diagram.** Three ranks start with identical weights. Each computes a gradient from its own batch; the horizontal arrow is the all-reduce that replaces all three gradients with their mean; then each rank applies the identical update. The final note is the invariant that makes data parallelism work: because the update was identical, the weights are still identical, and the next step can begin without any further synchronization.
+**Reading the diagram.** Three ranks start with identical weights θ. Each computes a gradient from its own batch; the horizontal arrow is the all-reduce that replaces all three gradients with their mean; then each rank applies the identical update θ ← θ − lr·g, where lr is the learning rate and g the averaged gradient. The final note is the invariant that makes data parallelism work: because the update was identical, the weights are still identical, and the next step can begin without any further synchronization.
 
 The two questions from Part 1 are answered like this: *who works on which data* is solved by giving each rank a different slice, its **shard**, and *how the workers agree* is solved by the all-reduce. The effective batch size is the per-worker batch times the world size, which is why learning rates are usually scaled when you add workers.
 
@@ -201,7 +201,7 @@ In distrainer a block is a pre-built batch of rows with a stable name, its `bloc
 
 ### The block log: batch and streaming are the same thing
 
-Somebody has to decide the *order* in which blocks are trained on. distrainer stores that order as a **log**: an append-only list of blocks, written in groups called **segments**. A segment is a fixed number of blocks, `W`, say 256. When a segment is written, its `W` blocks are shuffled amongst each other using a seed, and the shuffled order is saved in a small file, `log/00000007.json` for segment 7. Once written, a segment never changes.
+Somebody has to decide the *order* in which blocks are trained on. distrainer stores that order as a **log**: an append-only list of blocks, written in groups called **segments**. A segment holds a fixed number of blocks; this document calls that number **`W`** (for *window*, because it is the window within which shuffling happens). A typical `W` is a few hundred; the examples below use `W = 12` so the pictures stay small. When a segment is written, its `W` blocks are shuffled amongst each other using a seed, and the shuffled order is saved in a small file, `log/00000007.json` for segment 7. Once written, a segment never changes.
 
 That one structure covers both ways data can arrive. In **batch mode**, all of the data exists before training starts, so the whole log is written up front, every segment at once, and an `_END` marker says "that is everything". In **streaming mode**, blocks are being produced while training runs (by a miner that keeps finding new hard negatives, say), so segments are appended as they fill up and there is no `_END` until the producer stops. The trainer does not care which mode it is in. It reads segment 0, then segment 1, and when it reaches a segment that does not exist yet it waits for it to appear. That waiting is the only difference between the two modes, and it is invisible to the training code.
 
@@ -224,7 +224,7 @@ flowchart LR
 
 ### Dealing a segment to the ranks
 
-Inside a segment, blocks are dealt to ranks like cards: position `i` goes to rank `i mod world_size`, at step `i div world_size`. Each rank's cards are its **lane**, and it fetches them itself from the block store with a small prefetching loader. There is no coordinator and no lockstep beyond the all-reduce that DDP already does. Because `W` is chosen as a multiple of the number of workers, every rank gets exactly `W / world_size` blocks per segment and nothing is left over. The example below uses `W = 12` and three workers, so a segment is four steps long; the same numbers are used in every diagram that follows.
+Inside a segment, blocks are dealt to ranks like cards: position `i` goes to rank `i mod world_size`, at step `i div world_size`. Each rank's cards are its **lane**, and it fetches them itself from the block store with a small prefetching loader. There is no coordinator and no lockstep beyond the all-reduce that DDP already does. Because `W` is chosen as a multiple of the number of workers, every rank gets exactly `W / world_size` blocks per segment and nothing is left over. The example below uses `W = 12` blocks per segment and three workers, so a segment is `12 / 3 = 4` steps long; the same numbers are used in every diagram that follows.
 
 ```mermaid
 flowchart LR
@@ -300,7 +300,7 @@ flowchart LR
   ev["EveryKSteps(1) saves at every one"] -.-> c0
 ```
 
-**Reading the diagram.** Time runs left to right through segment 2. After each step every rank has finished the same block, so each of the four hexagons is a legal place to write a checkpoint, and the ledger value shown is exactly what that checkpoint would record: the segment, how many steps of it are done, and the world size. The dashed arrows show which of those boundaries three different policies would choose: `EveryKSteps(1)` saves at every hexagon, `EveryKSteps(2)` at the second and fourth, `SegmentEnd` only at the fourth. With `Any([EveryKSteps(2), SegmentEnd])` you get the union. After the last step the segment hook runs on rank 0 (for example re-mining and appending segment 3) while the other ranks wait, and then everyone moves on to segment 3.
+**Reading the diagram.** Time runs left to right through segment 2. After each step every rank has finished the same block, so each of the four hexagons is a legal place to write a checkpoint, and the ledger value shown is exactly what that checkpoint would record: the segment, how many steps of it are done (`cursor`), and the world size (abbreviated `ws` in the picture). The dashed arrows show which of those boundaries three different policies would choose: `EveryKSteps(1)` saves at every hexagon, `EveryKSteps(2)` at the second and fourth, `SegmentEnd` only at the fourth. With `Any([EveryKSteps(2), SegmentEnd])` you get the union. After the last step the segment hook runs on rank 0 (for example re-mining and appending segment 3) while the other ranks wait, and then everyone moves on to segment 3.
 
 ### Segment hooks
 

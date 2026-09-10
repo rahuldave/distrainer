@@ -27,12 +27,12 @@ The unit hierarchy, smallest to largest:
 - a **row** is one training example;
 - a **block** is one rank's batch, stored as one Parquet file; the row → block association is simply which file the row is in;
 - a **step** is `world_size` blocks, one per rank, ending in the gradient all-reduce and one optimizer update;
-- a **segment** is `W` blocks that were shuffled amongst each other when written; it is the sub-epoch unit where hooks (re-mining), re-shuffling, and segment-end checkpoints happen. "Chunk" and "segment" mean the same thing; this document says segment;
+- a **segment** is a fixed number of blocks that were shuffled amongst each other when written; that number is called `W` (window) throughout this spec, is set once per log, and is typically a few hundred; it is the sub-epoch unit where hooks (re-mining), re-shuffling, and segment-end checkpoints happen. "Chunk" and "segment" mean the same thing; this document says segment;
 - the **log** is the ordered sequence of segments: the whole dataset in batch mode, the stream so far in streaming mode.
 
 Progress is one number: how many steps of the current segment are done. Because every rank finishes a step at the same moment (the all-reduce and `report` are barriers), that single number describes the data position for the whole world, and it stays valid when the number of workers changes.
 
-Worked example used throughout this spec: `W = 12`, `world_size = 3`, blocks of 32 rows. Segment 2 holds positions 24–35 and is four steps long.
+Worked example used throughout this spec: `W = 12` blocks per segment, `world_size = 3` workers (written `n` in formulas below), blocks of 32 rows. Segment 2 holds positions 24–35 and is four steps long.
 
 ```mermaid
 flowchart LR
@@ -69,7 +69,7 @@ flowchart LR
   ev["EveryKSteps(1) saves at every one"] -.-> c0
 ```
 
-**Reading the diagram.** Time runs left to right through segment 2. After each step every rank has finished the same block, so each of the four hexagons is a legal place to write a checkpoint, and the ledger value shown is exactly what that checkpoint would record: the segment, how many steps of it are done, and the world size. The dashed arrows show which of those boundaries three different policies would choose: `EveryKSteps(1)` saves at every hexagon, `EveryKSteps(2)` at the second and fourth, `SegmentEnd` only at the fourth. With `Any([EveryKSteps(2), SegmentEnd])` you get the union. After the last step the segment hook runs on rank 0 (for example re-mining and appending segment 3) while the other ranks wait, and then everyone moves on to segment 3.
+**Reading the diagram.** Time runs left to right through segment 2. After each step every rank has finished the same block, so each of the four hexagons is a legal place to write a checkpoint, and the ledger value shown is exactly what that checkpoint would record: the segment, how many steps of it are done (`cursor`), and the world size (abbreviated `ws` in the picture). The dashed arrows show which of those boundaries three different policies would choose: `EveryKSteps(1)` saves at every hexagon, `EveryKSteps(2)` at the second and fourth, `SegmentEnd` only at the fourth. With `Any([EveryKSteps(2), SegmentEnd])` you get the union. After the last step the segment hook runs on rank 0 (for example re-mining and appending segment 3) while the other ranks wait, and then everyone moves on to segment 3.
 
 Resume from the checkpoint taken after step 1 (`{segment 2, cursor 2, world_size 3}`), including a resize from 3 to 2 workers:
 
@@ -95,7 +95,7 @@ flowchart TB
 
 **Writer** — the single process allowed to append segments to a log. It buffers `W` blocks, permutes them with `random.Random(hash((seed, seq)))`, writes the block files, then commits the segment file atomically (temp name + rename locally; single `put` on S3). Batch mode = a writer that emits the whole corpus at t=0 (one `pass` per epoch, seeds advancing); streaming mode = a writer that runs alongside training; the re-mining hook is a writer too.
 
-**Assignment rule** — global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (If a final partial segment is allowed at `_END`, its last `len mod n` positions are dropped, `drop_last` semantics.)
+**Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (If a final partial segment is allowed at `_END`, its last `len mod n` positions are dropped, `drop_last` semantics.)
 
 **Step** — one block per rank, all ranks, ending in the all-reduce + optimizer update, followed by `ray.train.report` (a barrier).
 
