@@ -3,6 +3,24 @@
 *Draft, September 9, 2026. Companion to `ray-sub-epoch-training-report.md`. Superseded in detail by `distrainer-spec.md` (rev 2).*
 
 > **Revision note (rev 2 of the spec).** The "Planner / BlockStore namespaces" described below were replaced by a single **block log**: an append-only sequence of immutable *segments*, each a file listing `W` blocks in already-shuffled order, stored next to the block Parquet files on a local folder or S3. The writer (batch: everything at t=0; streaming: as blocks arrive; the re-mining hook is a writer too) is the only process that appends; the trainer only reads, and waits at the end of the log if the next segment is not there yet. Batch and streaming ingest therefore share one code path, the ledger becomes `(segment, cursor, world_size)`, and "chunk" is now called "segment". In plain words: the log is the ordered list of batches to train on, written in shuffled groups; the trainer walks it and remembers only how far it got. See spec sections 2–5.
+>
+> The unit hierarchy with the spec's worked example (`W = 12`, three workers):
+
+```mermaid
+flowchart LR
+  s0["segment 0<br/>positions 0–11"] --> s1["segment 1<br/>positions 12–23"] --> s2["segment 2<br/>positions 24–35"] --> s3["segment 3 …<br/>(batch mode ends with _END)"]
+  s2 ==> seg
+  subgraph seg["segment 2 = W = 12 blocks, shuffled together when written (log/00000002.json)"]
+    direction TB
+    st0["step 0 · positions 24 25 26<br/>rank 0: b17 · rank 1: b03 · rank 2: b42<br/>→ all-reduce → update"]
+    st1["step 1 · positions 27 28 29<br/>rank 0: b08 · rank 1: b25 · rank 2: b31<br/>→ all-reduce → update"]
+    st2["step 2 · positions 30 31 32<br/>rank 0: b11 · rank 1: b06 · rank 2: b19<br/>→ all-reduce → update"]
+    st3["step 3 · positions 33 34 35<br/>rank 0: b27 · rank 1: b02 · rank 2: b34<br/>→ all-reduce → update"]
+    st0 --> st1 --> st2 --> st3
+  end
+  seg -.-> blk["one block, e.g. b08 = blocks/b08.parquet<br/>= rank 0's batch at step 1<br/>= 32 rows, each carrying block_id = b08"]
+```
+
 
 ## Goal
 
