@@ -15,6 +15,9 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 - [`docs/running-modes.md`](docs/running-modes.md) — the four ways to run the same code: laptop
   single-node Ray, OrbStack containers as Ray nodes, uncloud machines, KubeRay; where the driver
   runs, which storage works where, how failures are injected, which scenarios each validates.
+- [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
+  their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
+  status.
 - [`docs/distrainer-spec.md`](docs/distrainer-spec.md) — the v0.1 specification: interfaces,
   training loop, checkpoint/storage layout, the docker compose harness, verification scenarios,
   milestones, and the development workflow.

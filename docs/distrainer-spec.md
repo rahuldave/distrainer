@@ -494,7 +494,7 @@ OrbStack notes: images build arm64-native (no emulation); the development Mac ha
 
 ## 10. Verification scenarios
 
-Each scenario runs the toy workload with a distinct `run_name` and then asserts on the audit logs plus the ledger of the final checkpoint. `integration_tests/cluster/check_audit.py` implements the checks.
+Each scenario runs the toy workload with a distinct `run_name` and then asserts on the audit logs plus the ledger of the final checkpoint. `integration_tests/cluster/check_audit.py` implements the checks; `docs/examples-and-scenarios.md` describes how each scenario is driven, what exactly it asserts, and its current status.
 
 | # | Scenario | Drive | Assertions |
 |---|---|---|---|
