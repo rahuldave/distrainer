@@ -107,6 +107,8 @@ can fail on a tutorial.
 - Streaming to S3 is covered by S11s3 (`harness-stream-minio.yaml`: the producer puts segment
   files to MinIO while the ranks poll the bucket, gc deletes objects); the re-mining hook has not
   been run against a bucket, but it uses the same `BlockLog.append` path.
+- No orphan sweep: block files a crashed writer left without a committed segment are never
+  deleted (`docs/retention.md`); the spec's earlier claim that `gc` removes them was corrected.
 - The upstream skills bundle issues listed in the M3 handoff (fix in
   `rahuldave/agent_gest_git_skills`, not here).
 

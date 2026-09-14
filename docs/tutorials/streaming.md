@@ -138,7 +138,8 @@ Segments 0 to 4 and their blocks are gone (`ls blocks/hello_stream/blocks | wc -
 segments' worth). Resuming from a checkpoint that points into the
 deleted window fails with a clear error rather than silently training nothing. Set
 `gc_blocks: false` if a producer will reference old blocks again in segments it has not written
-yet; `distrainer gc <store> --keep-from N` does the same by hand.
+yet; `distrainer gc <store> --keep-from N` does the same by hand. `docs/retention.md` is the
+reference: the exact rule, `num_to_keep` and what stays resumable, cost on S3, non-goals.
 
 ## 4. The trainer as its own producer: segment hooks
 

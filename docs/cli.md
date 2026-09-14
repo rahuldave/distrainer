@@ -75,7 +75,8 @@ Exit status 1 when there is no log under `<store>`.
 Delete the segment files below sequence number `N` and, unless `--keep-blocks` is given, the
 block files that no remaining segment references. This is the manual form of what the trainer
 does at every segment end when `log.gc: true` (`N` = segment of the last checkpoint minus
-`log.retention_segments`). Prints the deleted sequence numbers.
+`log.retention_segments`). Prints the deleted sequence numbers. `docs/retention.md` has the
+rules and the interaction with checkpoints.
 
 ## Example scripts
 

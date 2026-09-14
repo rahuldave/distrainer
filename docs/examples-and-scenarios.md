@@ -143,7 +143,7 @@ list of problems (empty means pass):
 | `check_s6` | S1 holds; every segment from `initial_segments` on carries `writer: remine` and `mined_after_segment` = the previous one, was committed after rank 0's last record of that previous segment and before the first record that consumed it, and its records name exactly its blocks, none from the base corpus |
 | `check_s8` | one attempt with S1 dealing; at least two time-budget checkpoints; rank 0's `reports` equals the number of checkpoints (plus one final metrics-only report); every ledger is a step boundary and matches its directory name |
 | `check_s11` | S1 holds; no segment was consumed before the producer committed it (commit times parsed from the producer's output, so gc'd segments count too); every expected segment was consumed; some two consecutive segments started at least `sleep - poll - 1 s` apart, so the ranks waited for the producer at least once |
-| `check_retention` | after a run with `log.gc`: the log starts exactly `retention_segments` behind the last checkpoint's segment, is contiguous, and the block directory holds exactly the blocks the kept segments reference |
+| `check_retention` | after a run with `log.gc`: the log starts exactly `retention_segments` behind the last checkpoint's segment, is contiguous, and the block directory holds exactly the blocks the kept segments reference (`docs/retention.md` has the rule) |
 
 The `2*every_k*n_old` term is the price of ASYNC checkpoint upload: a checkpoint reported just
 before a failure can still be in flight, so the controller may resume from the one before it.

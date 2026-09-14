@@ -16,6 +16,10 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   it, read checkpoints and the ledger, resume with a different number of workers, passes.
 - [`docs/tutorials/streaming.md`](docs/tutorials/streaming.md) — tutorial 2: train on a log that
   is still being written (an external producer, the re-mining segment hook), retention `gc`.
+- [`docs/retention.md`](docs/retention.md) — the `gc` reference: what is deleted when, why the
+  window is anchored on the last checkpoint, `num_to_keep` and what stays resumable, S3, non-goals.
+- [`docs/cli.md`](docs/cli.md) — every command and flag: the `distrainer` CLI, the example
+  scripts, the scenario checker, the `just` targets.
 - [`docs/running-modes.md`](docs/running-modes.md) — the four ways to run the same code: laptop
   single-node Ray, OrbStack containers as Ray nodes, uncloud machines, KubeRay; where the driver
   runs, which storage works where, how failures are injected, which scenarios each validates.
