@@ -14,6 +14,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
@@ -22,6 +23,7 @@ from distrainer.audit import read_audit  # noqa: E402
 from distrainer.config import load_config  # noqa: E402
 from distrainer.storage import resolve  # noqa: E402
 from integration_tests.cluster.check_audit import (  # noqa: E402
+    by_attempt,
     check_recovery,
     summarize,
 )
@@ -33,6 +35,7 @@ _cfg = load_config(str(ROOT / HARNESS_CFG))
 _minio_cfg = load_config(str(ROOT / MINIO_CFG))
 W = _cfg.log.W
 SEGMENTS = int(_cfg.train["n_blocks"]) // W  # segments per pass in the harness workload
+MINIO_SEGMENTS = int(_minio_cfg.train["n_blocks"]) // _minio_cfg.log.W
 S3_BLOCKS = f"s3://{_minio_cfg.store_root}"
 S3_RUNS = f"s3://{_minio_cfg.storage_path}"
 
@@ -44,6 +47,7 @@ def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) ->
         capture_output=True,
         text=True,
         env={**os.environ, **(env or {})},
+        timeout=600,
     )
     if check and proc.returncode != 0:
         raise RuntimeError(
@@ -84,26 +88,25 @@ def audit_dir(run_name: str) -> Path:
     return shared() / "blocks" / "audit" / run_name
 
 
-def start_train(cfg: str, *overrides: str, env: dict[str, str] | None = None) -> subprocess.Popen:
+def start_train(
+    cfg: str, *overrides: str, env: dict[str, str] | None = None, name: str = "train"
+) -> subprocess.Popen:
+    """Start train.py inside the head; its output streams to .harness/logs/<name>.log (a pipe
+    that nobody drains while waiting would fill up and stall the trainer)."""
     cmd = [
-        str(DRIVER),
-        "exec-head",
-        "python",
-        "examples/hello_blocks/train.py",
-        "--config",
-        cfg,
-        "--no-check",
+        str(DRIVER), "exec-head", "python", "examples/hello_blocks/train.py",
+        "--config", cfg, "--no-check",
     ]
     for o in overrides:
         cmd += ["--set", o]
+    logs = ROOT / ".harness" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    log = open(logs / f"{name}.log", "w")  # noqa: SIM115 (closed in finish)
     proc = subprocess.Popen(
-        cmd,
-        cwd=ROOT,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
+        cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True,
         env={**os.environ, **(env or {})},
     )
+    _logs[proc.pid] = (logs / f"{name}.log", log)
     _running.append(proc)
     return proc
 
@@ -111,10 +114,23 @@ def start_train(cfg: str, *overrides: str, env: dict[str, str] | None = None) ->
 _running: list[subprocess.Popen] = []  # training processes to kill if a scenario aborts
 
 
+_logs: dict[int, tuple[Path, Any]] = {}  # pid -> (log path, open file)
+
+
+def _output(proc: subprocess.Popen) -> str:
+    entry = _logs.get(proc.pid)
+    if entry is None:
+        return ""
+    path, log_file = entry
+    log_file.flush()
+    return path.read_text() if path.exists() else ""
+
+
 def _check_alive(proc: subprocess.Popen | None) -> None:
     if proc is not None and proc.poll() is not None and proc.returncode != 0:
-        out = proc.stdout.read() if proc.stdout else ""
-        raise RuntimeError(f"training exited early ({proc.returncode}):\n{out[-2000:]}")
+        raise RuntimeError(
+            f"training exited early ({proc.returncode}):\n{_output(proc)[-2000:]}"
+        )
 
 
 def wait_for_blocks(
@@ -164,17 +180,20 @@ def wait_for_blocks_s3(
 
 def finish(proc: subprocess.Popen, timeout_s: float = 600, name: str = "train") -> str:
     try:
-        out, _ = proc.communicate(timeout=timeout_s)
+        proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
         proc.kill()
-        out, _ = proc.communicate()
-        raise RuntimeError(f"training did not finish within {timeout_s}s:\n{out[-2000:]}") from None
+        proc.wait()
+        raise RuntimeError(
+            f"training did not finish within {timeout_s}s:\n{_output(proc)[-2000:]}"
+        ) from None
     finally:
         if proc in _running:
             _running.remove(proc)
-    logs = ROOT / ".harness" / "logs"
-    logs.mkdir(parents=True, exist_ok=True)
-    (logs / f"{name}.log").write_text(out)
+        entry = _logs.pop(proc.pid, None)
+        if entry is not None:
+            entry[1].close()
+    out = _output(proc)
     print(f"driver output: .harness/logs/{name}.log")
     if proc.returncode != 0:
         raise RuntimeError(f"training exited {proc.returncode}:\n{out[-2500:]}")
@@ -200,12 +219,21 @@ def ensure_blocks(cfg: str = HARNESS_CFG) -> None:
 # ---- scenarios ----
 
 
+def check_transition(records, first: int, last: int) -> list[str]:
+    """The first attempt ran at ``first`` ranks and the last at ``last``; extra restarts in
+    between (Ray may need more than one while a node's death propagates) are allowed."""
+    sizes = [attempts[0].world_size for _, attempts in sorted(by_attempt(records).items())]
+    if not sizes or sizes[0] != first or sizes[-1] != last or set(sizes) - {first, last}:
+        return [f"world sizes per attempt {sizes}, expected {first} -> ... -> {last}"]
+    return []
+
+
 def scenario_s2() -> list[str]:
     """Worker kill mid-run: the container restarts, Ray restarts the group, positions continue."""
     up(2)
     ensure_blocks()
     fresh("s2")
-    proc = start_train(HARNESS_CFG, "run_name=s2")
+    proc = start_train(HARNESS_CFG, "run_name=s2", name="s2")
     wait_for_blocks("s2", 12)  # a few steps into segment 0
     driver("kill-worker", "2")
     finish(proc, name="s2")
@@ -225,14 +253,14 @@ def scenario_s3() -> list[str]:
     up(2)
     ensure_blocks()
     fresh("s3")
-    proc = start_train(HARNESS_CFG, "run_name=s3")
+    proc = start_train(HARNESS_CFG, "run_name=s3", name="s3")
     wait_for_blocks("s3", 12, proc=proc)
     driver("scale", "3")
     finish(proc, name="s3")
     recs = records_for("s3")
     print(summarize(recs))
-    return check_recovery(
-        recs, W, every_k=2, expected_world_sizes=[2, 3], expected_segments=SEGMENTS
+    return check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS) + check_transition(
+        recs, first=2, last=3
     )
 
 
@@ -241,14 +269,14 @@ def scenario_s4() -> list[str]:
     up(3)
     ensure_blocks()
     fresh("s4")
-    proc = start_train(HARNESS_CFG, "run_name=s4")
+    proc = start_train(HARNESS_CFG, "run_name=s4", name="s4")
     wait_for_blocks("s4", 12, proc=proc)
     driver("scale", "2")
     finish(proc, name="s4")
     recs = records_for("s4")
     print(summarize(recs))
-    return check_recovery(
-        recs, W, every_k=2, expected_world_sizes=[3, 2], expected_segments=SEGMENTS
+    return check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS) + check_transition(
+        recs, first=3, last=2
     )
 
 
@@ -378,7 +406,10 @@ def scenario_s9() -> list[str]:
         MINIO_CFG,
         env=env,
     )
-    finish(start_train(MINIO_CFG, "run_name=s9", "checkpoint.num_to_keep=null", env=env), name="s9")
+    finish(
+        start_train(MINIO_CFG, "run_name=s9", "checkpoint.num_to_keep=null", env=env, name="s9"),
+        name="s9",
+    )
     driver("down", env=env)
     driver("wipe-shared", env=env)
     up(2, "minio", env=env)
@@ -412,7 +443,7 @@ def scenario_s10() -> list[str]:
         MINIO_CFG,
         env=env,
     )
-    proc = start_train(MINIO_CFG, "run_name=s10", env=env)
+    proc = start_train(MINIO_CFG, "run_name=s10", env=env, name="s10")
     wait_for_blocks_s3("s10", 24, env, proc=proc)  # a segment in, with checkpoints registered
     driver("kill-head", env=env)
     proc.communicate(timeout=120)  # the exec dies with the head
@@ -448,9 +479,15 @@ def main(argv: list[str] | None = None) -> int:
             except Exception as exc:  # report and continue with the next scenario
                 problems = [f"runner error: {exc}"]
             finally:
-                for proc in list(_running):  # a scenario that raised must not leave a run behind
-                    proc.kill()
-                    _running.remove(proc)
+                if _running:  # a scenario that raised must not leave a run behind
+                    for proc in list(_running):
+                        proc.kill()
+                        _running.remove(proc)
+                    # killing the local `docker compose exec` client does not reach the process
+                    # inside the container
+                    driver(
+                        "exec-head", "pkill", "-f", "examples/hello_blocks/train.py", check=False
+                    )
             for p in problems:
                 print(f"{name} FAIL: {p}")
             print(f"{name}: {'PASS' if not problems else 'FAIL'} ({time.monotonic() - t0:.0f}s)")

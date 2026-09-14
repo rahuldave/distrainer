@@ -1,5 +1,3 @@
-import pytest
-
 from distrainer.audit import AuditRecord
 from integration_tests.cluster.check_audit import (
     check_dealing,
@@ -132,11 +130,7 @@ def test_check_recovery_rejects_short_runs_and_duplicates_within_an_attempt():
 
 
 def test_check_resume_derives_the_start_from_the_ledger_and_world_size():
-    from integration_tests.cluster.check_audit import (
-        check_resume,
-        parse_checkpoint_name,
-        resume_start_position,
-    )
+    from integration_tests.cluster.check_audit import check_resume, resume_start_position
 
     W = 12
     # checkpoint (segment 1, 8 positions done at n=2); resumed with 3 ranks -> rounds down to 6
@@ -152,9 +146,6 @@ def test_check_resume_derives_the_start_from_the_ledger_and_world_size():
     assert check_resume(recs, W, ledger=(1, 8), expected_segments=3) == []
     assert any("expected 4" in p for p in check_resume(recs, W, ledger=(1, 8), expected_segments=4))
     assert check_resume(recs, W) == ["check_resume needs start_position or ledger"]
-    assert parse_checkpoint_name("checkpoint_g000003_p000008_n02_a01") == (3, 8, 2, 1)
-    with pytest.raises(ValueError):
-        parse_checkpoint_name("checkpoint_g000003_s0004")
 
 
 def test_expected_reports():
@@ -168,3 +159,61 @@ def test_expected_reports():
     assert expected_reports(4, 12, 2, k4) == 4 + 1  # step 4 of 6 only, plus the final report
     every = SimpleNamespace(policy="segment_end", every_k=None, report_every_step=True)
     assert expected_reports(4, 12, 2, every) == 24
+
+
+def test_checkpoint_ledgers_check_s5_and_the_cli_resume_branch(tmp_path, capsys):
+    import json
+
+    from distrainer.audit import AuditWriter
+    from distrainer.storage import StorageConfig, build_filesystem
+    from integration_tests.cluster.check_audit import check_s5, checkpoint_ledgers, main
+
+    run = tmp_path / "runs" / "r"
+    for seg, cursor, n in [(0, 2, 2), (0, 4, 2), (1, 2, 2)]:
+        d = run / f"checkpoint_g{seg:06d}_p{cursor * n:06d}_n{n:02d}_a00"
+        d.mkdir(parents=True)
+        (d / ".metadata.json").write_text(
+            json.dumps(
+                {"ledger": {"segment": seg, "cursor": cursor, "world_size": n, "run_attempt": 0}}
+            )
+        )
+    (run / "checkpoint_manager_snapshot.json").write_text("{}")
+    (run / "checkpoint_g000001_p000008_n02_a00").mkdir()  # no metadata: a partial upload
+    ledgers = checkpoint_ledgers(str(run))
+    assert sorted(ledgers) == [
+        "checkpoint_g000000_p000004_n02_a00",
+        "checkpoint_g000000_p000008_n02_a00",
+        "checkpoint_g000001_p000004_n02_a00",
+    ]
+    assert check_s5(str(run), W=8, every_k=2, expected_count=3) == []
+    assert any("expected 4" in p for p in check_s5(str(run), 8, 2, 4))
+    assert any("multiple" in p for p in check_s5(str(run), 8, 3, None))
+
+    fs, root = build_filesystem(StorageConfig(kind="local", path=str(tmp_path / "store")))
+    w = AuditWriter(fs, root, "res", 0, 0)
+    w1 = AuditWriter(fs, root, "res", 0, 1)
+    for step in range(2):
+        for rank, writer in enumerate((w, w1)):
+            writer.append(2, 1, 2 + step, 12 + step * 2 + rank, f"b{step}{rank}")
+    w.close()
+    w1.close()
+    rc = main(
+        [
+            "--store-root",
+            root,
+            "--run-name",
+            "res",
+            "--scenario",
+            "resume",
+            "--W",
+            "8",
+            "--ledger-segment",
+            "1",
+            "--ledger-positions",
+            "4",
+            "--expected-segments",
+            "2",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert rc == 0 and out.strip().endswith("resume PASS")

@@ -215,7 +215,7 @@ these placeholders with the project-specific mappings and arguments:
 ```bash
 just setup                  # uv sync --all-groups
 just fmt [path]             # ruff format
-just lint [path]            # ruff check
+just lint [path]            # ruff check, ruff format --check, bash -n over deploy/
 just typecheck              # ty check distrainer examples integration_tests
 just static                 # compileall distrainer examples tests integration_tests
 just test [target]          # pytest (default: tests/)
@@ -223,11 +223,12 @@ just regression             # pytest regression_tests/ (empty dir tolerated)
 just smoke                  # single-node ray.init(), 2 workers, examples/hello_blocks
 just contrastive            # examples/toy_contrastive (spec section 8), not part of verify
 just verify                 # lint typecheck static test regression smoke diff-check
-just up [N] / just down     # multi-node harness (driver-backed; OrbStack compose today)
-just mkbucket / just blocks / just train CFG
+just build                  # container image (once; again when uv.lock changes)
+just up [N] / just up-minio [N] / just down / just nuke   # harness (driver verbs; compose on OrbStack)
+just mkbucket / just blocks [CFG] / just train [CFG]
 just kill-worker I / just scale N
 just local-scenarios [S]    # S1, S5, S7 with hello_blocks on a local Ray cluster (no containers)
-just integration [S]        # scenario runner S1-S11 against the running harness
+just integration [S]        # cluster scenarios S2, S3, S4, S9, S10 (or all) against the running harness
 just docs                   # list docs
 git diff --check
 ```

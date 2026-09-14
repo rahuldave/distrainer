@@ -429,7 +429,7 @@ Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clust
 
 `docs/running-modes.md` compares this harness with the laptop single-node mode (M2), uncloud, and KubeRay: where the driver runs, which storage each can use, how failures are injected, and which scenarios each mode validates.
 
-**Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `up N`, `down`, `exec-head CMD...`, `kill-worker I`, `scale N`, `cp-from-head SRC DST`, `endpoint` (dashboard/S3 URLs). The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available, and on KubeRay in phase 2. The uncloud driver ships as a documented stub in v0.1.
+**Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `build`, `up N [minio]`, `down`, `nuke`, `wipe-shared`, `scale N`, `exec-head CMD...`, `kill-worker I`, `kill-head`, `stop-worker I`, `cp-from-head SRC DST`, `shared`, `endpoint`, `mkbucket`. The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available, and on KubeRay in phase 2. The uncloud driver ships as a documented stub in v0.1.
 
 Containers are Ray nodes: one `head` and `N` `worker` services on the compose network, sharing `/shared` (block store, checkpoints, audit logs), which is a bind mount of `.harness/shared` on the Mac so the host can read audit trails and checkpoints during a run. Ray Train needs shared storage across nodes; the mount provides it (MinIO is the alternative). The source directories are mounted over the image copy, so code edits are live in every node without rebuilding.
 
@@ -439,17 +439,21 @@ Workers and head get `S3_ENDPOINT=http://minio:9000`, `S3_ACCESS_KEY`, `S3_SECRE
 
 Each worker advertises 1 CPU so `resources_per_worker: {CPU: 1}` maps one Train worker per container — i.e. one container = one "node". The head advertises 2 CPUs for the Train controller and driver but is excluded from training by `ScalingConfig` resource shaping or by giving it a custom resource and `label_selector` if needed.
 
-`justfile` targets:
+Justfile harness targets, every one a driver verb (`deploy/driver.sh`; `DISTRAINER_DRIVER` selects the implementation, `DISTRAINER_MINIO=1` adds the MinIO profile):
 
 ```
-up N="2":       deploy/driver.sh up {{N}}          # every harness target goes through the driver verbs
-down:           deploy/driver.sh down
-blocks:        deploy/driver.sh exec-head python examples/toy_contrastive/make_blocks.py --out /shared/blocks
-train CFG:     deploy/driver.sh exec-head python examples/toy_contrastive/train.py --config {{CFG}}
-kill-worker I: deploy/driver.sh kill-worker {{I}}                                  # node failure (docker kill in the compose driver)
-scale N:       deploy/driver.sh scale {{N}}                                        # elastic up/down
-audit RUN:     uv run python integration_tests/cluster/check_audit.py /shared/audit/{{RUN}}         # via docker cp or volume mount
+build:            deploy/driver.sh build                          # node image from uv.lock
+up N=2:           deploy/driver.sh up {{N}}                        # head + N workers (up-minio adds MinIO)
+down / nuke:      deploy/driver.sh down | nuke                     # down keeps the MinIO volume; nuke removes everything
+mkbucket:         deploy/driver.sh mkbucket distrainer             # pyarrow S3FileSystem.create_dir inside the head (no mc)
+blocks CFG:       deploy/driver.sh exec-head python examples/hello_blocks/make_blocks.py --config {{CFG}}
+train CFG:        deploy/driver.sh exec-head python examples/hello_blocks/train.py --config {{CFG}}
+kill-worker I:    deploy/driver.sh kill-worker {{I}}               # SIGKILL; started again after DISTRAINER_RESTART_DELAY s
+scale N:          deploy/driver.sh scale {{N}}                     # elastic up/down
+integration S:    uv run python integration_tests/cluster/run_scenarios.py --scenario {{S}}   # S2 S3 S4 S9 S10 | all
 ```
+
+The full verb list (`build`, `up`, `down`, `nuke`, `wipe-shared`, `scale`, `exec-head`, `kill-worker`, `kill-head`, `stop-worker`, `cp-from-head`, `shared`, `endpoint`, `mkbucket`, `ps`, `logs`) is documented at the top of `deploy/driver.sh`; `docs/examples-and-scenarios.md` lists what each scenario does with them.
 
 OrbStack notes: images build arm64-native (no emulation); the development Mac has 16 GB with the OrbStack VM at 8 GB, so scenarios are written for 2–3 worker containers (head + 2 workers is the default `up`, 3 for scale-up tests); 4 workers needs the VM raised to about 12 GB; the Ray dashboard is at `http://localhost:8265`; `docker kill` (SIGKILL) is the right primitive for "node died" (Ray sees the raylet disappear), while `docker stop` gives a graceful drain that looks more like a preemption notice. Docker treats `kill` like a manual stop, so restart policies never fire; the driver's `kill-worker` starts the container again after `DISTRAINER_RESTART_DELAY` seconds (default 5), which is the replacement node of S2. A worker killed *after* its training function returned but before the controller drained its last results makes Ray restart the group without the newest checkpoint (observed once with a 0.35 s run); the harness configs slow the toy workload with `train.step_sleep_s` so failures land mid-run. The shared volume can be inspected from the host with `docker compose cp head:/shared/audit ./audit` or by bind-mounting a host directory instead of a named volume (slower on macOS but convenient).
 
@@ -461,13 +465,15 @@ Each scenario runs the toy workload with a distinct `run_name` and then asserts 
 |---|---|---|---|
 | S1 | Happy path | `up 2; blocks; train` | Per segment: the set of consumed positions equals `range(seq*W, (seq+1)*W)`; per step, rank `r` consumed position `seq*W + k*n + r`; every rank has the same `report` count (metrics count in `Result`). |
 | S2 | Worker kill mid-segment | `train` in background; after ~N steps `kill-worker 2` (with `max_failures>=1`) | Training finishes. Attempt 2's first consumed position equals `segment*W + cursor*n` of the last checkpoint the controller had registered, rounded down to a step boundary of the new world size; the union of positions over attempts equals the log; replayed positions are exactly those ≥ that position in attempt 1. Replay count ≤ `2 * every_k * n + n_new`: a checkpoint reported just before the failure may still be in flight (ASYNC upload, then the controller's poll interval), so one extra checkpoint interval can be replayed (observed in S4). |
-| S3 | Elastic scale up | `up 2`, `train` with `num_workers=[2,4]`; after a few steps `scale 4` | Within `elastic_resize_monitor_interval_s`, a new attempt starts with `world_size=4`; the plan tail is re-dealt (positions `k*4 + r`); no block is lost; total consumed set equals plan. |
-| S4 | Elastic scale down | Start with 4 workers, `kill-worker` one, `min_workers=2` | Attempt continues with 3 (no full stall); assertions as S3 with `n=3`. |
-| S5 | Checkpoint cadence | Run with `every_k=1`, `every_k=8`, `segment_end` | Number of checkpoints in the run dir matches expectation; `ledger.cursor` of each checkpoint is a multiple of `k` (or equals `W/n`). |
+| S3 | Elastic scale up | `up 2`, `train` with `num_workers=[2,3]`; after a few blocks `scale 3` | A later attempt runs with `world_size=3`; the tail is re-dealt on a step boundary (positions `k*3 + r`); no block is lost; the union of attempts equals the log (`check_recovery`, first attempt at 2, last at 3). |
+| S4 | Elastic scale down | `up 3`, `train`; after a few blocks `scale 2` (the removed worker is stopped, not restarted) | A later attempt runs with `world_size=2`; assertions as S3 (first attempt at 3, last at 2). |
+| S5 | Checkpoint cadence | Runs with `every_k=1`, `every_k=4`, `segment_end`, all with `num_to_keep: null` | Number of checkpoints in the run dir matches the cadence; `ledger.cursor` of each checkpoint is a multiple of `k` (or equals `W/n`); directory names match their ledgers. |
 | S6 | Segment hook / re-mining (streaming mode) | Enable `remine` | Segment `seq+1` is committed before any rank consumes it (audit `ts` of first position in `seq+1` > commit time); block contents differ from the base corpus; audit shows the new block ids consumed. |
 | S11 | Streaming producer | Start `train` before `blocks` has finished writing; writer sleeps between segments | Ranks wait (audit gap) rather than fail; positions still contiguous; `_END` terminates the run cleanly; `gc` leaves ≥ `retention_segments` behind the last checkpoint. |
-| S7 | Determinism | Two runs with the same seed, no failures | Identical audit sequences per rank. |
+| S7 | Determinism | Two stores built from the same seed, two runs, no failures | Identical audit sequences per rank. |
 | S8 | Time-budget policy | `time_budget_s=5` | All ranks report the same number of checkpoints (consensus via broadcast). |
+| S9 | Cold restore | Full run on MinIO keeping every checkpoint; `down`; `wipe-shared`; `up`; `distrainer resume` from a mid-run checkpoint URI into a new run | The resumed run's positions are exactly the ledger's resume position (round-down for its world size) to the end of the log, once, dealt by the rule (`check_resume`). |
+| S10 | Head loss | `kill-head` mid-run on MinIO; `up` (workers rejoin); resume from the newest checkpoint with a readable ledger into a new run | As S9. |
 
 Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 green against MinIO.
 

@@ -105,22 +105,14 @@ def check_s7(a: Sequence[AuditRecord], b: Sequence[AuditRecord]) -> list[str]:
 
 
 def resume_start_position(segment: int, positions_done: int, W: int, world_size_now: int) -> int:
-    """First position a run resumed from ``Ledger(segment, cursor*world_size)`` consumes with
-    ``world_size_now`` ranks: the resume rule rounds down to a step boundary."""
-    if positions_done >= W:
-        return (segment + 1) * W
-    return segment * W + (positions_done // world_size_now) * world_size_now
+    """First position a run resumed from a ledger with ``positions_done`` positions of ``segment``
+    consumes with ``world_size_now`` ranks (the library's own resume rule)."""
+    from distrainer.ledger import Ledger
+    from distrainer.planner import resume_start
 
-
-def parse_checkpoint_name(name: str) -> tuple[int, int, int, int]:
-    """``(segment, positions, world_size, attempt)`` from ``checkpoint_g..._p..._n..._a...``."""
-    import re
-
-    m = re.fullmatch(r"checkpoint_g(\d+)_p(\d+)_n(\d+)_a(\d+)", name)
-    if not m:
-        raise ValueError(f"not a distrainer checkpoint directory name: {name!r}")
-    seg, pos, ws, att = (int(x) for x in m.groups())
-    return seg, pos, ws, att
+    ledger = Ledger(segment=segment, cursor=positions_done, world_size=1)
+    seg, step = resume_start(ledger, world_size_now, W=W)
+    return seg * W + step * world_size_now
 
 
 def check_resume(
@@ -137,7 +129,8 @@ def check_resume(
     if not records:
         return ["no audit records"]
     problems = check_dealing(records, W)
-    n_now = max(r.world_size for r in records)
+    first_attempt = min(r.attempt for r in records)
+    n_now = next(r.world_size for r in records if r.attempt == first_attempt)
     if ledger is not None:
         start_position = resume_start_position(ledger[0], ledger[1], W, n_now)
     if start_position is None:
@@ -326,6 +319,8 @@ def main(argv: list[str] | None = None) -> int:
     elif args.scenario == "resume":
         if args.start_position is None and args.ledger_segment is None:
             ap.error("--start-position or --ledger-segment/--ledger-positions is required")
+        if (args.ledger_segment is None) != (args.ledger_positions is None):
+            ap.error("--ledger-segment and --ledger-positions go together")
         ledger = (
             (args.ledger_segment, args.ledger_positions)
             if args.ledger_segment is not None

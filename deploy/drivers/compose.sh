@@ -15,6 +15,7 @@ esac
 if [ "$shared" = "/" ] || [ -z "$shared" ]; then
   echo "refusing to operate on shared storage path '$shared'" >&2; exit 2
 fi
+marker="$shared/.distrainer-shared"   # nuke / wipe-shared only delete a directory `up` created
 
 running_containers() { "${compose[@]}" --profile minio ps -q 2>/dev/null; }
 
@@ -26,7 +27,7 @@ case "$verb" in
     n="${1:-2}"; shift || true
     if [ "${1:-}" = "minio" ]; then profiles=(--profile minio); fi
     if ! docker image inspect distrainer:local >/dev/null 2>&1; then "${compose[@]}" build head; fi
-    mkdir -p "$shared"
+    mkdir -p "$shared" && touch "$marker"
     "${compose[@]}" ${profiles[@]+"${profiles[@]}"} up -d --scale "worker=$n" --remove-orphans
     "${compose[@]}" ${profiles[@]+"${profiles[@]}"} ps ;;
   down)
@@ -34,6 +35,9 @@ case "$verb" in
     "${compose[@]}" --profile minio down --remove-orphans ;;
   nuke)
     "${compose[@]}" --profile minio down -v --remove-orphans
+    if [ -d "$shared" ] && [ ! -f "$marker" ]; then
+      echo "nuke: $shared was not created by this driver (no marker); not deleting it" >&2; exit 2
+    fi
     rm -rf "$shared" ;;
   wipe-shared)
     # only meaningful with the containers down: a live bind mount would keep writing into the
@@ -41,7 +45,10 @@ case "$verb" in
     if [ -n "$(running_containers)" ]; then
       echo "wipe-shared: containers are running; run 'down' first" >&2; exit 2
     fi
-    rm -rf "$shared" && mkdir -p "$shared" ;;
+    if [ -d "$shared" ] && [ ! -f "$marker" ]; then
+      echo "wipe-shared: $shared was not created by this driver (no marker); not deleting it" >&2; exit 2
+    fi
+    rm -rf "$shared" && mkdir -p "$shared" && touch "$marker" ;;
   scale)
     n="${1:?worker count}"
     "${compose[@]}" ${profiles[@]+"${profiles[@]}"} up -d --no-recreate --scale "worker=$n" ;;
