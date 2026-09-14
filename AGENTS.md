@@ -226,6 +226,7 @@ just verify                 # lint typecheck static test regression smoke diff-c
 just up [N] / just down     # multi-node harness (driver-backed; OrbStack compose today)
 just mkbucket / just blocks / just train CFG
 just kill-worker I / just scale N
+just local-scenarios [S]    # S1, S5, S7 with hello_blocks on a local Ray cluster (no containers)
 just integration [S]        # scenario runner S1-S11 against the running harness
 just docs                   # list docs
 git diff --check

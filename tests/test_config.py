@@ -127,3 +127,20 @@ def test_asdict_yaml_roundtrip_and_direct_construction_validates(tmp_path):
     assert again.scaling.num_workers == (2, 4) and again.log.W == 24
     with pytest.raises(ValueError):
         DistrainerConfig(log=LogConfig(W=0))
+
+
+def test_overrides_are_dotted_yaml_values(tmp_path):
+    from distrainer.config import apply_overrides
+
+    d = apply_overrides(
+        {"log": {"W": 12}}, ["log.W=24", "checkpoint.num_to_keep=null", "run_name=x"]
+    )
+    assert d == {"log": {"W": 24}, "checkpoint": {"num_to_keep": None}, "run_name": "x"}
+    path = tmp_path / "c.yaml"
+    path.write_text("log:\n  W: 12\n")
+    cfg = load_config(str(path), overrides=["scaling.num_workers=[2, 3]"])
+    assert cfg.scaling.num_workers == (2, 3)
+    with pytest.raises(ValueError):
+        apply_overrides({}, ["novalue"])
+    with pytest.raises(ValueError):
+        apply_overrides({"run_name": "x"}, ["run_name.sub=1"])

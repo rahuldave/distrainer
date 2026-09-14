@@ -1,0 +1,28 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.13", "3.11"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Sync (${{ matrix.python }})
+        run: uv sync --all-groups --python ${{ matrix.python }}
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run ty check distrainer
+      - run: uv run python -m compileall -q distrainer examples tests
+      - run: uv run python -m pytest tests -q
+      - run: uv run python -m pytest regression_tests -q || [ $? -eq 5 ]
+      - run: git diff --check

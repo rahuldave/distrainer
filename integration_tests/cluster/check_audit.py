@@ -145,10 +145,16 @@ def check_s5(run_uri: str, W: int, every_k: int | None, expected_count: int | No
     return problems
 
 
-def expected_checkpoints(n_segments: int, W: int, n: int, every_k: int | None) -> int:
+def expected_checkpoints(
+    n_segments: int, W: int, n: int, every_k: int | None, segment_end: bool = True
+) -> int:
+    """Checkpoints a run of ``n_segments`` writes: every ``every_k`` steps within a segment and,
+    if ``segment_end``, at the last step (the ``any`` policy; bare ``every_k`` has no end)."""
     steps = W // n
     per_segment = sum(
-        1 for c in range(1, steps + 1) if c == steps or (every_k and c % every_k == 0)
+        1
+        for c in range(1, steps + 1)
+        if (segment_end and c == steps) or (every_k and c % every_k == 0)
     )
     return n_segments * per_segment
 

@@ -1,0 +1,36 @@
+# toy_contrastive (spec section 8) on a local Ray cluster: 7680 items in 64 clusters, blocks of
+# 32 anchors with 4 hard negatives each (240 blocks), W=24, 2 passes, 2 workers.
+run_name: toy
+storage_path: runs/toy
+store_root: blocks/toy
+seed: 1234
+ray_address: null
+storage:
+  kind: local
+log:
+  W: 24
+  passes: 2
+  wait_poll_s: 0.5
+checkpoint:
+  policy: any
+  every_k: 4
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: 2
+  resources_per_worker: {CPU: 1}
+failure:
+  max_failures: 1
+train:
+  n_items: 7680
+  features: 32
+  clusters: 64
+  anchors_per_block: 32
+  hard_negatives: 4
+  hidden: 64
+  embed: 16
+  lr: 0.001
+  temperature: 0.1
+  all_gather: false

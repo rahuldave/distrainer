@@ -379,7 +379,7 @@ Three entry points, all built on `ray.train.Checkpoint(path, filesystem)`:
 2. **Explicit, from a run** — `Result.from_path("<storage_path>/<run_name>", storage_filesystem=fs)` restores the `Result` (latest and best checkpoints, metrics); `DistTrainer(..., resume_from_checkpoint=result.checkpoint)` starts a *new* run from it. This is the path for driver/head loss and for "continue training tomorrow".
 3. **Explicit, from a URI** — `Checkpoint("s3://bucket/distrainer/runs/toy/checkpoint_e0_c3_s16", filesystem=fs)` (or a local path) → `resume_from_checkpoint=`. Works across runs, clusters, and world sizes because the ledger carries `world_size`.
 
-CLI: `distrainer inspect <uri>` prints the ledger from `.metadata.json` without downloading weights; `distrainer resume <uri> --config cfg.yaml [--seed-override]` starts a run from it; `distrainer export <uri> <local_dir>` = `to_directory`. Reconstitution of the data position needs only the ledger plus the log (segment files are immutable, so `segment` + `cursor` + `world_size` identify the exact position), so no per-rank state is ever required.
+CLI: `distrainer inspect <uri>` prints the ledger from `.metadata.json` without downloading weights; `distrainer resume <uri> --config cfg.yaml --entry pkg.module:function [--run-name] [--seed]` starts a new run from it (the entry function returns the user's `(train_step, build_model)` for the config); `distrainer export <uri> <local_dir>` = `to_directory`; `distrainer log-ls <store> [-v]` and `distrainer gc <store> --keep-from N` inspect and prune a block log. Example scripts accept `--set key.path=value` overrides so scenarios reuse one YAML. Reconstitution of the data position needs only the ledger plus the log (segment files are immutable, so `segment` + `cursor` + `world_size` identify the exact position), so no per-rank state is ever required.
 
 Verification scenario **S9 — cold restore**: run S1 to completion against MinIO, `down -v` the cluster (destroying the shared volume), `up`, then `distrainer resume s3://…/checkpoint_g000003_s0016` for one more segment and assert the audit positions continue from `cursor * world_size`. **S10 — head loss**: `docker kill head` mid-run, `up` again, `Result.from_path` + resume; same assertion. (S11, streaming producer, is defined in section 10.)
 
@@ -390,6 +390,7 @@ run_name: toy
 storage_path: /shared/runs     # checkpoints and Ray Train run state
 store_root: /shared/blocks     # blocks, log, audit
 seed: 1234
+ray_address: auto              # null = local ray.init() (examples on a laptop)
 storage:                       # the filesystem both paths live on (section 6.3)
   kind: local                  # local | s3; s3 adds endpoint, region, access_key_env, secret_key_env
 log:
@@ -403,6 +404,7 @@ checkpoint:
   every_k: 4
   time_budget_s: null
   num_to_keep: 3
+  upload_mode: async        # async | sync (ray.train.report checkpoint_upload_mode)
 loader:
   prefetch: 2
   threads: 2
@@ -556,6 +558,7 @@ test target="tests":  uv run python -m pytest {{target}}
 regression:       uv run python -m pytest regression_tests   # exit code 5 (no tests yet) is tolerated
 smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 1 segment
 contrastive:      uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml   # the section 8 toy, not part of verify
+local-scenarios S="all":  uv run python integration_tests/single_node/run_scenarios.py --scenario {{S}}   # S1, S5, S7 on a local Ray cluster
 diff-check:       git diff --check
 verify: lint typecheck static test regression smoke diff-check
 

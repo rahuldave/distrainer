@@ -8,6 +8,7 @@ trains, then checks the audit trail with the S1 assertions and prints the final 
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import shutil
 import sys
@@ -46,6 +47,11 @@ def train_step(
     return {"loss": float(loss.item())}
 
 
+def entry(cfg: DistrainerConfig):
+    """For ``distrainer resume --entry examples.hello_blocks.train:entry``."""
+    return train_step, build_model
+
+
 def ensure_blocks(cfg: DistrainerConfig) -> None:
     fs, root = cfg.store_fs()
     if not BlockLog(fs, root).exists():
@@ -65,8 +71,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", required=True)
     ap.add_argument("--keep", action="store_true", help="do not wipe a previous run of this name")
     ap.add_argument("--no-check", action="store_true", help="skip the S1 audit assertions")
+    ap.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="override a config value, dotted keys, YAML values (e.g. checkpoint.num_to_keep=null)",
+    )
     args = ap.parse_args(argv)
-    cfg = load_config(args.config)
+    cfg = load_config(args.config, overrides=args.set)
     if not args.keep:
         reset_run(cfg)
     ensure_blocks(cfg)
@@ -76,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
     import ray
 
-    ray.init(address=cfg.ray_address, ignore_reinit_error=True, logging_level="ERROR")
+    ray.init(address=cfg.ray_address, ignore_reinit_error=True, logging_level=logging.ERROR)
     result = DistTrainer(train_step, build_model, cfg).fit()
     ledger = CheckpointIO.read_ledger(result.checkpoint) if result.checkpoint else None
     print(f"final metrics: {result.metrics}")

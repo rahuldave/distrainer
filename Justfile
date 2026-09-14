@@ -64,6 +64,10 @@ scale N:
 integration S="all":
   uv run python integration_tests/cluster/run_scenarios.py --scenario {{S}}
 
+# single-node scenarios S1, S5, S7 on a local Ray cluster (no containers needed)
+local-scenarios S="all":
+  uv run python integration_tests/single_node/run_scenarios.py --scenario {{S}}
+
 docs:
   @ls docs
 

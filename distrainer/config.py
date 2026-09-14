@@ -212,5 +212,26 @@ class DistrainerConfig:
         return self._fs_for(self.store_root)
 
 
-def load_config(path: str) -> DistrainerConfig:
-    return DistrainerConfig.from_yaml(path)
+def apply_overrides(d: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
+    """``a.b.c=value`` assignments (values parsed as YAML) applied to a nested dict copy."""
+    import copy
+
+    out = copy.deepcopy(d)
+    for item in overrides:
+        key, sep, raw = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"override must look like key=value, got {item!r}")
+        node = out
+        parts = key.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                raise ValueError(f"cannot set {key}: {part} is not a section")
+        node[parts[-1]] = yaml.safe_load(raw)
+    return out
+
+
+def load_config(path: str, overrides: list[str] | None = None) -> DistrainerConfig:
+    with open(path, encoding="utf-8") as f:
+        d = yaml.safe_load(f) or {}
+    return DistrainerConfig.from_dict(apply_overrides(d, overrides or []))
