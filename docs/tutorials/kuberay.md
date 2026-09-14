@@ -250,4 +250,6 @@ orb config set k8s.enable false      # Kubernetes off; the compose harness does 
 - `docs/running-modes.md` (mode D): the same material as a reference, next to the laptop,
   compose and uncloud modes.
 - `docs/examples-and-scenarios.md`, "Under KubeRay": what every driver verb does on each side.
-- `docs/handoff-m6.md`: what building this taught, and the plan for uncloud (mode C).
+- [Tutorial 4](uncloud.md): the same run on a cluster of machines (uncloud), where nothing is
+  shared and the object store is the only storage.
+- `docs/handoff-m6.md`: what building this taught; `docs/handoff-m7.md` is the same after M6.

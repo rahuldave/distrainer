@@ -9,13 +9,13 @@ Every mode uses the same YAML shape (spec section 7); the fields that differ are
 | Ray nodes | one: this Python process starts a local cluster | one container per node on a compose network | one container per node across a WireGuard mesh | one pod per node in a `RayCluster` |
 | Training workers | Ray actors on the laptop | one worker container each (`trainer: 1` resource) | same | one worker pod each |
 | Driver (`train.py`) | the same process (`ray_address: null`) | inside the `head` container (`ray_address: auto`) | inside the head container via `uc exec` | inside the head pod via `kubectl exec`, or a `RayJob` |
-| Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines) | a `hostPath` volume at `/shared` (or a PVC), or MinIO in the cluster |
-| Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `uc rm` / `uc scale` | `kubectl delete pod --force` (node death; the operator replaces the pod), a `replicas` patch |
-| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | the same set, once machines exist | the same set as B (S2, S3, S4 are the acceptance) |
-| Milestone | M2 (done) | M3 (done) | after M5, when machines are available | M5 (done) |
-| Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (stub) | `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`) |
+| Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines): MinIO on the head machine, or S3/R2 | a `hostPath` volume at `/shared` (or a PVC), or MinIO in the cluster |
+| Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `docker kill` over ssh on the machine (node death), `docker stop` (preemption), `uc scale` | `kubectl delete pod --force` (node death; the operator replaces the pod), a `replicas` patch |
+| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | S2, S3, S4, S8, S9, S10, S11s3 on the bucket (S6 and S11 need the mount and skip) | the same set as B (S2, S3, S4 are the acceptance) |
+| Milestone | M2 (done) | M3 (done) | M6 (done) | M5 (done) |
+| Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (`DISTRAINER_DRIVER=uncloud`) | `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`) |
 
-Modes A, B and D run today; C is the plan (spec section 9). The verbs of `deploy/driver.sh`
+All four modes run. The verbs of `deploy/driver.sh`
 (`build`, `up N [minio]`, `down`, `nuke`, `scale N`, `exec-head`, `kill-worker I`, `stop-worker I`,
 `cp-from-head`, `wipe-shared`, `shared`, `endpoint`, `mkbucket`) are the whole contract between the
 Justfile or the scenario runner and a mode; nothing under `distrainer/`, `tests/`, or
@@ -122,22 +122,65 @@ Images are arm64-native; containers are reachable from the Mac as `service.proje
 Use it for: everything that involves a node disappearing or the world size changing, the S3 path
 of the log commit protocol, and head loss. It is the exit gate for v0.1.
 
-## C. uncloud machines (later)
+## C. uncloud machines (M6)
 
 uncloud is the same shape at machine scale: a set of Docker hosts joined by a WireGuard mesh with
-cluster DNS, driven by a Compose-compatible file (`uc deploy`, `uc scale`, `uc exec`). The compose
-file from mode B is reused with uncloud's `x-` extensions for placement; the driver verbs are
-implemented with `uc` commands in `deploy/drivers/uncloud.sh`. The one hard difference: no volume
-spans machines, so storage must be S3-compatible (MinIO on one machine, or R2/S3), which is why
-`storage.kind: s3` exists from M1 on. The driver ships as a documented stub until machines exist.
+cluster DNS, driven by a Compose-compatible file (`uc deploy`, `uc scale`, `uc exec`).
+`deploy/drivers/uncloud.sh` implements the driver verbs on the `uc` CLI, so every harness target
+and every cluster scenario runs with `DISTRAINER_DRIVER=uncloud`; `deploy/uncloud/compose.yml` is
+the cluster (the same node image, scripts and Ray environment as mode B's compose file, pinned
+against it by `tests/test_deploy_manifests.py`), and `deploy/uncloud/machines.sh` builds the
+machines on the Mac. The one hard difference from every other mode: no volume spans machines, so
+storage is S3-compatible only (MinIO on the head machine, or S3/R2), the driver's `shared` verb
+prints nothing, and the scenario runner reads the audit trail and the checkpoints from the bucket
+through the driver's `endpoint` instead of a shared directory. Tutorial 4
+(`docs/tutorials/uncloud.md`) walks through it; `docs/uncloud-gotchas.md` lists what bites.
 
-It can very likely be tested on the Mac without real machines: OrbStack also runs lightweight
-Linux *machines* (`orb create ubuntu uc1`), each with its own systemd, SSH address
-(`uc1@orb`), and the ability to run Docker. Two or three of those, each with Docker and the
-uncloud daemon installed, joined with `uc machine init` / `uc machine add` over SSH, form a real
-uncloud cluster with the WireGuard mesh between them, and MinIO on one of them provides the S3
-store. That is the plan for filling in `deploy/drivers/uncloud.sh`; containers alone are not
-enough because uncloud wants a Docker host per node.
+```bash
+just uncloud-machines               # once: three OrbStack machines joined into the uncloud context `distrainer`
+export DISTRAINER_DRIVER=uncloud
+just build                          # docker build, then uc image push to every machine (no registry)
+just up-minio 2 && just mkbucket && just blocks examples/hello_blocks/harness-minio.yaml \
+    && just train examples/hello_blocks/harness-minio.yaml && just down
+just integration S2                 # S3, S4, S8, S9, S10, S11s3 likewise; S6 and S11 skip (no shared mount)
+```
+
+What is where:
+
+- The machines: OrbStack Linux machines `uc1` (the head machine, 5 GB, 2 CPUs), `uc2` and `uc3`
+  (2 GB each), each with Docker and the uncloud daemon installed by `uc machine init` /
+  `uc machine add` over OrbStack's `ucN@orb` ssh route (uncloud runs the system `ssh`, so the
+  ProxyCommand in `~/.orbstack/ssh/config` applies and no sshd is needed inside). Each machine's
+  address on OrbStack's machine network (`192.168.138.0/23`) is its WireGuard endpoint, given
+  explicitly; the mesh (`uncloud` interface, MTU 1420) carries a Docker network `uncloud` with
+  one `/24` per machine out of `10.210.0.0/16`, which the bootstrap checks against OrbStack's
+  subnet. The memory limits are cgroup caps: the head machine runs the Ray head, the Train
+  controller, the driver script and MinIO and thrashed under 3 and 4 GB.
+- Placement: `head` and `minio` are pinned to the head machine with `x-machines`, `worker`
+  replicas to the other machines (a comma-separated `x-machines` the driver exports as
+  `DISTRAINER_UNCLOUD_WORKER_MACHINES`); a worker placed next to the head starved it. `up N`
+  deploys with `deploy.replicas: N`, `scale N` is `uc scale worker N`, which stops a removed
+  worker with a 10 s grace, the preemption notice `docker stop` gives in mode B.
+- Names: every container gets `search internal.` from uncloud, so `head:6379` in
+  `ray-worker.sh` and `http://minio:9000` in the harness configs resolve cluster-wide unchanged.
+- Break things: `kill-worker I` and `kill-head` are `sudo docker kill` over ssh on the machine
+  that runs the container (uncloud has no per-container kill; the machine's ssh destination is
+  the `DISTRAINER_UNCLOUD_SSH` template, `%s@orb` by default); the container is started again
+  after `DISTRAINER_RESTART_DELAY` seconds as in mode B. `stop-worker` is `docker stop`. `up`
+  after `kill-head` finds the head stopped and `uc deploy` recreates it; the workers reconnect.
+- The image is pushed, not pulled: `build` is `docker build` plus `uc image push` (the 1.36 GB
+  dependency layer takes about three minutes to reach three machines, a code change seconds);
+  no source tree is mounted, so a code edit needs `build` again.
+- `endpoint` prints the dashboard and MinIO at the head machine's address, published only inside
+  `DISTRAINER_UNCLOUD_HOST_PREFIX` (OrbStack's machine network; OrbStack forwards machine ports to
+  the LAN otherwise). `cp-from-head` streams a tar through `uc exec` (there is no `uc cp`).
+- Every `uc` call names its context (`DISTRAINER_UNCLOUD_CONTEXT`, default `distrainer`), a
+  failing or reshaped `uc` listing fails the verb, `down` removes every copy of a service by id
+  (uncloud can register a name twice), and `up` and `scale` retry once when membership shows a
+  machine as `Down` for a moment.
+- Timing: an `up` takes 60 to 90 s (containers start one at a time, monitored and
+  health-checked), and a scenario 1.5 to 3 times its mode B wall time; the per-step pacing is
+  the same, the difference is deploy time and object-store round trips over the mesh.
 
 ## D. KubeRay on OrbStack Kubernetes (M5)
 
@@ -212,5 +255,5 @@ What is where:
 - The audit trail under `<store_root>/audit/<run_name>/`. The scenario checks read only this and
   the checkpoint metadata, never the cluster.
 - `just verify` (lint, typecheck, compileall, unit and regression tests, smoke, diff check) needs
-  only mode A; the harness scenarios (`just integration`, M3) need mode B and are not part of
+  only mode A; the harness scenarios (`just integration`, M3) need mode B, C or D and are not part of
   `verify`.

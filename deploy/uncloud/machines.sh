@@ -99,7 +99,8 @@ if ctx in contexts:
     print(f"removed uc context {ctx} from {path} (backup: {path}.bak)")
 PY
 }
-wait_up() {   # wait_up SECONDS: until every cluster machine reports Up (membership settles after a join)
+wait_up() {   # wait_up SECONDS: until every cluster machine reports Up (membership shows Suspect for
+  # minutes after a join or a leave; a deploy in that window can fail on a machine shown as Down)
   local deadline=$((SECONDS + $1)) states
   while :; do
     states="$(uc machine ls 2>/dev/null | awk 'NR > 1 {print $2}' | sort -u | tr '\n' ' ')"
@@ -143,7 +144,7 @@ case "$verb" in
       fi
       i=$((i + 1))
     done
-    wait_up 90
+    wait_up 300
     uc machine ls ;;
   status)
     orb list 2>/dev/null || true
@@ -162,7 +163,8 @@ case "$verb" in
         echo "$m was not created by this script (not in $owned); left in place" >&2
       fi
     done
-    ctx_forget ;;
+    # the context goes only when no machine is left in it (a partial destroy keeps the cluster)
+    if ctx_exists && [ -z "$(uc machine ls 2>/dev/null | awk 'NR > 1 {print $1}')" ]; then ctx_forget; fi ;;
   *)
     echo "usage: $0 up | status | destroy" >&2; exit 2 ;;
 esac
