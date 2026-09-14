@@ -133,13 +133,19 @@ head container against MinIO).
 | `just up [N]`, `just up-minio [N]`, `just down`, `just nuke` | head + N worker containers (+ MinIO); stop; stop and remove volumes and the shared mount |
 | `just mkbucket` | create the `distrainer` bucket on MinIO |
 | `just blocks [CFG]`, `just train [CFG]` | `make_blocks.py` / `train.py` of hello_blocks inside the head container |
-| `just kill-worker I`, `just scale N` | kill worker `I` (compose: restarted after `DISTRAINER_RESTART_DELAY` s; kuberay: replaced by the operator at once); resize the worker set |
+| `just kill-worker I`, `just scale N` | kill worker `I` (compose: restarted after `DISTRAINER_RESTART_DELAY` s; uncloud: `docker kill` over ssh on its machine, restarted the same way; kuberay: replaced by the operator at once); resize the worker set |
 | `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just kuberay-operator` | install the KubeRay operator into the current Kubernetes context (once; `DISTRAINER_DRIVER=kuberay` for the targets above) |
+| `just uncloud-machines` | create the OrbStack machines and the uncloud cluster (once; `DISTRAINER_DRIVER=uncloud` for the targets above; `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes them) |
 | `just docs` | list the docs |
 
-`DISTRAINER_DRIVER` selects the harness driver (`compose`, the default, or `kuberay` for pods on
-OrbStack's Kubernetes), `DISTRAINER_MINIO=1` adds MinIO, `DISTRAINER_SHARED` moves the shared mount,
-`DISTRAINER_IMAGE` names the image tag (both drivers), `DISTRAINER_K8S_CONTEXT` and
-`DISTRAINER_K8S_NAMESPACE` pin where the KubeRay driver acts (`orbstack`, `distrainer`). The driver verbs behind these targets
-are documented at the top of `deploy/driver.sh`.
+`DISTRAINER_DRIVER` selects the harness driver (`compose`, the default; `kuberay` for pods on
+OrbStack's Kubernetes; `uncloud` for machines joined by uncloud's mesh), `DISTRAINER_MINIO=1` adds
+MinIO, `DISTRAINER_SHARED` moves the shared mount (compose, kuberay), `DISTRAINER_IMAGE` names the
+image tag (every driver), `DISTRAINER_K8S_CONTEXT` and `DISTRAINER_K8S_NAMESPACE` pin where the
+KubeRay driver acts (`orbstack`, `distrainer`), and the uncloud driver reads
+`DISTRAINER_UNCLOUD_CONTEXT` (`distrainer`), `DISTRAINER_UNCLOUD_MACHINES` (`uc1 uc2 uc3`, the first
+is the head machine), `DISTRAINER_UNCLOUD_SSH` (`%s@orb`, the ssh destination template for a
+machine), `DISTRAINER_UNCLOUD_HOST_PREFIX` (the CIDR the head machine publishes ports on) and
+`DISTRAINER_UNCLOUD_HEAD_ADDRESS` (an override for `endpoint`). The driver verbs behind these
+targets are documented at the top of `deploy/driver.sh`.

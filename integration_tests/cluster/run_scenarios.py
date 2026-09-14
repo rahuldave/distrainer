@@ -5,7 +5,9 @@ policy, S9 cold restore and S10 head loss against MinIO, S11 streaming producer 
 with the log and the run on MinIO, so the segment put is the commit). Each scenario
 brings the cluster to the state it needs, runs an example inside the head container, injects
 the failure while training runs, waits for the run to finish, and checks the audit trail on the
-shared mount. Run: ``just integration S2`` (or ``all``).
+shared mount, or on the bucket when the driver has no shared mount (``shared`` prints nothing:
+S2, S3, S4 and S8 then run on MinIO through the driver's ``endpoint``; S6 and S11 need the mount
+and are skipped). Run: ``just integration S2`` (or ``all``).
 """
 
 from __future__ import annotations
@@ -15,18 +17,18 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from distrainer.audit import read_audit  # noqa: E402
+from distrainer.audit import AuditRecord, read_audit  # noqa: E402
 from distrainer.config import load_config  # noqa: E402
 from distrainer.log import BlockLog  # noqa: E402
-from distrainer.storage import (  # noqa: E402
-    resolve,  # noqa: E402
-)
+from distrainer.storage import exists, resolve  # noqa: E402
 from integration_tests.cluster.check_audit import (  # noqa: E402
     by_attempt,
     check_recovery,
@@ -92,12 +94,168 @@ def up(n: int, *extra: str, env: dict[str, str] | None = None) -> None:
     wait_for_trainers(n)
 
 
+class SkipScenario(Exception):
+    """The scenario needs something this driver does not offer (a shared mount)."""
+
+
 def shared() -> Path:
-    return Path(driver("shared").strip())
+    """The host path of the shared mount; a scenario that reads it cannot run without one."""
+    out = driver("shared").strip()
+    if not out:
+        raise SkipScenario("needs a shared mount, and this driver has none (storage is S3 only)")
+    return Path(out)
 
 
-def audit_dir(run_name: str) -> Path:
-    return shared() / "blocks" / "audit" / run_name
+def minio_endpoint(endpoint_output: str) -> str:
+    """The MinIO URL in the output of the driver's ``endpoint`` verb (``minio=http://h:9000``)."""
+    for line in endpoint_output.splitlines():
+        if line.startswith("minio="):
+            return line.split()[0][len("minio=") :]
+    raise RuntimeError(f"the driver's endpoint verb names no minio URL:\n{endpoint_output}")
+
+
+def s3_settings_from_dotenv() -> dict[str, str]:
+    """The S3 credentials and region the containers use: .env when present (the drivers source
+    it), else the compose defaults. Returned, not exported: the driver subprocesses inherit this
+    process's environment and compose interpolates these names."""
+    values = {"S3_ACCESS_KEY": "distrainer", "S3_SECRET_KEY": "distrainer123", "S3_REGION": "auto"}
+    dotenv = ROOT / ".env"
+    if dotenv.exists():
+        for raw in dotenv.read_text().splitlines():
+            line = raw.strip()
+            if line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[len("export ") :]
+            key, sep, value = line.partition("=")
+            if sep and key.strip() in values:
+                values[key.strip()] = value.strip().strip("'\"")
+    return values
+
+
+@dataclass(frozen=True)
+class Store:
+    """Where the runner reads a scenario's audit trail, run state and checkpoints: the shared
+    mount when the driver has one, else the bucket of ``harness-minio.yaml`` reached from the
+    Mac through the MinIO URL of the driver's ``endpoint`` verb. ``check_audit`` does not care."""
+
+    blocks: str  # URI of the block store; the audit trail is under <blocks>/audit/<run>
+    runs: str  # URI of the run state; the checkpoints are under <runs>/<run>
+    cfg: str  # the hello_blocks config that writes there
+    env: dict[str, str]  # driver environment (DISTRAINER_MINIO=1 on the bucket)
+    s3: dict[str, Any]  # resolve() options from the Mac (endpoint, region) on the bucket
+    segments: int  # segments per pass of that config's workload
+    credentials: dict[str, str] | None = (
+        None  # S3_ACCESS_KEY / S3_SECRET_KEY for the Mac-side client
+    )
+
+    @property
+    def on_bucket(self) -> bool:
+        return self.blocks.startswith("s3://")
+
+    @property
+    def W(self) -> int:  # noqa: N802 (the spec's name)
+        return load_config(str(ROOT / self.cfg)).log.W
+
+    def fs(self, uri: str):
+        with self.mac_env():  # the S3 client takes its credentials from the environment
+            return resolve(uri, create=False, **self.s3)
+
+    def records(self, run_name: str) -> list[AuditRecord]:
+        fs, root = self.fs(self.blocks)
+        return read_audit(fs, root, run_name)
+
+    def wait_for_blocks(
+        self,
+        run_name: str,
+        count: int,
+        timeout_s: float = 300,
+        proc: subprocess.Popen | None = None,
+    ) -> None:
+        """Block until at least ``count`` audit records exist for the run (training runs)."""
+        deadline = time.monotonic() + timeout_s
+        seen, last_error = 0, ""
+        while time.monotonic() < deadline:
+            _check_alive(proc)
+            try:
+                seen = len(self.records(run_name))
+                if seen >= count:
+                    return
+            except Exception as exc:  # no trail yet, or the store unreachable: keep polling
+                last_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+            time.sleep(2.0 if self.on_bucket else 1.0)
+        raise TimeoutError(
+            f"{run_name}: fewer than {count} blocks consumed after {timeout_s}s ({seen} seen"
+            + (f"; last read error {last_error}" if last_error else "")
+            + ")"
+        )
+
+    def fresh(self, run_name: str) -> None:
+        """Remove the run state and audit trail of an earlier run with this name (a run name
+        that exists is restored by Ray Train, not started afresh). An unreachable store is an
+        error, not "nothing there": a stale run left behind would be restored silently."""
+        for uri in (f"{self.runs}/{run_name}", f"{self.blocks}/audit/{run_name}"):
+            fs, root = self.fs(uri)
+            if exists(fs, root):
+                fs.delete_dir(root)
+
+    @contextmanager
+    def mac_env(self):
+        """The bucket as the Mac sees it, in the environment: ``S3_ENDPOINT`` and the credentials
+        for a check that resolves URIs through ``s3_options_from_env`` (``checkpoint_ledgers``)
+        and for this store's own client. Never around a driver call: the driver subprocesses
+        inherit the environment and compose interpolates these names into the containers."""
+        if not self.on_bucket:
+            yield
+            return
+        values = {"S3_ENDPOINT": self.s3["endpoint"], **(self.credentials or {})}
+        before = {k: os.environ.get(k) for k in values}
+        os.environ.update(values)
+        try:
+            yield
+        finally:
+            for k, v in before.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+def store_for_driver() -> Store:
+    """The shared mount if the driver prints one, else the bucket (call once the cluster is up:
+    ``endpoint`` may need it)."""
+    out = driver("shared").strip()
+    if out:  # has_shared(), keeping the path
+        base = Path(out)
+        return Store(
+            blocks=str(base / "blocks"), runs=str(base / "runs"), cfg=HARNESS_CFG, env={}, s3={},
+            segments=SEGMENTS,
+        )  # fmt: skip
+    env = {"DISTRAINER_MINIO": "1"}
+    endpoint = minio_endpoint(driver("endpoint", env=env))
+    settings = s3_settings_from_dotenv()
+    return Store(
+        blocks=S3_BLOCKS, runs=S3_RUNS, cfg=MINIO_CFG, env=env,
+        s3={"endpoint": endpoint, "region": settings["S3_REGION"]},
+        segments=MINIO_SEGMENTS,
+        credentials={k: settings[k] for k in ("S3_ACCESS_KEY", "S3_SECRET_KEY")},
+    )  # fmt: skip
+
+
+def has_shared() -> bool:
+    return bool(driver("shared").strip())
+
+
+def up_store(n: int) -> Store:
+    """Bring the cluster to ``n`` workers with what the store needs (MinIO and the bucket when
+    nothing is shared) and return the store."""
+    if has_shared():
+        up(n)
+        return store_for_driver()
+    env = {"DISTRAINER_MINIO": "1"}
+    up(n, "minio", env=env)
+    driver("mkbucket", S3_BLOCKS[len("s3://") :].split("/", 1)[0], env=env)
+    return store_for_driver()
 
 
 def start_train(
@@ -156,23 +314,6 @@ def _check_alive(proc: subprocess.Popen | None) -> None:
         raise RuntimeError(f"training exited early ({proc.returncode}):\n{_output(proc)[-2000:]}")
 
 
-def wait_for_blocks(
-    run_name: str, count: int, timeout_s: float = 300, proc: subprocess.Popen | None = None
-) -> None:
-    """Block until at least ``count`` audit records exist for the run (training is under way)."""
-    fs, root = resolve(str(shared() / "blocks"), create=False)
-    deadline = time.monotonic() + timeout_s
-    while time.monotonic() < deadline:
-        _check_alive(proc)
-        try:
-            if len(read_audit(fs, root, run_name)) >= count:
-                return
-        except Exception:
-            pass
-        time.sleep(1.0)
-    raise TimeoutError(f"{run_name}: fewer than {count} blocks consumed after {timeout_s}s")
-
-
 def wait_for_blocks_s3(
     run_name: str,
     count: int,
@@ -224,12 +365,9 @@ def finish(proc: subprocess.Popen, timeout_s: float = 600, name: str = "train") 
     return out
 
 
-def records_for(run_name: str):
-    fs, root = resolve(str(shared() / "blocks"), create=False)
-    return read_audit(fs, root, run_name)
-
-
-def fresh(run_name: str, store: str = "blocks") -> None:
+def fresh(run_name: str, store: str) -> None:
+    """Remove the run state and audit trail of an earlier run from a store on the shared mount
+    (S6 and S11 stream into a store of their own; the hello_blocks store is ``Store.fresh``)."""
     import shutil
 
     shutil.rmtree(shared() / "runs" / run_name, ignore_errors=True)
@@ -261,18 +399,18 @@ def check_transition(records, first: int, last: int) -> list[str]:
 
 def scenario_s2() -> list[str]:
     """Worker kill mid-run: the container restarts, Ray restarts the group, positions continue."""
-    up(2)
-    ensure_blocks()
-    fresh("s2")
-    proc = start_train(HARNESS_CFG, "run_name=s2", name="s2")
-    wait_for_blocks("s2", 12)  # a few steps into segment 0
+    st = up_store(2)
+    ensure_blocks(st.cfg)
+    st.fresh("s2")
+    proc = start_train(st.cfg, "run_name=s2", name="s2", env=st.env)
+    st.wait_for_blocks("s2", 12, proc=proc)  # a few steps into segment 0
     driver("kill-worker", "2")
     finish(proc, name="s2")
-    recs = records_for("s2")
+    recs = st.records("s2")
     print(summarize(recs))
     # Ray may need more than one restart while the dead node's heartbeat times out; every
     # attempt must run at world size 2 and the trail must be consistent across all of them
-    problems = check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS)
+    problems = check_recovery(recs, st.W, every_k=2, expected_segments=st.segments)
     sizes = sorted({r.world_size for r in recs})
     if sizes != [2]:
         problems.append(f"world sizes {sizes}, expected only 2")
@@ -281,32 +419,32 @@ def scenario_s2() -> list[str]:
 
 def scenario_s3() -> list[str]:
     """Elastic scale up 2 -> 3 while training; the tail is re-dealt over 3 ranks."""
-    up(2)
-    ensure_blocks()
-    fresh("s3")
-    proc = start_train(HARNESS_CFG, "run_name=s3", name="s3")
-    wait_for_blocks("s3", 12, proc=proc)
+    st = up_store(2)
+    ensure_blocks(st.cfg)
+    st.fresh("s3")
+    proc = start_train(st.cfg, "run_name=s3", name="s3", env=st.env)
+    st.wait_for_blocks("s3", 12, proc=proc)
     driver("scale", "3")
     finish(proc, name="s3")
-    recs = records_for("s3")
+    recs = st.records("s3")
     print(summarize(recs))
-    return check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS) + check_transition(
+    return check_recovery(recs, st.W, every_k=2, expected_segments=st.segments) + check_transition(
         recs, first=2, last=3
     )
 
 
 def scenario_s4() -> list[str]:
     """Scale down 3 -> 2 while training (the removed worker is stopped, not restarted)."""
-    up(3)
-    ensure_blocks()
-    fresh("s4")
-    proc = start_train(HARNESS_CFG, "run_name=s4", name="s4")
-    wait_for_blocks("s4", 12, proc=proc)
+    st = up_store(3)
+    ensure_blocks(st.cfg)
+    st.fresh("s4")
+    proc = start_train(st.cfg, "run_name=s4", name="s4", env=st.env)
+    st.wait_for_blocks("s4", 12, proc=proc)
     driver("scale", "2")
     finish(proc, name="s4")
-    recs = records_for("s4")
+    recs = st.records("s4")
     print(summarize(recs))
-    return check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS) + check_transition(
+    return check_recovery(recs, st.W, every_k=2, expected_segments=st.segments) + check_transition(
         recs, first=3, last=2
     )
 
@@ -317,6 +455,7 @@ def scenario_s6() -> list[str]:
     cfg = load_config(str(ROOT / REMINE_CFG))
     store = Path(cfg.store_root).name  # /shared/<store>
     remine = cfg.hooks["remine"]
+    shared()  # a shared-mount scenario (the config stores under /shared): skip before `up`
     up(2)
     fresh_store(store)
     fresh("s6", store)
@@ -354,27 +493,29 @@ def scenario_s8() -> list[str]:
     """Time-budget policy: rank 0 decides every ``time_poll_every`` steps whether
     ``time_budget_s`` have passed and broadcasts it, so every rank reports the same number of
     checkpoints (Ray Train v2 would otherwise deadlock inside report)."""
-    up(2)
-    ensure_blocks()
-    fresh("s8")
+    st = up_store(2)
+    ensure_blocks(st.cfg)
+    st.fresh("s8")
     out = finish(
         start_train(
-            HARNESS_CFG,
+            st.cfg,
             "run_name=s8",
             "checkpoint.policy=time",
             "checkpoint.time_budget_s=5",
             "checkpoint.time_poll_every=2",
             "checkpoint.num_to_keep=null",
             name="s8",
+            env=st.env,
         ),
         name="s8",
     )
-    recs = records_for("s8")
+    recs = st.records("s8")
     print(summarize(recs))
     n_reports = int(final_metrics(out).get("reports", 0))
-    ledgers = checkpoint_ledgers(str(shared() / "runs" / "s8"))
+    with st.mac_env():
+        ledgers = checkpoint_ledgers(f"{st.runs}/s8")
     print(f"S8: {len(ledgers)} time-budget checkpoints, {n_reports} reports by rank 0")
-    return check_s8(recs, W, n_reports, ledgers, poll_every=2)
+    return check_s8(recs, st.W, n_reports, ledgers, poll_every=2)
 
 
 def scenario_s11() -> list[str]:
@@ -393,8 +534,12 @@ def streaming_scenario(
     cfg_path: str, run_name: str, env: dict[str, str] | None = None
 ) -> list[str]:
     cfg = load_config(str(ROOT / cfg_path))
-    segments, sleep_s = 10, 6.0
     s3 = cfg.storage.kind == "s3"
+    # the check needs the trainer to catch up with the producer and wait: over an object store
+    # across machines a segment costs the ranks 4 to 6 s (block reads and checkpoint puts over
+    # the mesh) against the producer's 6.7 s cadence, and Ray Train takes 20 s to start, so the
+    # bucket variant gets more segments for the trainer to close that gap
+    segments, sleep_s = (14 if s3 else 10), 6.0
     if s3:
         up(2, "minio", env=env)
         driver("mkbucket", cfg.store_root.split("/", 1)[0], env=env)
@@ -402,6 +547,7 @@ def streaming_scenario(
         run_uri = f"s3://{cfg.storage_path}/{run_name}"
         s3_rm([store_uri, run_uri], env or {})
     else:
+        shared()  # a shared-mount scenario (the config stores under /shared): skip before `up`
         up(2)
         store = Path(cfg.store_root).name  # /shared/<store>
         fresh_store(store)
@@ -544,13 +690,13 @@ def resume_check(run_name: str, segment: int, positions: int, env: dict[str, str
             "--scenario",
             "resume",
             "--W",
-            str(W),
+            str(_minio_cfg.log.W),
             "--ledger-segment",
             str(segment),
             "--ledger-positions",
             str(positions),
             "--expected-segments",
-            str(SEGMENTS),
+            str(MINIO_SEGMENTS),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -677,8 +823,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         for name in names:
             t0 = time.monotonic()
+            skipped = None
             try:
                 problems = SCENARIOS[name]()
+            except SkipScenario as exc:
+                problems, skipped = [], str(exc)
             except Exception as exc:  # report and continue with the next scenario
                 problems = [f"runner error: {exc}"]
             finally:
@@ -693,7 +842,12 @@ def main(argv: list[str] | None = None) -> int:
                     )
             for p in problems:
                 print(f"{name} FAIL: {p}")
-            print(f"{name}: {'PASS' if not problems else 'FAIL'} ({time.monotonic() - t0:.0f}s)")
+            if skipped:
+                print(f"{name}: SKIP ({skipped})")
+            else:
+                print(
+                    f"{name}: {'PASS' if not problems else 'FAIL'} ({time.monotonic() - t0:.0f}s)"
+                )
             failed += bool(problems)
     finally:
         if not args.keep_up:

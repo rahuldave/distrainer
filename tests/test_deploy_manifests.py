@@ -1,7 +1,8 @@
-"""The KubeRay manifests under deploy/k8s keep the harness contract of spec sections 9 and 11:
-the head pod offers no `trainer` resource, every worker pod offers one, the placeholders the
-driver renders are exactly the ones the manifests use, and MinIO is reachable where the harness
-configs expect it. Static checks only; nothing here talks to a cluster."""
+"""The KubeRay manifests under deploy/k8s and the uncloud compose file keep the harness contract
+of spec sections 9 and 11: the head offers no `trainer` resource, every worker offers one, the
+placeholders the KubeRay driver renders are exactly the ones the manifests use, MinIO is reachable
+where the harness configs expect it, and the three drivers describe the same nodes and implement
+the same verbs. Static checks only; nothing here talks to a cluster."""
 
 from __future__ import annotations
 
@@ -145,3 +146,119 @@ def test_compose_and_kuberay_describe_the_same_cluster():
     store = re.search(r"OBJECT_STORE_BYTES:-(\d+)", head_sh).group(1)
     assert head["object-store-memory"] == store
     assert group["rayStartParams"]["object-store-memory"] == store
+
+
+# ---- uncloud (deploy/uncloud/compose.yml, deploy/drivers/uncloud.sh) ----
+
+UNCLOUD = ROOT / "deploy" / "uncloud" / "compose.yml"
+UNCLOUD_DRIVER = ROOT / "deploy" / "drivers" / "uncloud.sh"
+COMPOSE = ROOT / "deploy" / "docker-compose.yml"
+COMMON_VERBS = [  # the contract of deploy/driver.sh that every driver implements
+    "build", "up", "down", "nuke", "wipe-shared", "scale", "exec-head", "kill-worker",
+    "kill-head", "stop-worker", "cp-from-head", "shared", "endpoint", "mkbucket", "ps", "logs",
+]  # fmt: skip
+MACHINES_SH = ROOT / "deploy" / "uncloud" / "machines.sh"
+INTERPOLATION = re.compile(
+    r"\$\{([A-Z0-9_]+)(?::([-?])([^}]*))?\}"
+)  # ${VAR}, ${VAR:-dflt}, ${VAR:?msg}
+
+
+def compose_defaults(path: Path) -> dict:
+    """The compose file with every ``${VAR:-default}`` replaced by its default (no .env; a
+    required ``${VAR:?message}`` becomes empty)."""
+    text = INTERPOLATION.sub(lambda m: m.group(3) if m.group(2) == "-" else "", path.read_text())
+    return yaml.safe_load(text)
+
+
+def test_uncloud_compose_describes_the_same_nodes_as_compose():
+    """Image, node scripts, Ray environment, shared memory, MinIO image and credentials must not
+    drift between the compose harness and the uncloud one (kuberay is pinned to compose above)."""
+    uc, dc = compose_defaults(UNCLOUD)["services"], compose_defaults(COMPOSE)["services"]
+    for name in ("head", "worker"):
+        assert uc[name]["image"] == dc[name]["image"]
+        assert uc[name]["command"] == dc[name]["command"]
+        assert uc[name]["shm_size"] == dc[name]["shm_size"]
+        assert uc[name]["environment"] == dc[name]["environment"]
+    assert uc["head"]["healthcheck"] == dc["head"]["healthcheck"]
+    assert uc["minio"]["image"] == dc["minio"]["image"]
+    assert uc["minio"]["command"] == dc["minio"]["command"]
+    assert uc["minio"]["environment"] == dc["minio"]["environment"]
+    assert uc["minio"]["healthcheck"] == dc["minio"]["healthcheck"]
+    assert uc["head"]["environment"]["S3_ENDPOINT"] == S3_DEFAULTS["S3_ENDPOINT"]
+
+
+def test_uncloud_compose_carries_everything_in_the_image_and_pulls_nothing():
+    """Nothing spans machines: no build, no bind mounts (the image carries the code), the locally
+    pushed image is used as is, and MinIO's data is a named volume on its machine."""
+    services = compose_defaults(UNCLOUD)["services"]
+    for name in ("head", "worker"):
+        assert "build" not in services[name] and "volumes" not in services[name]
+        assert services[name]["pull_policy"] == "never"
+    (volume,) = services["minio"]["volumes"]
+    assert not volume.startswith(("/", ".")) and volume.endswith(":/data")
+
+
+def test_uncloud_compose_pins_head_and_minio_together_and_workers_elsewhere():
+    raw = yaml.safe_load(UNCLOUD.read_text())["services"]
+    assert raw["head"]["x-machines"] == raw["minio"]["x-machines"]
+    (head_var,) = INTERPOLATION.findall(raw["head"]["x-machines"][0])
+    (worker_var,) = INTERPOLATION.findall(raw["worker"]["x-machines"])  # a comma-separated string
+    assert head_var[0] == "DISTRAINER_UNCLOUD_HEAD_MACHINE"
+    assert worker_var[0] == "DISTRAINER_UNCLOUD_WORKER_MACHINES"  # never the head machine's
+    replicas = str(raw["worker"]["deploy"]["replicas"])
+    assert INTERPOLATION.fullmatch(replicas) and "DISTRAINER_WORKERS" in replicas  # `up N`
+    assert "head" in raw["worker"]["depends_on"]
+
+
+def test_uncloud_compose_publishes_ports_only_inside_the_host_prefix():
+    """Published ports bind to the machine's address on the machine network only (OrbStack
+    forwards machine ports to the LAN otherwise); dashboard and MinIO sit on the head machine."""
+    raw = yaml.safe_load(UNCLOUD.read_text())["services"]
+    ports = {name: raw[name].get("x-ports", []) for name in raw}
+    assert ports["worker"] == []
+    for entry in ports["head"] + ports["minio"]:  # the prefix has no default: the driver sets it
+        assert entry.startswith("${DISTRAINER_UNCLOUD_HOST_PREFIX:?") and entry.endswith("@host")
+    assert any(":8265:8265/" in p for p in ports["head"])
+    assert any(":9000:9000/" in p for p in ports["minio"])
+
+
+def case_labels(driver: Path) -> set[str]:
+    """The verbs of the driver's dispatch ``case "$verb" in`` block."""
+    dispatch = driver.read_text().split('case "$verb" in', 1)[1]
+    return set(re.findall(r"^  ([a-z-]+)\)", dispatch, re.MULTILINE))
+
+
+def test_every_driver_implements_every_common_verb():
+    header = (ROOT / "deploy" / "driver.sh").read_text()
+    for verb in COMMON_VERBS:  # documented in the header, alone or as `ps | logs`
+        assert re.search(rf"^#   (?:[a-z-]+ \| )*{re.escape(verb)}\b", header, re.MULTILINE), verb
+    for driver in (ROOT / "deploy" / "drivers").glob("*.sh"):
+        missing = set(COMMON_VERBS) - case_labels(driver)
+        assert not missing, f"{driver.name} lacks {sorted(missing)}"
+
+
+def test_uncloud_driver_names_its_context_and_shares_nothing():
+    text = UNCLOUD_DRIVER.read_text()
+    assert 'export UNCLOUD_CONTEXT="$ctx"' in text  # never whatever context uc points at
+    assert "UNCLOUD_AUTO_CONFIRM=true" in text  # non-interactive deploys
+    assert "DISTRAINER_IMAGE:-distrainer:local" in text  # the same default as compose
+    assert re.search(r"^  shared\)\n\s+;;", text, re.MULTILINE)  # prints nothing
+
+
+def test_uncloud_driver_exports_every_variable_the_compose_file_interpolates():
+    """What compose.yml reads from the environment the driver sets (the S3 settings come from
+    .env with the same defaults as docker-compose.yml)."""
+    names = {m.group(1) for m in INTERPOLATION.finditer(UNCLOUD.read_text())}
+    assert names >= {"DISTRAINER_IMAGE", "DISTRAINER_WORKERS", "DISTRAINER_UNCLOUD_HOST_PREFIX"}
+    driver = UNCLOUD_DRIVER.read_text()
+    for name in sorted(names - set(S3_DEFAULTS)):
+        assert re.search(rf"(^|\s|export ){name}=", driver, re.MULTILINE), name
+
+
+def test_uncloud_driver_and_bootstrap_agree_on_their_defaults():
+    driver, machines = UNCLOUD_DRIVER.read_text(), MACHINES_SH.read_text()
+    for setting in (
+        "DISTRAINER_UNCLOUD_CONTEXT:-distrainer",
+        "DISTRAINER_UNCLOUD_MACHINES:-uc1 uc2 uc3",
+    ):
+        assert setting in driver and setting in machines, setting

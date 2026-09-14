@@ -1,0 +1,72 @@
+# distrainer on an uncloud cluster (docs/running-modes.md C): one container per Ray node across
+# Docker hosts joined by uncloud's WireGuard mesh. Deployed by deploy/drivers/uncloud.sh through
+# `uc deploy`; the head and MinIO are pinned to the head machine, the workers spread over the other
+# machines (a worker next to the head starved it: world size 3 ran five times slower).
+# Compared with deploy/docker-compose.yml (the same node image, scripts and environment):
+#   - no build and pull_policy never: `build` pushes the locally built image to every machine
+#     (`uc image push`), nothing is pulled from a registry
+#   - no bind mounts: nothing spans machines, the image carries the code and storage is S3 only
+#     (MinIO here, or any S3 endpoint), so a code edit needs `build` again
+#   - service names resolve through uncloud's DNS (`head`, `minio` are `head.internal`,
+#     `minio.internal`; every container gets `search internal.`), so ray-worker.sh and the harness
+#     configs (`http://minio:9000`) are unchanged
+#   - ports are published on the head machine's own address only (`@host` with the host prefix
+#     the driver exports: OrbStack's machine network there; OrbStack forwards machine ports to
+#     the LAN otherwise)
+#   - restart policy: uncloud's default, unless-stopped, for every service (compose gives it to
+#     the workers only); `docker kill` never triggers it, so a killed head or worker stays down
+#     until the driver starts it, as with compose
+services:
+  head:
+    image: ${DISTRAINER_IMAGE:-distrainer:local}
+    pull_policy: never
+    command: ["deploy/ray-head.sh"]
+    x-machines: ["${DISTRAINER_UNCLOUD_HEAD_MACHINE:-uc1}"]
+    x-ports:
+      - "${DISTRAINER_UNCLOUD_HOST_PREFIX:?set by deploy/drivers/uncloud.sh}:8265:8265/tcp@host"   # dashboard
+    shm_size: "1g"
+    environment: &env
+      RAY_TRAIN_V2_ENABLED: "1"
+      # declare a dead node dead in ~3 s instead of ~30 s so a restart does not land on it
+      RAY_health_check_period_ms: "1000"
+      RAY_health_check_timeout_ms: "1000"
+      RAY_health_check_failure_threshold: "3"
+      RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-distrainer}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-distrainer123}
+      S3_REGION: ${S3_REGION:-auto}
+    healthcheck:
+      test: ["CMD", "ray", "status"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
+  worker:
+    image: ${DISTRAINER_IMAGE:-distrainer:local}
+    pull_policy: never
+    command: ["deploy/ray-worker.sh"]
+    depends_on: [head]           # deploy order only; the worker script retries until the head answers
+    x-machines: "${DISTRAINER_UNCLOUD_WORKER_MACHINES:?set by deploy/drivers/uncloud.sh}"   # comma-separated
+    shm_size: "1g"
+    environment: *env
+    deploy:
+      replicas: ${DISTRAINER_WORKERS:-2}   # `up N` and `scale N` set it
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z   # pinned; the Docker Hub image was retired
+    x-machines: ["${DISTRAINER_UNCLOUD_HEAD_MACHINE:-uc1}"]
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-distrainer}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-distrainer123}
+    x-ports:
+      - "${DISTRAINER_UNCLOUD_HOST_PREFIX:?set by deploy/drivers/uncloud.sh}:9000:9000/tcp@host"
+      - "${DISTRAINER_UNCLOUD_HOST_PREFIX:?set by deploy/drivers/uncloud.sh}:9001:9001/tcp@host"
+    volumes: ["minio-data:/data"]   # a volume on the head machine; `down` keeps it, `nuke` removes it
+    healthcheck:   # the image ships neither mc nor curl; probe the port with bash
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9000' || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+volumes:
+  minio-data: {}
