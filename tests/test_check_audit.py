@@ -64,3 +64,30 @@ def test_expected_checkpoints():
     assert expected_checkpoints(1, 12, 3, 5) == 1  # 4 steps: only the end
     assert expected_checkpoints(4, 12, 2, 4, segment_end=False) == 4  # bare every_k: step 4 only
     assert expected_checkpoints(4, 12, 2, 1, segment_end=False) == 24
+
+
+def test_check_recovery_accepts_a_resized_restart_and_flags_gaps():
+    from integration_tests.cluster.check_audit import check_recovery
+
+    W = 8
+    first = [r for r in happy(W=W, n=2, segments=2, attempt=0) if r.position < 6]  # died in seg 0
+    # checkpoint after step 1 (cursor 2, n=2 -> 4 done); restart with 4 ranks from position 4
+    second = []
+    for seg in range(2):
+        for step in range(W // 4):
+            for rank in range(4):
+                pos = seg * W + step * 4 + rank
+                if pos >= 4:
+                    second.append(rec(1, rank, 4, seg, step, pos))
+    assert check_recovery(first + second, W, every_k=2, expected_world_sizes=[2, 4]) == []
+    assert any("world sizes" in p for p in check_recovery(first + second, W, 2, [2, 2]))
+    assert any("at least 2" in p for p in check_recovery(first, W, 2))
+    skipped = [r for r in second if r.position >= 6]  # restart skips 4 and 5: not a step boundary
+    assert any("step boundary" in p for p in check_recovery(first + skipped, W, 2))
+    gap = [r for r in second if r.position >= 8]  # restart at 8: 6 and 7 never consumed
+    problems = check_recovery(first + gap, W, 2)
+    assert any("gap" in p for p in problems) and any("misses" in p for p in problems)
+    off = [rec(1, r.rank, 4, r.segment, r.step, r.position) for r in second]
+    off[0] = rec(1, 0, 4, 0, 1, 5)  # first position not on a step boundary for n=4
+    problems = check_recovery(first + off, W, 2)
+    assert problems

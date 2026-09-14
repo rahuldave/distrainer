@@ -123,6 +123,61 @@ def check_resume(records: Sequence[AuditRecord], W: int, start_position: int) ->
     return problems
 
 
+def check_recovery(
+    records: Sequence[AuditRecord],
+    W: int,
+    every_k: int | None = None,
+    expected_world_sizes: Sequence[int] | None = None,
+    min_attempts: int = 2,
+) -> list[str]:
+    """Failure / resize scenarios (S2, S3, S4): several attempts, one log.
+
+    Per attempt the dealing rule holds for that attempt's world size. Attempt ``i`` starts at a
+    position that is ``<=`` the position after the last one attempt ``i-1`` consumed (no gap),
+    lies on a step boundary of the new world size, and the replayed tail is bounded by
+    ``every_k * n_old + n_new`` blocks. Over all attempts the union of positions covers every
+    segment touched, from position 0 to the end of the last segment, with no gaps.
+    """
+    if not records:
+        return ["no audit records"]
+    problems = check_dealing(records, W)
+    attempts = by_attempt(records)
+    ids = sorted(attempts)
+    if len(ids) < min_attempts:
+        problems.append(f"expected at least {min_attempts} attempts, found {ids}")
+    sizes = []
+    for a in ids:
+        recs = attempts[a]
+        n = {r.world_size for r in recs}
+        if len(n) != 1:
+            problems.append(f"attempt {a}: mixed world sizes {sorted(n)}")
+        sizes.append(min(n))
+    if expected_world_sizes is not None and sizes != list(expected_world_sizes):
+        problems.append(f"world sizes per attempt {sizes}, expected {list(expected_world_sizes)}")
+    for prev, cur in zip(ids, ids[1:], strict=False):
+        p_recs, c_recs = attempts[prev], attempts[cur]
+        n_old, n_new = p_recs[0].world_size, c_recs[0].world_size
+        last_prev = max(r.position for r in p_recs)
+        first_cur = min(r.position for r in c_recs)
+        seg = first_cur // W
+        if first_cur > last_prev + 1:
+            problems.append(f"attempt {cur} starts at {first_cur}, gap after {last_prev}")
+        if (first_cur - seg * W) % n_new != 0:
+            problems.append(
+                f"attempt {cur} starts at {first_cur}: not a step boundary for n={n_new}"
+            )
+        replayed = sum(1 for r in p_recs if r.position >= first_cur)
+        bound = (every_k or 1) * n_old + n_new
+        if replayed > bound:
+            problems.append(f"attempt {cur} replays {replayed} positions (> {bound})")
+    positions = sorted({r.position for r in records})
+    last_seg = max(r.segment for r in records)
+    if positions != list(range(0, (last_seg + 1) * W)):
+        missing = sorted(set(range(0, (last_seg + 1) * W)) - set(positions))
+        problems.append(f"union of attempts misses positions {missing[:8]}")
+    return problems
+
+
 def checkpoint_ledgers(run_uri: str) -> dict[str, dict]:
     """``{checkpoint dir name: ledger dict}`` from each checkpoint's ``.metadata.json``."""
     fs, run_dir = resolve(run_uri, create=False, **s3_options_from_env())

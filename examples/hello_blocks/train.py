@@ -108,7 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     n_reports = int(
         (result.metrics or {}).get("reports", 0)
     )  # metrics_dataframe only keeps kept checkpoints
-    expected = expected_reports(len(records) // W, W, cfg.scaling.max_workers, cfg.checkpoint)
+    n_ranks = max(r.world_size for r in records)  # the world size this run actually had
+    expected = expected_reports(len(records) // W, W, n_ranks, cfg.checkpoint)
     problems += check_report_count(n_reports, expected)
     print(f"reports per rank: {n_reports} (expected {expected})")
     for p in problems:

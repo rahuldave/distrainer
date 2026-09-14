@@ -55,3 +55,6 @@ Claude outputs/
 
 # Gest project-local database: local state, not versioned (same policy as sibling repos)
 .gest/
+
+# multi-node harness shared storage (bind mount for the containers)
+.harness/

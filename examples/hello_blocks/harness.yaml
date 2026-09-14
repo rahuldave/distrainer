@@ -1,0 +1,31 @@
+# hello_blocks inside the container harness: the driver runs in the head container, 2 to 3 worker
+# containers each offering one `trainer` resource, shared storage on the /shared mount.
+run_name: hello
+storage_path: /shared/runs
+store_root: /shared/blocks
+seed: 7
+ray_address: auto
+storage:
+  kind: local
+log:
+  W: 24                    # multiple of 2 and 3
+  passes: 1
+  wait_poll_s: 0.5
+checkpoint:
+  policy: any
+  every_k: 2
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: [2, 3]
+  resources_per_worker: {CPU: 1, trainer: 1}
+  elastic_resize_monitor_interval_s: 5
+failure:
+  max_failures: 3
+train:
+  n_blocks: 96             # 4 segments
+  rows_per_block: 32
+  features: 8
+  lr: 0.05
