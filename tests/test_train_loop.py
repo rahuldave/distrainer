@@ -5,12 +5,13 @@ import threading
 import pyarrow as pa
 import pytest
 import torch
-from conftest import make_table
+from conftest import AppendNextSegments, make_table
 
 from distrainer.audit import next_attempt, read_audit
 from distrainer.block import write_block
 from distrainer.config import DistrainerConfig
 from distrainer.log import BlockLog
+from distrainer.storage import exists, join
 from distrainer.trainer import CheckpointIO, DistTrainer, TrainInfo, train_loop
 from integration_tests.cluster.check_audit import check_dealing, check_s1
 
@@ -78,7 +79,8 @@ def fake_ray(monkeypatch):
     return state
 
 
-def make_store(tmp_path, W=8, segments=2, run_name="fake", **cfg_overrides):
+def make_store(tmp_path, W=8, segments=2, run_name="fake", end=True, **cfg_overrides):
+    """A batch store of ``segments`` segments; ``end=False`` leaves the log open (streaming)."""
     cfg = DistrainerConfig.from_dict(
         {
             "run_name": run_name,
@@ -94,7 +96,8 @@ def make_store(tmp_path, W=8, segments=2, run_name="fake", **cfg_overrides):
     log = BlockLog.create(fs, root, W=W, seed=1)
     for s in range(segments):
         log.append([write_block(fs, root, f"s{s}b{i}", make_table(2, i)) for i in range(W)])
-    log.end()
+    if end:
+        log.end()
     return cfg
 
 
@@ -211,3 +214,139 @@ def test_dist_trainer_config_mapping_and_picklable_loop_config(tmp_path, monkeyp
     )
     rc3 = DistTrainer(train_step, build_model, cfg_s3).run_config()
     assert rc3.storage_filesystem is not None and rc3.storage_path == "b/runs"
+
+
+# ---- M4: segment hooks and gc ----
+
+
+def test_segment_hook_runs_on_rank_zero_with_a_ledger_snapshot_and_its_own_log(tmp_path, fake_ray):
+    cfg = make_store(tmp_path, W=8, segments=1, end=False)
+    run_world(fake_ray, cfg, n=2, loop_extra={"hooks": [AppendNextSegments(segments=3)]})
+    fs, root = cfg.store_fs()
+    records = read_audit(fs, root, "fake")
+    assert check_s1(records, 8) == []
+    assert sorted({r.segment for r in records}) == [0, 1, 2]
+    assert {r.block_id[:2] for r in records if r.segment == 1} == {"s1"}
+    calls = AppendNextSegments.calls
+    assert [c["ctx"].rank for c in calls] == [0, 0, 0]  # rank 1 never runs hooks
+    assert [c["ledger"].segment for c in calls] == [0, 1, 2]  # snapshots, not the live ledger
+    assert all(c["ledger"].cursor == 4 and c["ledger"].world_size == 2 for c in calls)
+    assert all(isinstance(c["model"], torch.nn.Linear) for c in calls)  # unwrapped
+    assert len({id(c["log"]) for c in calls}) == 1 and calls[0]["log"].root == root
+    assert [c["ctx"].segment for c in calls] == [0, 1, 2]
+    log = BlockLog.open(fs, root)
+    assert log.ended()
+    assert fake_ray["barriers"] == 6  # 3 segment ends x 2 ranks
+    # the loader's producer thread was waiting for segment seq+1 while the hook committed it:
+    # every hook-made segment was committed before its first block was consumed
+    for seq in (1, 2):
+        first_ts = min(r.ts for r in records if r.segment == seq)
+        assert log.read_segment(seq).meta["created_at"] <= first_ts
+
+
+def test_hooks_from_config_are_built_by_entry_on_rank_zero(tmp_path, fake_ray):
+    cfg = make_store(
+        tmp_path,
+        W=8,
+        segments=1,
+        end=False,
+        hooks={"append": {"entry": "conftest:AppendNextSegments", "segments": 2}},
+    )
+    run_world(fake_ray, cfg, n=2)
+    fs, root = cfg.store_fs()
+    records = read_audit(fs, root, "fake")
+    assert check_s1(records, 8) == [] and max(r.segment for r in records) == 1
+    calls = AppendNextSegments.calls
+    assert [c["ctx"].rank for c in calls] == [0, 0]
+    assert calls[0]["config"].run_name == "fake"  # the factory received the worker's config
+
+
+def test_gc_at_segment_end_keeps_retention_behind_the_last_checkpoint(tmp_path, fake_ray):
+    log_cfg = {"W": 8, "passes": 1, "wait_poll_s": 0.01, "gc": True, "retention_segments": 1}
+    cfg = make_store(tmp_path, W=8, segments=4, log=log_cfg)
+    run_world(fake_ray, cfg, n=1)
+    fs, root = cfg.store_fs()
+    log = BlockLog.open(fs, root)
+    # the any policy checkpoints at every segment end: at the end of segment s the last
+    # checkpoint is in s, so segments < s - 1 are dropped; 0 and 1 are gone after segment 3
+    assert log.committed_seqs() == [2, 3]
+    assert not exists(fs, join(root, "blocks/s0b0.parquet"))
+    assert not exists(fs, join(root, "blocks/s1b7.parquet"))
+    assert exists(fs, join(root, "blocks/s2b0.parquet"))
+    assert exists(fs, join(root, "blocks/s3b7.parquet"))
+    assert sorted(r.position for r in read_audit(fs, root, "fake")) == list(range(32))
+
+    # gc_blocks: false drops the segment files only
+    cfg2 = make_store(tmp_path / "keep", W=8, segments=4, log={**log_cfg, "gc_blocks": False})
+    run_world(fake_ray, cfg2, n=1)
+    fs2, root2 = cfg2.store_fs()
+    assert BlockLog.open(fs2, root2).committed_seqs() == [2, 3]
+    assert exists(fs2, join(root2, "blocks/s0b0.parquet"))
+
+    # without a checkpoint nothing is ever behind the retention window
+    cfg3 = make_store(
+        tmp_path / "never", W=8, segments=4, log=log_cfg, checkpoint={"policy": "never"}
+    )
+    run_world(fake_ray, cfg3, n=1)
+    fs3, root3 = cfg3.store_fs()
+    assert BlockLog.open(fs3, root3).committed_seqs() == [0, 1, 2, 3]
+
+
+def test_resume_into_a_gc_window_fails_loudly_and_a_kept_segment_resumes(tmp_path, fake_ray):
+    log_cfg = {"W": 8, "passes": 1, "wait_poll_s": 0.01, "gc": True, "retention_segments": 1}
+    cfg = make_store(tmp_path, W=8, segments=4, log=log_cfg)
+    run_world(fake_ray, cfg, n=1)
+    fs, root = cfg.store_fs()
+    assert BlockLog.open(fs, root).committed_seqs() == [2, 3]
+    ckpts = {name: c for _, _, name, c in fake_ray["reports"] if c is not None}
+    old = ckpts["checkpoint_g000001_p000004_n01_a00"]  # segment 1: gone
+    with pytest.raises(RuntimeError, match="garbage-collected"):
+        run_world(fake_ray, cfg, n=1, checkpoint=old)
+    kept = ckpts["checkpoint_g000002_p000004_n01_a00"]  # segment 2, half done: still there
+    fake_ray["reports"].clear()
+    run_world(fake_ray, cfg, n=1, checkpoint=kept)
+    records = [r for r in read_audit(fs, root, "fake") if r.attempt == 2]
+    assert sorted(r.position for r in records) == list(range(20, 32))
+    # a hole below the last committed segment is an error too, not a silent end
+    cfg2 = make_store(tmp_path / "hole", W=8, segments=3)
+    fs2, root2 = cfg2.store_fs()
+    from distrainer.storage import delete
+
+    delete(fs2, BlockLog.open(fs2, root2).segment_path(1))  # 0 and 2 remain, then _END
+    with pytest.raises(RuntimeError, match="segment 1 is missing"):
+        run_world(fake_ray, cfg2, n=1)
+
+
+def test_dist_trainer_rejects_an_unimportable_hook_entry(tmp_path):
+    cfg = make_store(tmp_path, W=8, segments=1, hooks={"h": "no.such.module:Hook"})
+    with pytest.raises(ValueError, match="cannot import"):
+        DistTrainer(train_step, build_model, cfg)
+
+
+class DieBeforeAppending:
+    """Simulates rank 0 dying between the segment-end checkpoint report and the hook."""
+
+    def on_segment_end(self, model, ledger, log, ctx):
+        raise RuntimeError("node died before the hook appended the next segment")
+
+
+def test_restart_at_a_segment_boundary_replays_the_pending_hook_call(tmp_path, fake_ray):
+    cfg = make_store(tmp_path, W=8, segments=1, end=False)
+    with pytest.raises(RuntimeError, match="node died"):
+        run_world(fake_ray, cfg, n=1, loop_extra={"hooks": [DieBeforeAppending()]})
+    ckpts = {name: c for _, _, name, c in fake_ray["reports"] if c is not None}
+    boundary = ckpts["checkpoint_g000000_p000008_n01_a00"]  # segment 0 complete, no segment 1
+    fs, root = cfg.store_fs()
+    assert BlockLog.open(fs, root).committed_seqs() == [0]
+    hook = AppendNextSegments(segments=3)
+    run_world(fake_ray, cfg, n=1, checkpoint=boundary, loop_extra={"hooks": [hook]})
+    calls = AppendNextSegments.calls
+    assert [c["ledger"].segment for c in calls] == [0, 1, 2]  # the replayed end of segment 0 first
+    assert calls[0]["ctx"].attempt == 1 and calls[0]["ledger"].cursor == 8
+    records = [r for r in read_audit(fs, root, "fake") if r.attempt == 1]
+    assert sorted(r.position for r in records) == list(range(8, 24))
+    assert BlockLog.open(fs, root).ended()
+    # nothing to replay when the previous attempt did append (or the log is a finished batch)
+    fake_ray["reports"].clear()
+    run_world(fake_ray, cfg, n=1, checkpoint=boundary, loop_extra={"hooks": [hook]})
+    assert [c["ledger"].segment for c in calls[3:]] == [1, 2]

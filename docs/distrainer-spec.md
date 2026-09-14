@@ -95,7 +95,7 @@ flowchart TB
 
 **Writer** — the single process allowed to append segments to a log. It buffers `W` blocks, permutes them with `random.Random(hash((seed, seq)))`, writes the block files, then commits the segment file atomically (temp name + rename locally; single `put` on S3). Batch mode = a writer that emits the whole corpus at t=0, one `pass` per epoch: for each pass it first permutes the *entire* block list with `Random(hash((seed, pass)))` and only then cuts it into segments of `W`, so both segment membership and within-segment order change from pass to pass (positions keep counting up across passes). Streaming mode = a writer that runs alongside training; segment membership is then decided by arrival order, and a writer may hold a **shuffle buffer** of `k*W` blocks and commit each segment by sampling `W` of them to mix beyond the window (config `log.shuffle_buffer_segments`, default 1). The re-mining hook is a writer too.
 
-**Segments are always complete before they are trained on.** A segment file is written only after all of its `W` block files exist, in one atomic operation, and the trainer reads only committed segment files. So in both modes the segment being trained on is fully known, which is what makes resume well defined: the ledger names a segment and a cursor, the segment file cannot have changed, and the blocks it names are retained until a later checkpoint exists. The writer therefore needs to be exactly one segment ahead of the trainer, never more; `W` is also the streaming latency (the trainer cannot start a segment until `W` blocks have arrived), so streaming logs typically use a smaller `W` than batch logs. If a writer crashes mid-segment, block files not referenced from any committed segment are orphans: ignored by readers and removed by `gc`.
+**Segments are always complete before they are trained on.** A segment file is written only after all of its `W` block files exist, in one atomic operation, and the trainer reads only committed segment files. So in both modes the segment being trained on is fully known, which is what makes resume well defined: the ledger names a segment and a cursor, the segment file cannot have changed, and the blocks it names are retained until a later checkpoint exists. The writer therefore needs to be exactly one segment ahead of the trainer, never more; `W` is also the streaming latency (the trainer cannot start a segment until `W` blocks have arrived), so streaming logs typically use a smaller `W` than batch logs. If a writer crashes mid-segment, block files not referenced from any committed segment are orphans: ignored by readers; `gc` deletes only the blocks of the segments it drops, so an orphan sweep is a separate tool (not in v0.1; `docs/retention.md`).
 
 **Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (v0.1 does not allow partial segments: a segment file always lists exactly `W` blocks, and `BatchWriter`/`StreamingWriter` handle a corpus that is not a multiple of `W` with an explicit tail policy, `error` (default), `drop`, or `wrap`.)
 
@@ -214,7 +214,10 @@ class BlockLog:
         # Random(hash((seed, seq))); commits atomically; refuses to overwrite a committed seq
     def end(self) -> None                                       # write _END
     # retention
-    def gc(self, keep_from_seq: int) -> list[int]               # delete segments < keep_from_seq and their blocks
+    def gc(self, keep_from_seq: int, delete_blocks: bool = True) -> list[int]
+        # delete segments < keep_from_seq and (delete_blocks) the block files no kept segment
+        # references; the trainer calls it on rank 0 at segment ends when log.gc is set, with
+        # keep_from_seq = segment of the last checkpoint rank 0 saved - log.retention_segments
 
 # planner.py  (pure functions; no I/O)
 def lane(segment: Segment, rank: int, world_size: int, start_step: int = 0) -> list[tuple[int, BlockRef]]:
@@ -265,8 +268,14 @@ class LaneLoader:
 
 # hooks.py
 class SegmentHook(Protocol):
-    def on_segment_end(self, model, ledger: Ledger, log: BlockLog, ctx: TrainContextLite) -> None
-    # runs on rank 0 while others wait at a barrier; may log.append(...) the next segment(s)
+    def on_segment_end(self, model, ledger: Ledger, log: BlockLog, ctx: TrainInfo) -> None
+    # runs on rank 0 while others wait at a barrier; may log.append(...) the next segment(s).
+    # model is the unwrapped module, ledger a snapshot, log a BlockLog of rank 0's own (not the
+    # loader's reader instance), ctx the TrainInfo of the step just completed.
+def build_hooks(cfg: DistrainerConfig) -> list[SegmentHook]
+    # cfg.hooks = {name: {entry: "pkg.module:factory", ...args}} (or {name: "pkg.module:factory"});
+    # factory(cfg, **args) -> SegmentHook, called on rank 0 inside the worker, config order
+def load_entry(entry: str) -> Any                             # "pkg.module:attr", also used by the CLI
 
 # writer.py
 class BatchWriter:
@@ -319,7 +328,9 @@ for segment, (position, ref, table) in loader:
     else:
         report(metrics)                                    # keeps report counts aligned
     if segment_end:
-        if rank == 0: for h in hooks: h.on_segment_end(model, ledger, log, ctx)   # may append next segment
+        if rank == 0:
+            for h in hooks: h.on_segment_end(unwrap(model), copy(ledger), hook_log, ctx)   # may append next segment
+            if cfg.log.gc: hook_log.gc(last_ckpt_segment - cfg.log.retention_segments, cfg.log.gc_blocks)
         ray.train.collective.barrier()
 loader.close()
 ```
@@ -399,6 +410,9 @@ log:
   passes: 2                 # batch mode: BatchWriter passes over the corpus (epochs); ignored in streaming
   wait_poll_s: 1.0          # streaming: how often ranks poll for the next segment
   retention_segments: 4     # gc keeps this many segments behind the last checkpointed one
+  gc: false                 # true: rank 0 runs BlockLog.gc at every segment end (streaming logs)
+  gc_blocks: true           # gc also deletes block files no kept segment references (false if a
+                            # producer will re-reference old blocks in segments not committed yet)
   shuffle_buffer_segments: 1  # streaming writers: buffer k*W blocks and sample W per segment (1 = plain window)
 checkpoint:
   policy: any               # any | every_k | segment_end | pass_end | time
@@ -417,13 +431,13 @@ scaling:
   elastic_resize_monitor_interval_s: 15
 failure:
   max_failures: 3
-hooks:
-  remine: {every_segment: true}
+hooks:                         # name -> {entry: "pkg.module:factory", ...args}; factory(cfg, **args)
+  remine: {entry: examples.toy_contrastive.remine:RemineHook, segments: 12, initial_segments: 1}
 ```
 
 ## 8. Toy workload (examples/toy_contrastive)
 
-Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
+Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, mines the anchors of the next segment (a fixed slice of a per-pass permutation of the corpus, so `pass_idx` advances when the slices wrap) and appends them as the next segment; with the hook configured (`hooks.remine`) `make_blocks.py` writes only the first `initial_segments` segments (mined by centroid distance in input space) and leaves the log open, and the hook writes `_END` once `segments` segments exist. The hook is idempotent across restarts: a re-run segment end whose successor is already committed does nothing. CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 
@@ -468,14 +482,14 @@ Each scenario runs the toy workload with a distinct `run_name` and then asserts 
 | S3 | Elastic scale up | `up 2`, `train` with `num_workers=[2,3]`; after a few blocks `scale 3` | A later attempt runs with `world_size=3`; the tail is re-dealt on a step boundary (positions `k*3 + r`); no block is lost; the union of attempts equals the log (`check_recovery`, first attempt at 2, last at 3). |
 | S4 | Elastic scale down | `up 3`, `train`; after a few blocks `scale 2` (the removed worker is stopped, not restarted) | A later attempt runs with `world_size=2`; assertions as S3 (first attempt at 3, last at 2). |
 | S5 | Checkpoint cadence | Runs with `every_k=1`, `every_k=4`, `segment_end`, all with `num_to_keep: null` | Number of checkpoints in the run dir matches the cadence; `ledger.cursor` of each checkpoint is a multiple of `k` (or equals `W/n`); directory names match their ledgers. |
-| S6 | Segment hook / re-mining (streaming mode) | Enable `remine` | Segment `seq+1` is committed before any rank consumes it (audit `ts` of first position in `seq+1` > commit time); block contents differ from the base corpus; audit shows the new block ids consumed. |
-| S11 | Streaming producer | Start `train` before `blocks` has finished writing; writer sleeps between segments | Ranks wait (audit gap) rather than fail; positions still contiguous; `_END` terminates the run cleanly; `gc` leaves ≥ `retention_segments` behind the last checkpoint. |
+| S6 | Segment hook / re-mining (streaming mode) | Enable `remine` | Segment `seq+1` is written by the hook after rank 0's last step of `seq` and committed before any rank consumes it (audit `ts` of first position in `seq+1` > commit time); its blocks are new ids the base corpus did not have, and the audit shows exactly those ids consumed. |
+| S11 | Streaming producer | `examples/streaming_producer/produce.py` in the head writes segments with sleeps while `train` runs; S11s3 is the same with the log, blocks, audit and checkpoints on MinIO (the segment's single put is the commit the ranks poll for) | Ranks wait (audit gap, and a segment committed after the trainer finished the previous one) rather than fail; positions still contiguous; `_END` terminates the run cleanly; `gc` leaves exactly `retention_segments` behind the last checkpoint and only the kept segments' blocks. |
 | S7 | Determinism | Two stores built from the same seed, two runs, no failures | Identical audit sequences per rank. |
-| S8 | Time-budget policy | `time_budget_s=5` | All ranks report the same number of checkpoints (consensus via broadcast). |
+| S8 | Time-budget policy | `time_budget_s=5`, `time_poll_every=2`, every checkpoint kept | The run finishes (Ray Train v2 deadlocks inside `report` if the ranks disagree, so completion is the consensus proof); at least two budget checkpoints, spaced by at least the poll interval; rank 0's `reports` count equals the number of checkpoints (plus one final metrics-only report). |
 | S9 | Cold restore | Full run on MinIO keeping every checkpoint; `down`; `wipe-shared`; `up`; `distrainer resume` from a mid-run checkpoint URI into a new run | The resumed run's positions are exactly the ledger's resume position (round-down for its world size) to the end of the log, once, dealt by the rule (`check_resume`). |
 | S10 | Head loss | `kill-head` mid-run on MinIO; `up` (workers rejoin); resume from the newest checkpoint with a readable ledger into a new run | As S9. |
 
-Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 green against MinIO.
+Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 and S11s3 green against MinIO.
 
 ## 11. Phase 2: k3s / KubeRay on OrbStack
 

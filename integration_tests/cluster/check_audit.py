@@ -81,6 +81,253 @@ def check_s1(records: Sequence[AuditRecord], W: int) -> list[str]:
     return problems
 
 
+def check_s6(
+    records: Sequence[AuditRecord],
+    segments: Sequence[Any],
+    W: int,
+    initial_segments: int,
+    expected_segments: int | None = None,
+    writer: str = "remine",
+    clock_tolerance_s: float = 0.05,
+) -> list[str]:
+    """Segment hook (streaming through re-mining): S1 holds; every segment from
+    ``initial_segments`` on was written by the hook (``meta.writer``, ``mined_after_segment``
+    is the previous one), committed (``meta.created_at``) after rank 0's last record of the
+    previous segment and before the first record that consumed it, and the records of such a
+    segment name exactly its blocks, none of which the base corpus (the segments below
+    ``initial_segments``) had. ``segments`` are the log's ``Segment`` objects; the timestamps
+    are all ``time.time()`` on the containers' host, ``clock_tolerance_s`` absorbs skew."""
+    problems = check_s1(records, W)
+    if not records:
+        return problems
+    by_seq = {s.seq: s for s in segments}
+    base_ids = {b.block_id for s in segments if s.seq < initial_segments for b in s.blocks}
+    first_ts: dict[int, float] = {}
+    last_ts_rank0: dict[int, float] = {}
+    consumed: dict[int, set[str]] = defaultdict(set)
+    for r in records:
+        first_ts[r.segment] = min(first_ts.get(r.segment, r.ts), r.ts)
+        if r.rank == 0:
+            last_ts_rank0[r.segment] = max(last_ts_rank0.get(r.segment, r.ts), r.ts)
+        consumed[r.segment].add(r.block_id)
+    if expected_segments is not None and sorted(by_seq) != list(range(expected_segments)):
+        problems.append(f"log has segments {sorted(by_seq)}, expected 0..{expected_segments - 1}")
+    for seq, ts in sorted(first_ts.items()):
+        seg = by_seq.get(seq)
+        if seg is None:
+            problems.append(f"segment {seq} was consumed but is not in the log")
+            continue
+        if seq < initial_segments:
+            continue
+        if seg.meta.get("writer") != writer or seg.meta.get("mined_after_segment") != seq - 1:
+            problems.append(f"segment {seq}: not written by the hook after segment {seq - 1}")
+        created = seg.meta.get("created_at")
+        if created is None or float(created) > ts + clock_tolerance_s:
+            problems.append(
+                f"segment {seq}: committed at {created}, first consumed at {ts} (hook too late)"
+            )
+        elif (
+            seq - 1 in last_ts_rank0 and float(created) + clock_tolerance_s < last_ts_rank0[seq - 1]
+        ):
+            problems.append(
+                f"segment {seq}: committed at {created} before rank 0 finished segment "
+                f"{seq - 1} at {last_ts_rank0[seq - 1]} (not mined at the segment end)"
+            )
+        ids = {b.block_id for b in seg.blocks}
+        if consumed[seq] != ids:
+            problems.append(f"segment {seq}: consumed {sorted(consumed[seq])[:4]}... != its blocks")
+        reused = consumed[seq] & base_ids
+        if reused:
+            problems.append(f"segment {seq}: re-used base corpus blocks {sorted(reused)[:4]}")
+    return problems
+
+
+def segment_starts(records: Sequence[AuditRecord]) -> dict[int, float]:
+    """Earliest audit ``ts`` per segment."""
+    first: dict[int, float] = {}
+    for r in records:
+        first[r.segment] = min(first.get(r.segment, r.ts), r.ts)
+    return first
+
+
+def check_s11(
+    records: Sequence[AuditRecord],
+    W: int,
+    committed_at: dict[int, float],
+    min_gap_s: float,
+    expected_segments: int | None = None,
+    clock_tolerance_s: float = 0.05,
+) -> list[str]:
+    """Streaming producer: S1 holds; no segment was consumed before the producer committed it
+    (``committed_at``: seq -> commit time, parsed from the producer's output so gc'd segments
+    count too); every segment up to ``expected_segments`` was consumed (the run ended at
+    ``_END``); and the ranks waited for the producer at least once: some segment was committed
+    only after the trainer had finished the previous one (the direct signal), and some two
+    consecutive segments started at least ``min_gap_s`` apart (the producer's sleep minus the
+    poll interval and a tolerance; the steady state of a trainer faster than its producer).
+    ``clock_tolerance_s`` absorbs skew between the producer's and the ranks' clocks."""
+    problems = check_s1(records, W)
+    if not records:
+        return problems
+    starts = segment_starts(records)
+    ends: dict[int, float] = {}
+    for r in records:
+        ends[r.segment] = max(ends.get(r.segment, r.ts), r.ts)
+    seqs = sorted(starts)
+    if expected_segments is not None and seqs != list(range(expected_segments)):
+        problems.append(f"consumed segments {seqs}, expected 0..{expected_segments - 1}")
+    for seq in seqs:
+        if seq not in committed_at:
+            problems.append(f"segment {seq}: no commit time known")
+        elif committed_at[seq] > starts[seq] + clock_tolerance_s:
+            problems.append(
+                f"segment {seq}: consumed at {starts[seq]:.3f} before its commit at "
+                f"{committed_at[seq]:.3f}"
+            )
+    waited = [
+        seq
+        for seq in seqs[1:]
+        if seq in committed_at and committed_at[seq] > ends[seq - 1] + clock_tolerance_s
+    ]
+    if not waited:
+        problems.append(
+            "ranks never waited for the producer: no segment was committed after the trainer "
+            "had finished the previous one"
+        )
+    gaps = [starts[b] - starts[a] for a, b in zip(seqs, seqs[1:], strict=False)]
+    if gaps and max(gaps) < min_gap_s:
+        problems.append(
+            f"segment start gaps {[round(g, 2) for g in gaps]} all below {min_gap_s:.2f}s: the "
+            "trainer never reached the producer's pace"
+        )
+    return problems
+
+
+def check_retention(
+    kept_seqs: Sequence[int],
+    block_files: set[str],
+    kept_locators: set[str],
+    last_checkpoint_segment: int,
+    retention_segments: int,
+) -> list[str]:
+    """After a run with ``log.gc``: the log starts exactly ``retention_segments`` behind the
+    last checkpoint's segment (or at 0), is contiguous, and the block directory holds exactly
+    the blocks the kept segments reference (deleted segments' blocks are gone, kept ones intact).
+    """
+    problems: list[str] = []
+    seqs = sorted(kept_seqs)
+    if not seqs:
+        return ["no segments left in the log"]
+    expected_first = max(0, last_checkpoint_segment - retention_segments)
+    if seqs[0] != expected_first:
+        problems.append(
+            f"log starts at segment {seqs[0]}, expected {expected_first} "
+            f"(last checkpoint segment {last_checkpoint_segment} - retention {retention_segments})"
+        )
+    if seqs != list(range(seqs[0], seqs[-1] + 1)):
+        problems.append(f"kept segments are not contiguous: {seqs}")
+    missing = sorted(kept_locators - block_files)
+    orphans = sorted(block_files - kept_locators)
+    if missing:
+        problems.append(f"blocks of kept segments missing: {missing[:5]}")
+    if orphans:
+        problems.append(f"blocks of deleted segments still present: {orphans[:5]}")
+    return problems
+
+
+def check_streaming_run(
+    fs: Any,
+    root: str,
+    run_name: str,
+    committed_at: dict[int, float],
+    min_gap_s: float,
+    expected_segments: int,
+    run_uri: str,
+    retention_segments: int,
+) -> tuple[list[str], dict[str, Any]]:
+    """Every S11 assertion against a store that may be local or an object store: ``check_s11``
+    on the audit trail, the log ended, ``check_retention`` on what is left of the log and the
+    block directory against the newest checkpoint under ``run_uri``. Returns ``(problems,
+    info)`` with the audit summary, the segment start gaps, the kept segments and the last
+    checkpoint segment, so it can run inside the head container and print JSON."""
+    from distrainer.log import BlockLog
+
+    records = read_audit(fs, root, run_name)
+    log = BlockLog.open(fs, root)
+    problems = check_s11(records, log.W, committed_at, min_gap_s, expected_segments)
+    if not log.ended():
+        problems.append("the producer did not end the log")
+    starts = segment_starts(records)
+    seqs = sorted(starts)
+    kept = list(log.segments())
+    info: dict[str, Any] = {
+        "summary": summarize(records),
+        "gaps": [round(starts[b] - starts[a], 2) for a, b in zip(seqs, seqs[1:], strict=False)],
+        "kept": [seg.seq for seg in kept],
+        "last_ckpt": None,
+    }
+    ledgers = checkpoint_ledgers(run_uri)
+    if not ledgers:
+        return problems + [f"no checkpoint ledgers under {run_uri}"], info
+    info["last_ckpt"] = max(int(v["segment"]) for v in ledgers.values())
+    block_files = {
+        f"blocks/{n}" for n in list_names(fs, join(root, "blocks")) if n.endswith(".parquet")
+    }  # a leftover write_atomic temp file is an orphan, not a block
+    problems += check_retention(
+        info["kept"],
+        block_files,
+        {b.locator for seg in kept for b in seg.blocks},
+        info["last_ckpt"],
+        retention_segments,
+    )
+    return problems, info
+
+
+def check_s8(
+    records: Sequence[AuditRecord],
+    W: int,
+    n_reports: int,
+    ledgers: dict[str, dict],
+    poll_every: int = 1,
+) -> list[str]:
+    """Time-budget policy: one attempt with S1 dealing (the run finishing at all proves every
+    rank called ``report`` equally often, Ray Train v2 enforces it inside ``report``); the budget
+    fired more than once; rank 0's ``reports`` count equals the number of checkpoints written,
+    plus one when the last step was a metrics-only report (so the run must keep every
+    checkpoint: ``num_to_keep: null``); consecutive checkpoints are at least ``poll_every``
+    steps apart (the policy only decides on poll steps); each ledger is a valid step boundary
+    and its directory name matches."""
+    problems = check_s1(records, W)
+    if len(ledgers) < 2:
+        problems.append(f"expected at least 2 time-budget checkpoints, found {len(ledgers)}")
+    if n_reports not in (len(ledgers), len(ledgers) + 1):
+        problems.append(f"rank 0 reported {n_reports} times for {len(ledgers)} checkpoints")
+    sizes = {int(led["world_size"]) for led in ledgers.values()}
+    if len(sizes) > 1:
+        problems.append(f"checkpoints from several world sizes {sorted(sizes)}: not one attempt")
+    n = min(sizes) if sizes else 1
+    positions = sorted(
+        int(led["segment"]) * W + int(led["cursor"]) * int(led["world_size"])
+        for led in ledgers.values()
+    )
+    for a, b in zip(positions, positions[1:], strict=False):
+        if b - a < poll_every * n:
+            problems.append(
+                f"checkpoints at positions {a} and {b} are closer than {poll_every} poll steps"
+            )
+    for name, led in sorted(ledgers.items()):
+        cursor, n = int(led["cursor"]), int(led["world_size"])
+        if cursor <= 0 or cursor * n > W:
+            problems.append(f"{name}: cursor {cursor} at world size {n} is not a step boundary")
+        expected_name = (
+            f"checkpoint_g{int(led['segment']):06d}_p{cursor * n:06d}"
+            f"_n{n:02d}_a{int(led.get('run_attempt', 0)):02d}"
+        )
+        if name != expected_name:
+            problems.append(f"{name}: directory name does not match ledger {led}")
+    return problems
+
+
 def check_s7(a: Sequence[AuditRecord], b: Sequence[AuditRecord]) -> list[str]:
     """Determinism: two runs with the same seed have identical per-rank sequences."""
 

@@ -1,9 +1,11 @@
 """Cluster scenarios (spec section 10) driven through the deploy/driver.sh verbs.
 
-S2 worker kill mid-run, S3 elastic scale up, S4 scale down, S9 cold restore and S10 head loss
-against MinIO. Each scenario brings the cluster to the state it needs, runs hello_blocks inside
-the head container, injects the failure while training runs, waits for the run to finish, and
-checks the audit trail on the shared mount. Run: ``just integration S2`` (or ``all``).
+S2 worker kill mid-run, S3 elastic scale up, S4 scale down, S6 re-mining hook, S8 time-budget
+policy, S9 cold restore and S10 head loss against MinIO, S11 streaming producer (S11s3: the same
+with the log and the run on MinIO, so the segment put is the commit). Each scenario
+brings the cluster to the state it needs, runs an example inside the head container, injects
+the failure while training runs, waits for the run to finish, and checks the audit trail on the
+shared mount. Run: ``just integration S2`` (or ``all``).
 """
 
 from __future__ import annotations
@@ -21,16 +23,26 @@ sys.path.insert(0, str(ROOT))
 
 from distrainer.audit import read_audit  # noqa: E402
 from distrainer.config import load_config  # noqa: E402
-from distrainer.storage import resolve  # noqa: E402
+from distrainer.log import BlockLog  # noqa: E402
+from distrainer.storage import (  # noqa: E402
+    resolve,  # noqa: E402
+)
 from integration_tests.cluster.check_audit import (  # noqa: E402
     by_attempt,
     check_recovery,
+    check_s6,
+    check_s8,
+    check_streaming_run,
+    checkpoint_ledgers,
     summarize,
 )
 
 DRIVER = ROOT / "deploy" / "driver.sh"
 HARNESS_CFG = "examples/hello_blocks/harness.yaml"
 MINIO_CFG = "examples/hello_blocks/harness-minio.yaml"
+REMINE_CFG = "examples/toy_contrastive/harness-remine.yaml"
+STREAM_CFG = "examples/hello_blocks/harness-stream.yaml"
+STREAM_MINIO_CFG = "examples/hello_blocks/harness-stream-minio.yaml"
 _cfg = load_config(str(ROOT / HARNESS_CFG))
 _minio_cfg = load_config(str(ROOT / MINIO_CFG))
 W = _cfg.log.W
@@ -89,21 +101,25 @@ def audit_dir(run_name: str) -> Path:
 
 
 def start_train(
-    cfg: str, *overrides: str, env: dict[str, str] | None = None, name: str = "train"
+    cfg: str,
+    *overrides: str,
+    env: dict[str, str] | None = None,
+    name: str = "train",
+    script: str = "examples/hello_blocks/train.py",
 ) -> subprocess.Popen:
-    """Start train.py inside the head; its output streams to .harness/logs/<name>.log (a pipe
-    that nobody drains while waiting would fill up and stall the trainer)."""
-    cmd = [
-        str(DRIVER),
-        "exec-head",
-        "python",
-        "examples/hello_blocks/train.py",
-        "--config",
-        cfg,
-        "--no-check",
-    ]
+    """Start a train.py inside the head (see ``start_head``)."""
+    args = ["--config", cfg, "--no-check"]
     for o in overrides:
-        cmd += ["--set", o]
+        args += ["--set", o]
+    return start_head(script, args, env=env, name=name)
+
+
+def start_head(
+    script: str, args: list[str], env: dict[str, str] | None = None, name: str = "head"
+) -> subprocess.Popen:
+    """Start a Python script inside the head; its output streams to .harness/logs/<name>.log (a
+    pipe that nobody drains while waiting would fill up and stall the process)."""
+    cmd = [str(DRIVER), "exec-head", "python", script, *args]
     logs = ROOT / ".harness" / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log = open(logs / f"{name}.log", "w")  # noqa: SIM115 (closed in finish)
@@ -186,6 +202,7 @@ def wait_for_blocks_s3(
 
 
 def finish(proc: subprocess.Popen, timeout_s: float = 600, name: str = "train") -> str:
+    """Wait for a process started by ``start_head``; returns everything it printed."""
     try:
         proc.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
@@ -197,10 +214,10 @@ def finish(proc: subprocess.Popen, timeout_s: float = 600, name: str = "train") 
     finally:
         if proc in _running:
             _running.remove(proc)
-        entry = _logs.pop(proc.pid, None)
-        if entry is not None:
-            entry[1].close()
-    out = _output(proc)
+    out = _output(proc)  # before the log entry is dropped, or there is nothing to read
+    entry = _logs.pop(proc.pid, None)
+    if entry is not None:
+        entry[1].close()
     print(f"driver output: .harness/logs/{name}.log")
     if proc.returncode != 0:
         raise RuntimeError(f"training exited {proc.returncode}:\n{out[-2500:]}")
@@ -212,11 +229,18 @@ def records_for(run_name: str):
     return read_audit(fs, root, run_name)
 
 
-def fresh(run_name: str) -> None:
+def fresh(run_name: str, store: str = "blocks") -> None:
     import shutil
 
     shutil.rmtree(shared() / "runs" / run_name, ignore_errors=True)
-    shutil.rmtree(audit_dir(run_name), ignore_errors=True)
+    shutil.rmtree(shared() / store / "audit" / run_name, ignore_errors=True)
+
+
+def fresh_store(store: str) -> None:
+    """Remove a whole block store under the shared mount (a streamed log must start empty)."""
+    import shutil
+
+    shutil.rmtree(shared() / store, ignore_errors=True)
 
 
 def ensure_blocks(cfg: str = HARNESS_CFG) -> None:
@@ -285,6 +309,174 @@ def scenario_s4() -> list[str]:
     return check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS) + check_transition(
         recs, first=3, last=2
     )
+
+
+def scenario_s6() -> list[str]:
+    """Re-mining hook: segment 0 is built by make_blocks.py, every later segment is mined by
+    rank 0 with the current encoder at the previous segment's end; the log is streamed."""
+    cfg = load_config(str(ROOT / REMINE_CFG))
+    store = Path(cfg.store_root).name  # /shared/<store>
+    remine = cfg.hooks["remine"]
+    up(2)
+    fresh_store(store)
+    fresh("s6", store)
+    proc = start_train(
+        REMINE_CFG, "run_name=s6", name="s6", script="examples/toy_contrastive/train.py"
+    )
+    finish(proc, name="s6")
+    fs, root = resolve(str(shared() / store), create=False)
+    recs = read_audit(fs, root, "s6")
+    print(summarize(recs))
+    log = BlockLog.open(fs, root)
+    problems = check_s6(
+        recs,
+        list(log.segments()),
+        log.W,
+        int(remine.get("initial_segments", 1)),
+        expected_segments=int(remine["segments"]),
+    )
+    if not log.ended():
+        problems.append("the hook did not end the log")
+    return problems
+
+
+def final_metrics(output: str) -> dict[str, Any]:
+    """The ``final metrics: {...}`` dict a train.py printed."""
+    import ast
+
+    for line in output.splitlines():
+        if line.startswith("final metrics: "):
+            return dict(ast.literal_eval(line[len("final metrics: ") :]))
+    raise RuntimeError("no 'final metrics:' line in the driver output")
+
+
+def scenario_s8() -> list[str]:
+    """Time-budget policy: rank 0 decides every ``time_poll_every`` steps whether
+    ``time_budget_s`` have passed and broadcasts it, so every rank reports the same number of
+    checkpoints (Ray Train v2 would otherwise deadlock inside report)."""
+    up(2)
+    ensure_blocks()
+    fresh("s8")
+    out = finish(
+        start_train(
+            HARNESS_CFG,
+            "run_name=s8",
+            "checkpoint.policy=time",
+            "checkpoint.time_budget_s=5",
+            "checkpoint.time_poll_every=2",
+            "checkpoint.num_to_keep=null",
+            name="s8",
+        ),
+        name="s8",
+    )
+    recs = records_for("s8")
+    print(summarize(recs))
+    n_reports = int(final_metrics(out).get("reports", 0))
+    ledgers = checkpoint_ledgers(str(shared() / "runs" / "s8"))
+    print(f"S8: {len(ledgers)} time-budget checkpoints, {n_reports} reports by rank 0")
+    return check_s8(recs, W, n_reports, ledgers, poll_every=2)
+
+
+def scenario_s11() -> list[str]:
+    """Streaming producer: a separate process in the head creates the log and commits a segment
+    every few seconds while the ranks train and wait; gc keeps the log short."""
+    return streaming_scenario(STREAM_CFG, "s11")
+
+
+def scenario_s11s3() -> list[str]:
+    """S11 with the store and the run on MinIO: every segment commit is one S3 put, the ranks
+    poll the bucket, gc deletes objects behind the retention window."""
+    return streaming_scenario(STREAM_MINIO_CFG, "s11s3", env={"DISTRAINER_MINIO": "1"})
+
+
+def streaming_scenario(
+    cfg_path: str, run_name: str, env: dict[str, str] | None = None
+) -> list[str]:
+    cfg = load_config(str(ROOT / cfg_path))
+    segments, sleep_s = 10, 6.0
+    s3 = cfg.storage.kind == "s3"
+    if s3:
+        up(2, "minio", env=env)
+        driver("mkbucket", cfg.store_root.split("/", 1)[0], env=env)
+        store_uri = f"s3://{cfg.store_root}"  # the whole streamed store belongs to this run
+        run_uri = f"s3://{cfg.storage_path}/{run_name}"
+        s3_rm([store_uri, run_uri], env or {})
+    else:
+        up(2)
+        store = Path(cfg.store_root).name  # /shared/<store>
+        fresh_store(store)
+        fresh(run_name, store)
+        store_uri = str(shared() / store)
+        run_uri = str(shared() / "runs" / run_name)
+    producer = start_head(
+        "examples/streaming_producer/produce.py",
+        ["--config", cfg_path, "--segments", str(segments), "--sleep-s", str(sleep_s)],
+        env=env,
+        name=f"{run_name}-producer",
+    )
+    deadline = time.monotonic() + (180 if s3 else 60)  # a bucket probe is a docker exec
+    while not log_exists(store_uri, env):  # the trainer must find the log, not build a batch one
+        _check_alive(producer)
+        if time.monotonic() > deadline:
+            raise TimeoutError("the producer did not create the log")
+        time.sleep(0.5)
+    proc = start_train(cfg_path, f"run_name={run_name}", env=env, name=run_name)
+    producer_out = finish(producer, name=f"{run_name}-producer")
+    finish(proc, name=run_name)
+    committed_at = {
+        int(ln.split()[1]): float(ln.rsplit(" ", 1)[1])
+        for ln in producer_out.splitlines()
+        if ln.startswith("segment ") and " committed at " in ln
+    }
+    args = (
+        run_name,
+        committed_at,
+        sleep_s - cfg.log.wait_poll_s - 1.0,
+        segments,
+        run_uri,
+        cfg.log.retention_segments,
+    )
+    if s3:  # the trail, the log and the checkpoints are on the bucket: check inside the head
+        import json
+
+        out = head_python(
+            "import json\n"
+            "from distrainer.storage import resolve, s3_options_from_env\n"
+            "from integration_tests.cluster.check_audit import check_streaming_run\n"
+            f"fs, root = resolve({store_uri!r}, create=False, **s3_options_from_env())\n"
+            f"print(json.dumps(check_streaming_run(fs, root, *{args!r})))\n",
+            env=env,
+        )
+        problems, info = json.loads(out.strip().splitlines()[-1])
+    else:
+        fs, root = resolve(store_uri, create=False)
+        problems, info = check_streaming_run(fs, root, *args)
+    print(info["summary"])
+    print(f"{run_name.upper()} segment start gaps: {info['gaps']}")
+    if info["last_ckpt"] is not None:
+        print(
+            f"{run_name.upper()}: log keeps segments {info['kept']}, "
+            f"last checkpoint segment {info['last_ckpt']}"
+        )
+    return problems
+
+
+def log_exists(store_uri: str, env: dict[str, str] | None = None) -> bool:
+    """Whether a block log exists under ``store_uri`` (a bucket is probed inside the head; a
+    failing probe counts as "not yet")."""
+    if store_uri.startswith("s3://"):
+        try:
+            out = head_python(
+                "from distrainer.log import BlockLog\n"
+                "from distrainer.storage import resolve, s3_options_from_env\n"
+                f"fs, root = resolve({store_uri!r}, create=False, **s3_options_from_env())\n"
+                "print('LOG_EXISTS' if BlockLog(fs, root).exists() else 'NO_LOG')\n",
+                env=env,
+            )
+        except RuntimeError:
+            return False
+        return "LOG_EXISTS" in out.split()
+    return BlockLog(*resolve(store_uri, create=False)).exists()
 
 
 def s3_rm(prefixes: list[str], env: dict[str, str]) -> None:
@@ -466,8 +658,12 @@ SCENARIOS = {
     "S2": scenario_s2,
     "S3": scenario_s3,
     "S4": scenario_s4,
+    "S6": scenario_s6,
+    "S8": scenario_s8,
     "S9": scenario_s9,
     "S10": scenario_s10,
+    "S11": scenario_s11,
+    "S11s3": scenario_s11s3,
 }
 
 
@@ -493,7 +689,7 @@ def main(argv: list[str] | None = None) -> int:
                     # killing the local `docker compose exec` client does not reach the process
                     # inside the container
                     driver(
-                        "exec-head", "pkill", "-f", "examples/hello_blocks/train.py", check=False
+                        "exec-head", "pkill", "-f", "examples/.*/(train|produce).py", check=False
                     )
             for p in problems:
                 print(f"{name} FAIL: {p}")

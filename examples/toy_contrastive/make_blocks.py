@@ -44,31 +44,54 @@ def mine_rows(
     near: np.ndarray,
     k: int,
     rng: np.random.Generator,
+    anchors: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
-    """One positive and k hard negatives per item; returns columnar arrays (row i = anchor i)."""
+    """One positive and k hard negatives per anchor (every item by default); returns columnar
+    arrays aligned with ``anchors`` (row j belongs to anchor ``anchors[j]``)."""
     N = len(items)
+    idx = np.arange(N) if anchors is None else np.asarray(anchors)
     by_cluster: dict[int, np.ndarray] = {
         c: np.flatnonzero(cluster == c) for c in np.unique(cluster)
     }
-    pos = np.empty(N, dtype=np.int64)
-    negs = np.empty((N, k), dtype=np.int64)
-    for i in range(N):
+    others: dict[int, np.ndarray] = {}  # fallback pool per cluster: every item of another cluster
+    pos = np.empty(len(idx), dtype=np.int64)
+    negs = np.empty((len(idx), k), dtype=np.int64)
+    for row, i in enumerate(idx):
         c = int(cluster[i])
         members = by_cluster[c]
-        pos[i] = i if len(members) == 1 else rng.choice(members[members != i])
+        pos[row] = i if len(members) == 1 else rng.choice(members[members != i])
         for j, other in enumerate(near[c]):
             pool = by_cluster.get(int(other))
-            negs[i, j] = rng.choice(pool) if pool is not None and len(pool) else rng.integers(0, N)
+            if pool is None or not len(pool):  # the neighbour cluster has no items
+                pool = others.setdefault(c, np.flatnonzero(cluster != c))
+            negs[row, j] = rng.choice(pool) if len(pool) else rng.integers(0, N)
     return {"positive": pos, "negatives": negs}
 
 
 def make_blocks(cfg: DistrainerConfig) -> list[BlockRef]:
-    """Build all blocks with Ray Data and write the log. Idempotent per store."""
+    """Build all blocks with Ray Data and write the log. Idempotent per store.
+
+    With the ``remine`` hook configured the log is streamed instead: only the first
+    ``initial_segments`` segments are written and the log is left open for the hook
+    (``remine.initial_log``); Ray Data is not needed for that.
+    """
+    t = cfg.train
+    B, k = int(t.get("anchors_per_block", 32)), int(t.get("hard_negatives", 4))
+    fs, root = cfg.store_fs()
+    existing = BlockLog(fs, root)
+    if existing.exists():
+        seen: dict[str, BlockRef] = {}
+        for seg in existing.segments():
+            for b in seg.blocks:
+                seen.setdefault(b.block_id, b)
+        return [seen[k] for k in sorted(seen)]
+    if "remine" in cfg.hooks:
+        from examples.toy_contrastive.remine import initial_log
+
+        return initial_log(cfg)
     import ray
     import ray.data
 
-    t = cfg.train
-    B, k = int(t.get("anchors_per_block", 32)), int(t.get("hard_negatives", 4))
     items, cluster, centroids = make_corpus(cfg)
     N, d = items.shape
     if N % B:
@@ -79,14 +102,6 @@ def make_blocks(cfg: DistrainerConfig) -> list[BlockRef]:
     batch_id = np.empty(N, dtype=np.int64)
     batch_id[order] = np.arange(N) // B  # B random anchors per block
 
-    fs, root = cfg.store_fs()
-    existing = BlockLog(fs, root)
-    if existing.exists():
-        seen: dict[str, BlockRef] = {}
-        for seg in existing.segments():
-            for b in seg.blocks:
-                seen.setdefault(b.block_id, b)
-        return [seen[k] for k in sorted(seen)]
     log = BlockLog.create(fs, root, W=cfg.log.W, seed=cfg.seed)
     rows = {
         "item_id": np.arange(N),

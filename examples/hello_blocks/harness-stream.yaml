@@ -1,0 +1,38 @@
+# hello_blocks trained on a log that examples/streaming_producer/produce.py is still writing
+# (scenario S11): the store starts empty, the producer creates the log and commits a segment
+# every --sleep-s seconds, the ranks wait at each segment boundary, and rank 0 drops segments
+# more than retention_segments behind its last checkpoint (log.gc).
+run_name: hello_stream
+storage_path: /shared/runs
+store_root: /shared/blocks_stream
+seed: 7
+ray_address: auto
+storage:
+  kind: local
+log:
+  W: 24
+  passes: 1                # unused: the producer decides how many segments exist
+  wait_poll_s: 0.5
+  retention_segments: 2
+  gc: true
+  gc_blocks: true
+  shuffle_buffer_segments: 1
+checkpoint:
+  policy: any
+  every_k: 2
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: 2
+  resources_per_worker: {CPU: 1, trainer: 1}
+  elastic_resize_monitor_interval_s: 5
+failure:
+  max_failures: 3
+train:
+  rows_per_block: 32
+  features: 8
+  lr: 0.05
+  step_sleep_s: 0.25       # 12 steps x 0.25 s = 3 s per segment at 2 workers: slower than the
+                           # producer's block writing, faster than its sleep, so ranks wait

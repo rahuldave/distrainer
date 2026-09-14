@@ -1,0 +1,42 @@
+# toy_contrastive with the re-mining hook inside the container harness (scenario S6): the log is
+# streamed, make_blocks.py writes only segment 0 (negatives by centroid distance) and rank 0's
+# hook appends segments 1..5 mined in the current encoder's embedding space, then _END.
+run_name: toy_remine
+storage_path: /shared/runs
+store_root: /shared/blocks_toy
+seed: 1234
+ray_address: auto
+storage:
+  kind: local
+log:
+  W: 24
+  passes: 1                # ignored: the hook decides how many segments exist
+  wait_poll_s: 0.5
+checkpoint:
+  policy: any
+  every_k: 4
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: 2
+  resources_per_worker: {CPU: 1, trainer: 1}
+failure:
+  max_failures: 3
+hooks:
+  remine:
+    entry: examples.toy_contrastive.remine:RemineHook
+    segments: 6            # 6 x 24 blocks x 32 anchors = 4608 anchors, 0.6 of a pass
+    initial_segments: 1
+train:
+  n_items: 7680
+  features: 32
+  clusters: 64
+  anchors_per_block: 32
+  hard_negatives: 4
+  hidden: 64
+  embed: 16
+  lr: 0.001
+  temperature: 0.1
+  all_gather: false

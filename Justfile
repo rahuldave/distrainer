@@ -31,8 +31,9 @@ smoke:
   uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml
 
 # the section 8 toy contrastive workload; not part of verify
-contrastive:
-  uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml
+# (examples/toy_contrastive/local-remine.yaml streams the log through the re-mining hook)
+contrastive CFG="examples/toy_contrastive/local.yaml":
+  uv run python examples/toy_contrastive/train.py --config {{CFG}}
 
 diff-check:
   git diff --check

@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import sys
 from collections.abc import Sequence
 from typing import Any
 
 from distrainer.config import load_config
+from distrainer.hooks import load_entry
 from distrainer.log import BlockLog
 from distrainer.storage import resolve, s3_options_from_env
 
@@ -60,9 +60,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     cfg.run_name = args.run_name or f"{cfg.run_name}_resume"
     if args.seed is not None:
         cfg.seed = args.seed
-    mod_name, _, fn_name = args.entry.partition(":")
-    factory = getattr(importlib.import_module(mod_name), fn_name)
-    train_step, build_model = factory(cfg)
+    train_step, build_model = load_entry(args.entry)(cfg)
     init_ray(cfg)
     result = DistTrainer(
         train_step, build_model, cfg, resume_from_checkpoint=_checkpoint(args.uri)

@@ -92,10 +92,10 @@ then this file for the rules that are specific to Claude Code sessions.
 
 ## Where to pick up
 
-- Milestone status and the detailed plan for the next work are in `docs/handoff-m4.md`
-  (written at the end of the M3 session): Gest ids to claim, the M4 design for hooks,
-  re-mining (S6), the streaming producer (S11), TimeBudget (S8) and `gc`, the behaviours learned
-  in M2/M3 that will bite again, open review follow-ups, and the M5 (KubeRay) pointers.
+- Milestone status and the detailed plan for the next work are in `docs/handoff-m5.md`
+  (written at the end of the M4 session): Gest ids to claim, what M4 delivered (hooks from
+  config, re-mining S6, streaming producer S11, TimeBudget S8, `gc`), the behaviours learned in
+  M2 to M4 that will bite again, open review follow-ups, and the M5 (KubeRay) pointers.
 - `docs/examples-and-scenarios.md` says how every scenario is driven and checked;
   `docs/running-modes.md` says where things run.
 - Memory on this Mac is tight with the container cluster up: one cluster scenario at a time,

@@ -1,6 +1,9 @@
 """toy_contrastive: train the MLP encoder with InfoNCE on the mined blocks (``just contrastive``).
 
-Run: ``just contrastive`` (= ``train.py --config examples/toy_contrastive/local.yaml``).
+Run: ``just contrastive`` (= ``train.py --config examples/toy_contrastive/local.yaml``), or
+``just contrastive examples/toy_contrastive/local-remine.yaml`` to stream the log through the
+re-mining hook (``remine.py``); in that mode a fresh run also wipes the store (``--keep`` keeps
+it).
 """
 
 from __future__ import annotations
@@ -74,6 +77,20 @@ def main(argv: list[str] | None = None) -> int:
     if not args.keep and cfg.storage.kind == "local":
         shutil.rmtree(Path(runs_root) / cfg.run_name, ignore_errors=True)
         shutil.rmtree(Path(store_root) / "audit" / cfg.run_name, ignore_errors=True)
+        if "remine" in cfg.hooks:
+            # a streamed log belongs to one run: an ended log from an earlier run would make the
+            # hook a no-op, a half-written one would continue from another model's mining
+            others = [
+                d.name
+                for d in (Path(store_root) / "audit").glob("*")
+                if d.is_dir() and d.name != cfg.run_name
+            ]
+            if others:
+                raise SystemExit(
+                    f"{store_root} holds the audit trail of other runs {others}; a streamed "
+                    "store belongs to one run: use a fresh store_root or --keep"
+                )
+            shutil.rmtree(store_root, ignore_errors=True)
     init_ray(cfg)
     if not BlockLog(fs, store_root).exists():
         from examples.toy_contrastive.make_blocks import make_blocks
