@@ -25,7 +25,7 @@ scaling:
 failure:
   max_failures: 3
 train:
-  n_blocks: 96             # 4 segments
+  n_blocks: 240            # 10 segments of 24: ~30 s at 2 workers with step_sleep_s 0.25
   rows_per_block: 32
   features: 8
   lr: 0.05

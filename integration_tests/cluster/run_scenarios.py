@@ -46,6 +46,30 @@ def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) ->
     return proc.stdout
 
 
+def wait_for_trainers(n: int, timeout_s: float = 180) -> None:
+    """Block until Ray reports ``n`` `trainer` resources (all worker containers have joined)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        out = driver(
+            "exec-head",
+            "python",
+            "-c",
+            "import ray; ray.init(address='auto', logging_level='ERROR'); "
+            "print(int(ray.cluster_resources().get('trainer', 0)))",
+            check=False,
+        )
+        lines = [ln for ln in out.strip().splitlines() if ln.strip().isdigit()]
+        if lines and int(lines[-1]) >= n:
+            return
+        time.sleep(3)
+    raise TimeoutError(f"fewer than {n} trainer resources after {timeout_s}s")
+
+
+def up(n: int, *extra: str, env: dict[str, str] | None = None) -> None:
+    driver("up", str(n), *extra, env=env)
+    wait_for_trainers(n)
+
+
 def shared() -> Path:
     return Path(driver("shared").strip())
 
@@ -122,7 +146,7 @@ def ensure_blocks(cfg: str = HARNESS_CFG) -> None:
 
 def scenario_s2() -> list[str]:
     """Worker kill mid-run: the container restarts, Ray restarts the group, positions continue."""
-    driver("up", "2")
+    up(2)
     ensure_blocks()
     fresh("s2")
     proc = start_train(HARNESS_CFG, "run_name=s2")
@@ -136,7 +160,7 @@ def scenario_s2() -> list[str]:
 
 def scenario_s3() -> list[str]:
     """Elastic scale up 2 -> 3 while training; the tail is re-dealt over 3 ranks."""
-    driver("up", "2")
+    up(2)
     ensure_blocks()
     fresh("s3")
     proc = start_train(HARNESS_CFG, "run_name=s3")
@@ -150,7 +174,7 @@ def scenario_s3() -> list[str]:
 
 def scenario_s4() -> list[str]:
     """Scale down 3 -> 2 while training (the removed worker is stopped, not restarted)."""
-    driver("up", "3")
+    up(3)
     ensure_blocks()
     fresh("s4")
     proc = start_train(HARNESS_CFG, "run_name=s4")
@@ -241,7 +265,7 @@ def scenario_s9() -> list[str]:
     """Cold restore: a full run on MinIO, the cluster torn down and the shared mount wiped, the
     cluster brought back, `distrainer resume` from the newest checkpoint URI into a new run."""
     env = {"DISTRAINER_MINIO": "1"}
-    driver("up", "2", "minio", env=env)
+    up(2, "minio", env=env)
     driver("mkbucket", "distrainer", env=env)
     driver(
         "exec-head",
@@ -254,7 +278,7 @@ def scenario_s9() -> list[str]:
     finish(start_train(MINIO_CFG, "run_name=s9", env=env), name="s9")
     driver("down", env=env)
     driver("wipe-shared", env=env)
-    driver("up", "2", "minio", env=env)
+    up(2, "minio", env=env)
     ckpt, start = latest_checkpoint("s3://distrainer/runs/s9", env)
     print(f"S9 resuming from {ckpt} (position {start})")
     cli_resume(ckpt, "s9_resume", env)
@@ -265,7 +289,7 @@ def scenario_s10() -> list[str]:
     """Head loss mid-run: the head container (Ray head, Train controller, driver) is killed,
     brought back, and the run continues in a new run from its latest checkpoint on MinIO."""
     env = {"DISTRAINER_MINIO": "1"}
-    driver("up", "2", "minio", env=env)
+    up(2, "minio", env=env)
     driver("mkbucket", "distrainer", env=env)
     driver(
         "exec-head",
@@ -279,8 +303,7 @@ def scenario_s10() -> list[str]:
     time.sleep(25)  # into the run: the audit is on S3, so wait by time rather than by file
     subprocess.run(["docker", "kill", "distrainer-head-1"], check=True, capture_output=True)
     proc.communicate(timeout=120)  # the exec dies with the head
-    driver("up", "2", "minio", env=env)  # recreates the head; workers rejoin it
-    time.sleep(10)
+    up(2, "minio", env=env)  # recreates the head; workers rejoin it
     ckpt, start = latest_checkpoint("s3://distrainer/runs/s10", env)
     print(f"S10 resuming from {ckpt} (position {start})")
     cli_resume(ckpt, "s10_resume", env)

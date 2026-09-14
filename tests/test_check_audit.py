@@ -91,3 +91,23 @@ def test_check_recovery_accepts_a_resized_restart_and_flags_gaps():
     off[0] = rec(1, 0, 4, 0, 1, 5)  # first position not on a step boundary for n=4
     problems = check_recovery(first + off, W, 2)
     assert problems
+
+
+def test_check_recovery_allows_one_in_flight_checkpoint_interval():
+    from integration_tests.cluster.check_audit import check_recovery
+
+    W = 24
+    first = [r for r in happy(W=W, n=3, segments=3, attempt=0) if r.position < 30]
+    second = []
+    for seg in range(3):
+        for step in range(W // 2):
+            for rank in range(2):
+                pos = seg * W + step * 2 + rank
+                if pos >= 18:  # resumed from the checkpoint before the in-flight one (24)
+                    second.append(rec(1, rank, 2, seg, step, pos))
+    assert check_recovery(first + second, W, every_k=2, expected_world_sizes=[3, 2]) == []
+    too_far = [r for r in second if r.position >= 12] + [
+        rec(1, 0, 2, 0, 6, 12),
+        rec(1, 1, 2, 0, 6, 13),
+    ]
+    assert any("replays" in p for p in check_recovery(first + too_far, W, every_k=2))
