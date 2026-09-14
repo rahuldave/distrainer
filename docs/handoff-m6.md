@@ -7,14 +7,16 @@ and spec sections 9 and 11. Verify the Gest ids and branch state with `gest task
 
 ## 1. Where things stand
 
-- M0 to M4 are merged to `main` (PRs #8 to #12). M5, the KubeRay variant, is the branch
-  `gest/lntryyqu-m5-kuberay` (Gest parent `lntryyqu`, issue #7, iteration `ukvruwwu`, leaves
-  `ykkvnqtp` manifests + driver and `ywuxrspm` scenarios); see the PR for its merge state.
+- M0 to M5 are merged to `main` (PRs #8 to #13). M5, the KubeRay variant, is the squash commit
+  `0953e69` (PR #13, issue #7 closed; Gest parent `lntryyqu`, iteration `ukvruwwu`, leaves
+  `ykkvnqtp` manifests + driver and `ywuxrspm` scenarios, all done); its branch is deleted.
 - Under `DISTRAINER_DRIVER=kuberay` the cluster scenarios run against pods on OrbStack's
   Kubernetes with `run_scenarios.py` and `check_audit.py` unchanged (section 3 lists the results).
 - Nothing is scheduled for uncloud (mode C) yet: `deploy/drivers/uncloud.sh` is still the
   documented stub. Section 6 is the plan; create it as the next development iteration with `gpl`
-  (M6 in the numbering of spec section 12, which today ends at M5).
+  (M6 in the numbering of spec section 12, which today ends at M5: add the milestone line there
+  with `gsp`, then a depth-1 parent with its GitHub issue through `gpr`, an iteration, and the
+  leaves of section 6). Branch it from `main` as `gest/<parent-id>-m6-uncloud`.
 
 ## 2. Environment checklist
 

@@ -49,9 +49,10 @@ examples, the `distrainer` CLI, single-node scenarios S1, S5, S7) and M3 (the Or
 harness behind a driver interface, scenarios S2, S3, S4 on a shared mount and S9, S10 on MinIO)
 are merged, and so is M4 (PR #12): segment hooks configured in YAML, the re-mining hook that
 streams the `toy_contrastive` log (S6), an external streaming producer (S11, and S11s3 on
-MinIO), the time-budget checkpoint policy (S8) and retention `gc`. M5 (KubeRay) runs the same
+MinIO), the time-budget checkpoint policy (S8) and retention `gc`, and M5 (PR #13): the same
 cluster scenarios with pods as Ray nodes on OrbStack's Kubernetes through a second driver,
-`deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`).
+`deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`). uncloud (mode C) is next, planned in
+`docs/handoff-m6.md`.
 Milestones are in the spec (section 12);
 development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
 issues #1 to #7.
