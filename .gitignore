@@ -51,3 +51,6 @@ audit/
 
 # Claude desktop app session outputs
 Claude outputs/
+
+# Gest project-local database: local state, not versioned (same policy as sibling repos)
+.gest/

@@ -1,1 +1,1 @@
-"""distrainer.policy — see docs/distrainer-spec.md section 4 for the interface this module implements."""
+"""distrainer.policy: interface in docs/distrainer-spec.md section 4."""
