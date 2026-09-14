@@ -214,7 +214,10 @@ class BlockLog:
         # Random(hash((seed, seq))); commits atomically; refuses to overwrite a committed seq
     def end(self) -> None                                       # write _END
     # retention
-    def gc(self, keep_from_seq: int) -> list[int]               # delete segments < keep_from_seq and their blocks
+    def gc(self, keep_from_seq: int, delete_blocks: bool = True) -> list[int]
+        # delete segments < keep_from_seq and (delete_blocks) the block files no kept segment
+        # references; the trainer calls it on rank 0 at segment ends when log.gc is set, with
+        # keep_from_seq = segment of the last checkpoint rank 0 saved - log.retention_segments
 
 # planner.py  (pure functions; no I/O)
 def lane(segment: Segment, rank: int, world_size: int, start_step: int = 0) -> list[tuple[int, BlockRef]]:
@@ -265,8 +268,14 @@ class LaneLoader:
 
 # hooks.py
 class SegmentHook(Protocol):
-    def on_segment_end(self, model, ledger: Ledger, log: BlockLog, ctx: TrainContextLite) -> None
-    # runs on rank 0 while others wait at a barrier; may log.append(...) the next segment(s)
+    def on_segment_end(self, model, ledger: Ledger, log: BlockLog, ctx: TrainInfo) -> None
+    # runs on rank 0 while others wait at a barrier; may log.append(...) the next segment(s).
+    # model is the unwrapped module, ledger a snapshot, log a BlockLog of rank 0's own (not the
+    # loader's reader instance), ctx the TrainInfo of the step just completed.
+def build_hooks(cfg: DistrainerConfig) -> list[SegmentHook]
+    # cfg.hooks = {name: {entry: "pkg.module:factory", ...args}} (or {name: "pkg.module:factory"});
+    # factory(cfg, **args) -> SegmentHook, called on rank 0 inside the worker, config order
+def load_entry(entry: str) -> Any                             # "pkg.module:attr", also used by the CLI
 
 # writer.py
 class BatchWriter:
@@ -319,7 +328,9 @@ for segment, (position, ref, table) in loader:
     else:
         report(metrics)                                    # keeps report counts aligned
     if segment_end:
-        if rank == 0: for h in hooks: h.on_segment_end(model, ledger, log, ctx)   # may append next segment
+        if rank == 0:
+            for h in hooks: h.on_segment_end(unwrap(model), copy(ledger), hook_log, ctx)   # may append next segment
+            if cfg.log.gc: hook_log.gc(last_ckpt_segment - cfg.log.retention_segments, cfg.log.gc_blocks)
         ray.train.collective.barrier()
 loader.close()
 ```
@@ -399,6 +410,9 @@ log:
   passes: 2                 # batch mode: BatchWriter passes over the corpus (epochs); ignored in streaming
   wait_poll_s: 1.0          # streaming: how often ranks poll for the next segment
   retention_segments: 4     # gc keeps this many segments behind the last checkpointed one
+  gc: false                 # true: rank 0 runs BlockLog.gc at every segment end (streaming logs)
+  gc_blocks: true           # gc also deletes block files no kept segment references (false if a
+                            # producer will re-reference old blocks in segments not committed yet)
   shuffle_buffer_segments: 1  # streaming writers: buffer k*W blocks and sample W per segment (1 = plain window)
 checkpoint:
   policy: any               # any | every_k | segment_end | pass_end | time
@@ -417,13 +431,13 @@ scaling:
   elastic_resize_monitor_interval_s: 15
 failure:
   max_failures: 3
-hooks:
-  remine: {every_segment: true}
+hooks:                         # name -> {entry: "pkg.module:factory", ...args}; factory(cfg, **args)
+  remine: {entry: examples.toy_contrastive.remine:RemineHook, segments: 12, initial_segments: 1}
 ```
 
 ## 8. Toy workload (examples/toy_contrastive)
 
-Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
+Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, mines the anchors of the next segment (a fixed slice of a per-pass permutation of the corpus, so `pass_idx` advances when the slices wrap) and appends them as the next segment; with the hook configured (`hooks.remine`) `make_blocks.py` writes only the first `initial_segments` segments (mined by centroid distance in input space) and leaves the log open, and the hook writes `_END` once `segments` segments exist. The hook is idempotent across restarts: a re-run segment end whose successor is already committed does nothing. CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 

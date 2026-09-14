@@ -379,20 +379,17 @@ class BlockLog:
         re-reference old blocks in segments it has not written yet (a multi-pass hook) must call
         with ``delete_blocks=False``. Returns the deleted segment numbers.
         """
-        last = self.last_seq()
-        if last is None or keep_from_seq <= 0:
+        seqs = self.committed_seqs()  # one listing; a long stream must not stat every old seq
+        if not seqs or keep_from_seq <= 0:
             return []
-        keep_from_seq = min(keep_from_seq, last + 1)
+        keep_from_seq = min(keep_from_seq, seqs[-1] + 1)
         kept_locators = {
-            b.locator
-            for seq in range(keep_from_seq, last + 1)
-            if self.has_segment(seq)
-            for b in self.read_segment(seq).blocks
+            b.locator for seq in seqs if seq >= keep_from_seq for b in self.read_segment(seq).blocks
         }
         deleted: list[int] = []
-        for seq in range(keep_from_seq):
-            if not self.has_segment(seq):
-                continue
+        for seq in seqs:
+            if seq >= keep_from_seq:
+                break
             if delete_blocks:
                 for b in self.read_segment(seq).blocks:
                     if b.locator not in kept_locators:

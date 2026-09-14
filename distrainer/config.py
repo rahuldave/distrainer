@@ -15,6 +15,7 @@ from typing import Any
 import pyarrow.fs as pafs
 import yaml
 
+from distrainer.hooks import hook_specs
 from distrainer.storage import StorageConfig, build_filesystem
 
 
@@ -31,6 +32,8 @@ class LogConfig:
     wait_poll_s: float = 1.0
     retention_segments: int = 4
     shuffle_buffer_segments: int = 1
+    gc: bool = False  # rank 0 runs BlockLog.gc at segment ends (window behind the last checkpoint)
+    gc_blocks: bool = True  # gc also deletes the block files no kept segment references
 
 
 @dataclass
@@ -204,6 +207,12 @@ class DistrainerConfig:
             raise ValueError("failure.max_failures must be >= 0")
         if not self.run_name or "/" in self.run_name:
             raise ValueError("run_name must be non-empty and contain no '/'")
+        hook_specs(self.hooks)  # every hook names an entry of the form pkg.module:attr
+        if self.log.gc and self.log.retention_segments < 1:
+            raise ValueError(
+                "log.gc needs log.retention_segments >= 1: the controller may restart from the "
+                "checkpoint before the last one saved"
+            )
 
     # ---- filesystems ----
 

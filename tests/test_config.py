@@ -34,7 +34,7 @@ scaling:
 failure:
   max_failures: 3
 hooks:
-  remine: {{every_segment: true}}
+  remine: {{entry: "examples.toy_contrastive.remine:RemineHook", segments: 8}}
 """
 
 
@@ -48,7 +48,9 @@ def test_spec_example_loads_and_builds_filesystems(tmp_path):
     assert cfg.scaling.num_workers == (2, 4) and cfg.scaling.elastic
     assert (cfg.scaling.min_workers, cfg.scaling.max_workers) == (2, 4)
     assert list(cfg.allowed_world_sizes()) == [2, 3, 4]
-    assert cfg.hooks == {"remine": {"every_segment": True}}
+    assert cfg.hooks == {
+        "remine": {"entry": "examples.toy_contrastive.remine:RemineHook", "segments": 8}
+    }
     assert cfg.checkpoint.every_k == 4 and cfg.checkpoint.time_budget_s is None
     fs, root = cfg.store_fs()
     assert isinstance(fs, pafs.LocalFileSystem) and root == str(tmp_path / "blocks")
@@ -62,6 +64,8 @@ def test_defaults_are_valid():
     cfg = DistrainerConfig.from_dict({})
     assert cfg.log.W == 16 and cfg.scaling.num_workers == 2 and not cfg.scaling.elastic
     assert cfg.storage.kind == "local"
+    assert cfg.log.gc is False and cfg.log.gc_blocks is True and cfg.log.retention_segments == 4
+    assert cfg.hooks == {}
 
 
 def test_s3_storage_section_uses_paths_from_top_level(monkeypatch):
@@ -102,6 +106,10 @@ def test_s3_storage_section_uses_paths_from_top_level(monkeypatch):
         {"run_name": "a/b"},
         {"bogus": 1},
         {"log": {"window": 16}},
+        {"hooks": {"remine": {"every_segment": True}}},  # no entry
+        {"hooks": {"remine": "not-an-entry"}},
+        {"hooks": ["examples.toy_contrastive.remine:RemineHook"]},  # a list, not a mapping
+        {"log": {"gc": True, "retention_segments": 0}},  # the controller may restart one behind
     ],
 )
 def test_validation_rejects(bad):

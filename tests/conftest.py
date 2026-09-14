@@ -39,3 +39,46 @@ class MemoryFS(pafs.PyFileSystem):
         fs = fsspec.filesystem("memory")
         fs.store.clear()
         super().__init__(pafs.FSSpecHandler(fs))
+
+
+class AppendNextSegments:
+    """A ``SegmentHook`` for tests (entry ``conftest:AppendNextSegments``): at every segment end
+    it appends a segment of fresh blocks (ids ``s<seq>b<i>``) and ends the log once ``segments``
+    segments exist. Every call is recorded on the class so tests can inspect what rank 0 saw."""
+
+    calls: list[dict] = []
+
+    def __init__(self, config=None, segments: int = 2, rows: int = 2):
+        self.config = config
+        self.segments = segments
+        self.rows = rows
+
+    def on_segment_end(self, model, ledger, log, ctx) -> None:
+        type(self).calls.append(
+            {"model": model, "ledger": ledger, "log": log, "ctx": ctx, "config": self.config}
+        )
+        nxt = ledger.segment + 1
+        if log.ended() or log.has_segment(nxt):
+            return  # segment ends are delivered at least once (restarts replay them)
+        if nxt < self.segments:
+            refs = [
+                write_block(log.fs, log.root, f"s{nxt}b{i}", make_table(self.rows, i))
+                for i in range(log.W)
+            ]
+            log.append(refs, pass_idx=0, meta={"writer": "hook"})
+        else:
+            log.end()
+
+
+@pytest.fixture(autouse=True)
+def _clear_hook_calls():
+    AppendNextSegments.calls.clear()
+    yield
+    AppendNextSegments.calls.clear()
+
+
+class NotAHook:
+    """Accepts the factory call but has no ``on_segment_end``."""
+
+    def __init__(self, config=None, **kwargs):
+        self.config = config

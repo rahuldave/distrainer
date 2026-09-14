@@ -4,7 +4,8 @@ Spec sections 5 and 6. Every rank runs :func:`train_loop`: open the log, restore
 the latest checkpoint, deal the remaining positions over the current world size, and for each
 block call the user's ``train_step``; after every step all ranks call ``ray.train.report`` (a
 barrier), with a checkpoint attached on rank 0 whenever the policy says so. Segment ends run the
-hooks on rank 0 and then a collective barrier.
+hooks on rank 0 (the ``hooks`` given to ``DistTrainer`` plus those built from ``cfg.hooks``),
+then retention ``gc`` if ``log.gc`` is set, then a collective barrier.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pyarrow as pa
@@ -24,7 +25,7 @@ import torch
 from distrainer import __version__
 from distrainer.audit import AuditWriter, next_attempt
 from distrainer.config import DistrainerConfig
-from distrainer.hooks import SegmentHook
+from distrainer.hooks import SegmentHook, build_hooks, hook_specs, load_entry
 from distrainer.ledger import Ledger
 from distrainer.loader import LaneLoader
 from distrainer.log import BlockLog, Segment
@@ -223,9 +224,18 @@ def lanes_from(
 
     def gen(stop: Any) -> Iterator[tuple[Segment, list]]:
         s, first = seq, start_step
+        lowest = log.first_seq()
+        if lowest is not None and s < lowest:
+            raise RuntimeError(
+                f"cannot resume at segment {s}: the log starts at {lowest} (garbage-collected); "
+                "resume from a newer checkpoint or raise log.retention_segments"
+            )
         while (segment := log.wait_segment(s, poll_s=poll_s, stop=stop)) is not None:
             yield segment, lane(segment, rank, world_size, first)
             s, first = s + 1, 0
+        last = log.last_seq()
+        if last is not None and s <= last and not (stop is not None and stop.is_set()):
+            raise RuntimeError(f"segment {s} is missing from the log (segments up to {last} exist)")
 
     return gen
 
@@ -240,7 +250,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     cfg = DistrainerConfig.from_dict(loop_config["config"])
     build_model: BuildModel = loop_config["build_model"]
     train_step: TrainStep = loop_config["train_step"]
-    hooks: Sequence[SegmentHook] = loop_config.get("hooks") or ()
+    hooks: list[SegmentHook] = list(loop_config.get("hooks") or ())
     policy: CheckpointPolicy = loop_config.get("policy") or build_policy(
         cfg.checkpoint.as_policy_dict()
     )
@@ -262,6 +272,14 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     model, optimizer = build_model(info)
     model = ray.train.torch.prepare_model(model)
 
+    # hooks and gc are writers and run on rank 0 only; they get a BlockLog of their own rather
+    # than the reader instance the loader's producer thread polls
+    hook_log: BlockLog | None = None
+    if rank == 0:
+        hooks += build_hooks(cfg)
+        if hooks or cfg.log.gc:
+            hook_log = BlockLog.open(fs, store_root)
+
     # every restart of the worker group gets its own attempt id, even from the same checkpoint
     attempt = int(
         broadcast_from_rank_zero(next_attempt(fs, store_root, cfg.run_name) if rank == 0 else None)
@@ -272,6 +290,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     checkpoint = ray.train.get_checkpoint() or loop_config.get("initial_checkpoint")
     if checkpoint is not None:
         ledger = CheckpointIO.load(checkpoint, model, optimizer)
+    last_ckpt_segment = ledger.segment  # gc keeps retention_segments behind this
     seq, start_step = resume_start(ledger, n, W=W)
     ledger = Ledger(
         segment=seq, cursor=start_step, world_size=n, pass_idx=ledger.pass_idx, run_attempt=attempt
@@ -338,6 +357,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
             if policy.should_checkpoint(sctx):
                 notify_checkpoint(policy, sctx)
                 ckpt = io.save(model, optimizer, ledger) if rank == 0 else None
+                last_ckpt_segment = ledger.segment
                 n_reports += 1
                 ray.train.report(
                     agg.flush({**metrics, "reports": n_reports}),
@@ -355,9 +375,17 @@ def train_loop(loop_config: dict[str, Any]) -> None:
             else:
                 reported_last = False
             if segment_end:
-                if rank == 0:
+                if hook_log is not None:  # rank 0
+                    snapshot = replace(ledger)  # hooks see the position, never the live ledger
                     for hook in hooks:
-                        hook.on_segment_end(model, ledger, log, step_info)
+                        hook.on_segment_end(unwrap(model), snapshot, hook_log, step_info)
+                    if cfg.log.gc:
+                        # measured from the last checkpoint rank 0 *saved*; the controller may
+                        # restart from the one before it (ASYNC upload still in flight), which
+                        # is why retention_segments must be at least 1 when gc is on
+                        keep_from = last_ckpt_segment - cfg.log.retention_segments
+                        if keep_from > 0:
+                            hook_log.gc(keep_from, delete_blocks=cfg.log.gc_blocks)
                 barrier()
         if not reported_last and metrics:
             n_reports += 1  # every rank took the same number of steps, so counts stay equal
@@ -390,6 +418,11 @@ class DistTrainer:
         self.config = config
         self.policy = policy
         self.hooks = list(hooks)
+        for name, entry, _args in hook_specs(config.hooks):
+            try:
+                load_entry(entry)  # fail on the driver, not inside rank 0 with the others waiting
+            except (ImportError, AttributeError) as exc:
+                raise ValueError(f"hooks.{name}: cannot import {entry!r}: {exc}") from exc
         self.resume_from_checkpoint = resume_from_checkpoint
         self._scaling_config = scaling_config
         self._run_config = run_config
