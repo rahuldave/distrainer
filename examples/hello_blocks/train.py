@@ -105,7 +105,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     W = BlockLog.open(fs, store_root).W
     problems = check_s1(records, W)
-    n_reports = len(result.metrics_dataframe) if result.metrics_dataframe is not None else 0
+    n_reports = int(
+        (result.metrics or {}).get("reports", 0)
+    )  # metrics_dataframe only keeps kept checkpoints
     expected = expected_reports(len(records) // W, W, cfg.scaling.max_workers, cfg.checkpoint)
     problems += check_report_count(n_reports, expected)
     print(f"reports per rank: {n_reports} (expected {expected})")

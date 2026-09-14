@@ -289,6 +289,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     t0 = time.monotonic()
     agg = MetricAggregator()
     reported_last = True
+    n_reports = 0  # carried in every report so Result.metrics["reports"] is the per-rank count
     metrics: dict[str, Any] = {}
     try:
         for segment, (position, ref, table) in loader:
@@ -337,8 +338,9 @@ def train_loop(loop_config: dict[str, Any]) -> None:
             if policy.should_checkpoint(sctx):
                 notify_checkpoint(policy, sctx)
                 ckpt = io.save(model, optimizer, ledger) if rank == 0 else None
+                n_reports += 1
                 ray.train.report(
-                    agg.flush(metrics),
+                    agg.flush({**metrics, "reports": n_reports}),
                     checkpoint=ckpt,
                     checkpoint_dir_name=checkpoint_dir_name(ledger),
                     checkpoint_upload_mode=upload_mode,
@@ -347,7 +349,8 @@ def train_loop(loop_config: dict[str, Any]) -> None:
                 audit.flush()  # object-store audit buffers survive a SIGKILL up to here
                 reported_last = True
             elif cfg.checkpoint.report_every_step:
-                ray.train.report(agg.flush(metrics))
+                n_reports += 1
+                ray.train.report(agg.flush({**metrics, "reports": n_reports}))
                 reported_last = True
             else:
                 reported_last = False
@@ -357,7 +360,8 @@ def train_loop(loop_config: dict[str, Any]) -> None:
                         hook.on_segment_end(model, ledger, log, step_info)
                 barrier()
         if not reported_last and metrics:
-            ray.train.report(agg.flush(metrics))  # every rank took the same number of steps
+            n_reports += 1  # every rank took the same number of steps, so counts stay equal
+            ray.train.report(agg.flush({**metrics, "reports": n_reports}))
     finally:
         loader.close()
         audit.close()

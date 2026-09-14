@@ -104,6 +104,25 @@ def check_s7(a: Sequence[AuditRecord], b: Sequence[AuditRecord]) -> list[str]:
     return problems
 
 
+def check_resume(records: Sequence[AuditRecord], W: int, start_position: int) -> list[str]:
+    """A run resumed from a ledger: positions are exactly ``start_position`` up to the end of the
+    last segment touched, each once, dealt by the assignment rule (S9/S10 and the CLI resume)."""
+    if not records:
+        return ["no audit records"]
+    problems = check_dealing(records, W)
+    positions = sorted(r.position for r in records)
+    last_seg = max(r.segment for r in records)
+    expected = list(range(start_position, (last_seg + 1) * W))
+    if positions != expected:
+        missing = sorted(set(expected) - set(positions))
+        extra = sorted(set(positions) - set(expected))
+        dupes = sorted({p for p in positions if positions.count(p) > 1})
+        problems.append(
+            f"resumed run: missing {missing[:8]}, extra {extra[:8]}, duplicated {dupes[:8]}"
+        )
+    return problems
+
+
 def checkpoint_ledgers(run_uri: str) -> dict[str, dict]:
     """``{checkpoint dir name: ledger dict}`` from each checkpoint's ``.metadata.json``."""
     fs, run_dir = resolve(run_uri, create=False, **s3_options_from_env())
@@ -185,7 +204,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--store-root", required=True)
     ap.add_argument("--run-name", required=True)
-    ap.add_argument("--scenario", default="S1", choices=["S1", "S5", "S7"])
+    ap.add_argument("--scenario", default="S1", choices=["S1", "S5", "S7", "resume"])
+    ap.add_argument("--start-position", type=int, default=None, help="resume: first position")
     ap.add_argument("--W", type=int, required=True)
     ap.add_argument("--every-k", type=int, default=None)
     ap.add_argument("--run-uri", default=None, help="S5: run directory holding checkpoints")
@@ -199,6 +219,10 @@ def main(argv: list[str] | None = None) -> int:
         problems = check_s1(records, args.W)
     elif args.scenario == "S5":
         problems = check_s5(args.run_uri, args.W, args.every_k, args.expected_checkpoints)
+    elif args.scenario == "resume":
+        if args.start_position is None:
+            ap.error("--start-position is required for the resume check")
+        problems = check_resume(records, args.W, args.start_position)
     else:
         other = read_audit(fs, root, args.other_run_name)
         problems = check_s7(records, other)

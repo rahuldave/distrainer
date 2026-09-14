@@ -1,6 +1,7 @@
 from distrainer.audit import AuditRecord
 from integration_tests.cluster.check_audit import (
     check_dealing,
+    check_resume,
     check_s1,
     check_s7,
     expected_checkpoints,
@@ -47,6 +48,14 @@ def test_s7_compares_per_rank_sequences():
     b[5] = rec(0, 1, 2, 0, 2, 5, block="other")
     assert any("rank 1" in p and "index 2" in p for p in check_s7(a, b))
     assert any("rank sets" in p for p in check_s7(a, [r for r in b if r.rank == 0]))
+
+
+def test_check_resume_accepts_a_partial_first_segment():
+    recs = [r for r in happy(W=8, n=2, segments=2) if r.position >= 6]
+    assert check_resume(recs, 8, 6) == []
+    assert any("missing" in p for p in check_resume(recs, 8, 4))
+    assert any("extra" in p for p in check_resume(recs, 8, 7))
+    assert check_resume([], 8, 0) == ["no audit records"]
 
 
 def test_expected_checkpoints():

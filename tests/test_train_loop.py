@@ -126,6 +126,7 @@ def test_two_ranks_report_identically_and_audit_satisfies_s1(tmp_path, fake_ray)
         fake_ray["reports"][0][1]["steps_in_report"] == 2
         and "loss_mean" in fake_ray["reports"][0][1]
     )
+    assert [m["reports"] for r, m, _, _ in fake_ray["reports"] if r == 0] == [1, 2, 3, 4]
     assert fake_ray["barriers"] == 4  # segment ends x ranks
     assert next_attempt(fs, root, "fake") == 1
 

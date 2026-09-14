@@ -106,9 +106,18 @@ implemented with `uc` commands in `deploy/drivers/uncloud.sh`. The one hard diff
 spans machines, so storage must be S3-compatible (MinIO on one machine, or R2/S3), which is why
 `storage.kind: s3` exists from M1 on. The driver ships as a documented stub until machines exist.
 
+It can very likely be tested on the Mac without real machines: OrbStack also runs lightweight
+Linux *machines* (`orb create ubuntu uc1`), each with its own systemd, SSH address
+(`uc1@orb`), and the ability to run Docker. Two or three of those, each with Docker and the
+uncloud daemon installed, joined with `uc machine init` / `uc machine add` over SSH, form a real
+uncloud cluster with the WireGuard mesh between them, and MinIO on one of them provides the S3
+store. That is the plan for filling in `deploy/drivers/uncloud.sh`; containers alone are not
+enough because uncloud wants a Docker host per node.
+
 ## D. KubeRay on OrbStack Kubernetes (M5)
 
-OrbStack has a built-in Kubernetes. With the KubeRay operator, a `RayCluster` resource declares a
+OrbStack has a built-in Kubernetes (k3s-based, `orb config set k8s.enable true`), so this mode
+is also testable on the Mac. With the KubeRay operator, a `RayCluster` resource declares a
 head pod and a worker group (`minReplicas` / `maxReplicas` mirror `num_workers: [min, max]`), and a
 `RayJob` runs `train.py`. Node death is `kubectl delete pod`, elasticity is editing `replicas`,
 storage is a PVC mounted at `/shared` in every pod or S3. The purpose of this mode is to prove that
