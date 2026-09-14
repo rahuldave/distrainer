@@ -6,7 +6,7 @@ services:
     build: { context: ., dockerfile: deploy/Dockerfile }
     image: distrainer:local
     command: ["deploy/ray-head.sh"]
-    ports: ["8265:8265"]
+    ports: ["127.0.0.1:8265:8265"]   # loopback only: OrbStack forwards published ports to the LAN
     shm_size: "1g"
     volumes: &mounts
       - "${DISTRAINER_SHARED:-./.harness/shared}:/shared"
@@ -16,6 +16,10 @@ services:
       - "./integration_tests:/app/integration_tests:ro"
     environment: &env
       RAY_TRAIN_V2_ENABLED: "1"
+      # declare a dead node dead in ~3 s instead of ~30 s so a restart does not land on it
+      RAY_health_check_period_ms: "1000"
+      RAY_health_check_timeout_ms: "1000"
+      RAY_health_check_failure_threshold: "3"
       RAY_ENABLE_UV_RUN_RUNTIME_ENV: "0"
       S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
       S3_ACCESS_KEY: ${S3_ACCESS_KEY:-distrainer}
@@ -44,7 +48,7 @@ services:
     environment:
       MINIO_ROOT_USER: ${S3_ACCESS_KEY:-distrainer}
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-distrainer123}
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: ["minio:/data"]
     healthcheck:   # the image ships neither mc nor curl; probe the port with bash
       test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9000' || exit 1"]

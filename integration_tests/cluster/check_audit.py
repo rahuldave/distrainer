@@ -104,14 +104,50 @@ def check_s7(a: Sequence[AuditRecord], b: Sequence[AuditRecord]) -> list[str]:
     return problems
 
 
-def check_resume(records: Sequence[AuditRecord], W: int, start_position: int) -> list[str]:
-    """A run resumed from a ledger: positions are exactly ``start_position`` up to the end of the
-    last segment touched, each once, dealt by the assignment rule (S9/S10 and the CLI resume)."""
+def resume_start_position(segment: int, positions_done: int, W: int, world_size_now: int) -> int:
+    """First position a run resumed from ``Ledger(segment, cursor*world_size)`` consumes with
+    ``world_size_now`` ranks: the resume rule rounds down to a step boundary."""
+    if positions_done >= W:
+        return (segment + 1) * W
+    return segment * W + (positions_done // world_size_now) * world_size_now
+
+
+def parse_checkpoint_name(name: str) -> tuple[int, int, int, int]:
+    """``(segment, positions, world_size, attempt)`` from ``checkpoint_g..._p..._n..._a...``."""
+    import re
+
+    m = re.fullmatch(r"checkpoint_g(\d+)_p(\d+)_n(\d+)_a(\d+)", name)
+    if not m:
+        raise ValueError(f"not a distrainer checkpoint directory name: {name!r}")
+    seg, pos, ws, att = (int(x) for x in m.groups())
+    return seg, pos, ws, att
+
+
+def check_resume(
+    records: Sequence[AuditRecord],
+    W: int,
+    start_position: int | None = None,
+    ledger: tuple[int, int] | None = None,
+    expected_segments: int | None = None,
+) -> list[str]:
+    """A run resumed from a ledger: positions are exactly the resume start up to the end of the
+    last segment touched, each once, dealt by the assignment rule (S9/S10 and the CLI resume).
+    Give either ``start_position`` or ``ledger=(segment, positions_done)``; with the ledger the
+    start is derived with the world size the resumed run actually had (round-down rule)."""
     if not records:
         return ["no audit records"]
     problems = check_dealing(records, W)
+    n_now = max(r.world_size for r in records)
+    if ledger is not None:
+        start_position = resume_start_position(ledger[0], ledger[1], W, n_now)
+    if start_position is None:
+        return ["check_resume needs start_position or ledger"]
     positions = sorted(r.position for r in records)
     last_seg = max(r.segment for r in records)
+    if expected_segments is not None and last_seg + 1 != expected_segments:
+        problems.append(
+            f"resumed run touched {last_seg + 1} segments, expected {expected_segments}"
+        )
     expected = list(range(start_position, (last_seg + 1) * W))
     if positions != expected:
         missing = sorted(set(expected) - set(positions))
@@ -129,6 +165,7 @@ def check_recovery(
     every_k: int | None = None,
     expected_world_sizes: Sequence[int] | None = None,
     min_attempts: int = 2,
+    expected_segments: int | None = None,
 ) -> list[str]:
     """Failure / resize scenarios (S2, S3, S4): several attempts, one log.
 
@@ -155,6 +192,10 @@ def check_recovery(
         if len(n) != 1:
             problems.append(f"attempt {a}: mixed world sizes {sorted(n)}")
         sizes.append(min(n))
+        seen = [r.position for r in recs]
+        dupes = sorted({p for p in seen if seen.count(p) > 1})
+        if dupes:
+            problems.append(f"attempt {a}: positions consumed twice within the attempt {dupes[:8]}")
     if expected_world_sizes is not None and sizes != list(expected_world_sizes):
         problems.append(f"world sizes per attempt {sizes}, expected {list(expected_world_sizes)}")
     for prev, cur in zip(ids, ids[1:], strict=False):
@@ -175,6 +216,8 @@ def check_recovery(
             problems.append(f"attempt {cur} replays {replayed} positions (> {bound})")
     positions = sorted({r.position for r in records})
     last_seg = max(r.segment for r in records)
+    if expected_segments is not None and last_seg + 1 != expected_segments:
+        problems.append(f"run touched {last_seg + 1} segments, expected {expected_segments}")
     if positions != list(range(0, (last_seg + 1) * W)):
         missing = sorted(set(range(0, (last_seg + 1) * W)) - set(positions))
         problems.append(f"union of attempts misses positions {missing[:8]}")
@@ -264,6 +307,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--run-name", required=True)
     ap.add_argument("--scenario", default="S1", choices=["S1", "S5", "S7", "resume"])
     ap.add_argument("--start-position", type=int, default=None, help="resume: first position")
+    ap.add_argument("--ledger-segment", type=int, default=None, help="resume: checkpoint segment")
+    ap.add_argument("--ledger-positions", type=int, default=None, help="resume: positions done")
+    ap.add_argument("--expected-segments", type=int, default=None)
     ap.add_argument("--W", type=int, required=True)
     ap.add_argument("--every-k", type=int, default=None)
     ap.add_argument("--run-uri", default=None, help="S5: run directory holding checkpoints")
@@ -278,9 +324,16 @@ def main(argv: list[str] | None = None) -> int:
     elif args.scenario == "S5":
         problems = check_s5(args.run_uri, args.W, args.every_k, args.expected_checkpoints)
     elif args.scenario == "resume":
-        if args.start_position is None:
-            ap.error("--start-position is required for the resume check")
-        problems = check_resume(records, args.W, args.start_position)
+        if args.start_position is None and args.ledger_segment is None:
+            ap.error("--start-position or --ledger-segment/--ledger-positions is required")
+        ledger = (
+            (args.ledger_segment, args.ledger_positions)
+            if args.ledger_segment is not None
+            else None
+        )
+        problems = check_resume(
+            records, args.W, args.start_position, ledger, expected_segments=args.expected_segments
+        )
     else:
         other = read_audit(fs, root, args.other_run_name)
         problems = check_s7(records, other)

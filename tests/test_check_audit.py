@@ -1,3 +1,5 @@
+import pytest
+
 from distrainer.audit import AuditRecord
 from integration_tests.cluster.check_audit import (
     check_dealing,
@@ -111,3 +113,58 @@ def test_check_recovery_allows_one_in_flight_checkpoint_interval():
         rec(1, 1, 2, 0, 6, 13),
     ]
     assert any("replays" in p for p in check_recovery(first + too_far, W, every_k=2))
+
+
+def test_check_recovery_rejects_short_runs_and_duplicates_within_an_attempt():
+    from integration_tests.cluster.check_audit import check_recovery
+
+    W = 8
+    first = [r for r in happy(W=W, n=2, segments=2, attempt=0) if r.position < 6]
+    second = [
+        rec(1, r.rank, 2, r.segment, r.step, r.position)
+        for r in happy(W=W, n=2, segments=2)
+        if r.position >= 4
+    ]
+    assert check_recovery(first + second, W, every_k=2, expected_segments=2) == []
+    assert any("expected 3" in p for p in check_recovery(first + second, W, 2, expected_segments=3))
+    dup = first + second + [second[0]]
+    assert any("twice within" in p for p in check_recovery(dup, W, 2))
+
+
+def test_check_resume_derives_the_start_from_the_ledger_and_world_size():
+    from integration_tests.cluster.check_audit import (
+        check_resume,
+        parse_checkpoint_name,
+        resume_start_position,
+    )
+
+    W = 12
+    # checkpoint (segment 1, 8 positions done at n=2); resumed with 3 ranks -> rounds down to 6
+    assert resume_start_position(1, 8, W, 3) == 12 + 6
+    assert resume_start_position(1, 12, W, 3) == 24  # completed segment -> next one
+    recs = []
+    for seg in range(1, 3):
+        for step in range(W // 3):
+            for rank in range(3):
+                pos = seg * W + step * 3 + rank
+                if pos >= 18:
+                    recs.append(rec(0, rank, 3, seg, step, pos))
+    assert check_resume(recs, W, ledger=(1, 8), expected_segments=3) == []
+    assert any("expected 4" in p for p in check_resume(recs, W, ledger=(1, 8), expected_segments=4))
+    assert check_resume(recs, W) == ["check_resume needs start_position or ledger"]
+    assert parse_checkpoint_name("checkpoint_g000003_p000008_n02_a01") == (3, 8, 2, 1)
+    with pytest.raises(ValueError):
+        parse_checkpoint_name("checkpoint_g000003_s0004")
+
+
+def test_expected_reports():
+    from types import SimpleNamespace
+
+    from integration_tests.cluster.check_audit import expected_reports
+
+    any_cfg = SimpleNamespace(policy="any", every_k=2, report_every_step=False)
+    assert expected_reports(4, 12, 2, any_cfg) == 12  # 3 per segment, last step is a checkpoint
+    k4 = SimpleNamespace(policy="every_k", every_k=4, report_every_step=False)
+    assert expected_reports(4, 12, 2, k4) == 4 + 1  # step 4 of 6 only, plus the final report
+    every = SimpleNamespace(policy="segment_end", every_k=None, report_every_step=True)
+    assert expected_reports(4, 12, 2, every) == 24

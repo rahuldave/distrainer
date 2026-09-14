@@ -12,6 +12,7 @@ fmt path=".":
 lint path=".":
   uv run ruff check {{path}}
   uv run ruff format --check {{path}}
+  bash -n deploy/driver.sh deploy/drivers/*.sh deploy/ray-head.sh deploy/ray-worker.sh
 
 typecheck:
   uv run ty check distrainer examples integration_tests

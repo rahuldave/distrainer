@@ -6,11 +6,12 @@
 #   up N [minio]           head + N workers (+ MinIO with the minio profile)
 #   down                   stop the containers (the MinIO volume survives for cold-restore tests)
 #   nuke                   down plus every volume and the shared mount
-#   wipe-shared            empty the shared mount (simulates losing the shared volume)
+#   wipe-shared            empty the shared mount (simulates losing the shared volume; containers must be down)
 #   scale N                resize the worker set without recreating running containers
 #   exec-head CMD...       run a command inside the head container (the driver runs here)
 #   kill-worker I          SIGKILL worker I (node death); the container is started again after
 #                          DISTRAINER_RESTART_DELAY seconds (default 5, 0 = stays dead)
+#   kill-head              SIGKILL the head (Ray head, Train controller and driver die; S10)
 #   stop-worker I          SIGTERM worker I (graceful drain, like a preemption notice)
 #   cp-from-head SRC DST   copy a file or directory out of the head container
 #   shared                 print the host path of the shared storage

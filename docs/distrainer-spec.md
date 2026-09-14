@@ -433,46 +433,7 @@ Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clust
 
 Containers are Ray nodes: one `head` and `N` `worker` services on the compose network, sharing `/shared` (block store, checkpoints, audit logs), which is a bind mount of `.harness/shared` on the Mac so the host can read audit trails and checkpoints during a run. Ray Train needs shared storage across nodes; the mount provides it (MinIO is the alternative). The source directories are mounted over the image copy, so code edits are live in every node without rebuilding.
 
-`deploy/Dockerfile` (arm64-native under OrbStack):
-
-```dockerfile
-FROM python:3.13-slim
-RUN pip install --no-cache-dir "ray[data,train]==2.58.0" pyarrow pandas \
-    && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
-COPY . /app
-RUN pip install -e /app
-WORKDIR /app
-```
-
-`deploy/docker-compose.yml` (essentials):
-
-```yaml
-services:
-  head:
-    build: {context: .., dockerfile: deploy/Dockerfile}
-    command: ray start --head --port=6379 --dashboard-host=0.0.0.0 --num-cpus=2 --block
-    ports: ["8265:8265"]
-    shm_size: "1g"
-    volumes: ["shared:/shared"]
-    environment: [RAY_TRAIN_V2_ENABLED=1]
-  worker:
-    build: {context: .., dockerfile: deploy/Dockerfile}
-    command: ray start --address=head:6379 --num-cpus=1 --block
-    depends_on: [head]
-    shm_size: "1g"
-    volumes: ["shared:/shared"]
-    environment: [RAY_TRAIN_V2_ENABLED=1]
-    deploy: {replicas: 2}
-  minio:
-    image: quay.io/minio/minio   # the Docker Hub image was retired
-    command: server /data --console-address ":9001"
-    environment: [MINIO_ROOT_USER=distrainer, MINIO_ROOT_PASSWORD=distrainer123]
-    ports: ["9000:9000", "9001:9001"]
-    volumes: ["minio:/data"]
-volumes:
-  shared: {}
-  minio: {}
-```
+`deploy/Dockerfile`, `deploy/docker-compose.yml`, `deploy/ray-head.sh` and `deploy/ray-worker.sh` in the repository are authoritative; in outline: the image is `python:3.13-slim` plus `uv`, with dependencies installed from `uv.lock` in a cached layer and the project on top; the compose project (`name: distrainer`, project directory = repo root) has a `head` service (`ray start --head`, 2 CPUs, no `trainer` resource, dashboard on `127.0.0.1:8265`, healthcheck), a `worker` service (`ray start --address=head:6379 --num-cpus=1 --resources='{"trainer": 1}'`, retried until the head answers, `restart: unless-stopped`, scaled with `--scale worker=N`), and a `minio` service behind the `minio` profile (`quay.io/minio/minio`, ports on loopback, a named volume that `down` keeps and `nuke` removes). All services mount `.harness/shared` at `/shared` and the source directories over the image copy.
 
 Workers and head get `S3_ENDPOINT=http://minio:9000`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` via `.env`; `just mkbucket` creates the `distrainer` bucket with `mc`. Runs default to `storage.kind: local` (the `shared:` volume) in the harness; the segment log's atomic commit does not need an object store. `storage.kind: s3` is a config switch backed by `storage.py` from M1 on, and MinIO is only started (compose profile `minio`) for the scenarios that exercise the S3 path (S9, S10).
 

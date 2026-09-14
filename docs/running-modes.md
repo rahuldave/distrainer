@@ -64,6 +64,10 @@ answers, so it is exactly one training worker; the head (`deploy/ray-head.sh`) a
 (`http://localhost:8265`) but never trains. The image is built once from `uv.lock`
 (`just build`, 1.5 GB, arm64); `distrainer/`, `examples/`, and `integration_tests/` are mounted
 over the image copy, so code edits on the Mac are live in every node without a rebuild.
+`deploy/ray-head.sh` and `deploy/ray-worker.sh` run *inside* the image and do need `just build`;
+`deploy/driver.sh` and `deploy/drivers/*.sh` run on the Mac. Ports are published on
+`127.0.0.1` only: OrbStack forwards published ports to the LAN by default, and the Ray dashboard
+(8265) accepts job submissions without authentication.
 
 ```yaml
 ray_address: auto            # the driver runs inside the head container

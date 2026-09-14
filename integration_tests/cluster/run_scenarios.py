@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
 from distrainer.audit import read_audit  # noqa: E402
+from distrainer.config import load_config  # noqa: E402
 from distrainer.storage import resolve  # noqa: E402
 from integration_tests.cluster.check_audit import (  # noqa: E402
     check_recovery,
@@ -28,7 +29,12 @@ from integration_tests.cluster.check_audit import (  # noqa: E402
 DRIVER = ROOT / "deploy" / "driver.sh"
 HARNESS_CFG = "examples/hello_blocks/harness.yaml"
 MINIO_CFG = "examples/hello_blocks/harness-minio.yaml"
-W = 24
+_cfg = load_config(str(ROOT / HARNESS_CFG))
+_minio_cfg = load_config(str(ROOT / MINIO_CFG))
+W = _cfg.log.W
+SEGMENTS = int(_cfg.train["n_blocks"]) // W  # segments per pass in the harness workload
+S3_BLOCKS = f"s3://{_minio_cfg.store_root}"
+S3_RUNS = f"s3://{_minio_cfg.storage_path}"
 
 
 def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) -> str:
@@ -90,7 +96,7 @@ def start_train(cfg: str, *overrides: str, env: dict[str, str] | None = None) ->
     ]
     for o in overrides:
         cmd += ["--set", o]
-    return subprocess.Popen(
+    proc = subprocess.Popen(
         cmd,
         cwd=ROOT,
         stdout=subprocess.PIPE,
@@ -98,13 +104,27 @@ def start_train(cfg: str, *overrides: str, env: dict[str, str] | None = None) ->
         text=True,
         env={**os.environ, **(env or {})},
     )
+    _running.append(proc)
+    return proc
 
 
-def wait_for_blocks(run_name: str, count: int, timeout_s: float = 300) -> None:
+_running: list[subprocess.Popen] = []  # training processes to kill if a scenario aborts
+
+
+def _check_alive(proc: subprocess.Popen | None) -> None:
+    if proc is not None and proc.poll() is not None and proc.returncode != 0:
+        out = proc.stdout.read() if proc.stdout else ""
+        raise RuntimeError(f"training exited early ({proc.returncode}):\n{out[-2000:]}")
+
+
+def wait_for_blocks(
+    run_name: str, count: int, timeout_s: float = 300, proc: subprocess.Popen | None = None
+) -> None:
     """Block until at least ``count`` audit records exist for the run (training is under way)."""
     fs, root = resolve(str(shared() / "blocks"), create=False)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
+        _check_alive(proc)
         try:
             if len(read_audit(fs, root, run_name)) >= count:
                 return
@@ -114,8 +134,44 @@ def wait_for_blocks(run_name: str, count: int, timeout_s: float = 300) -> None:
     raise TimeoutError(f"{run_name}: fewer than {count} blocks consumed after {timeout_s}s")
 
 
+def wait_for_blocks_s3(
+    run_name: str,
+    count: int,
+    env: dict[str, str],
+    timeout_s: float = 300,
+    proc: subprocess.Popen | None = None,
+) -> None:
+    """``wait_for_blocks`` for a run whose audit trail is on the bucket (read inside the head)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        _check_alive(proc)
+        out = (
+            head_python(
+                "from distrainer.audit import read_audit\n"
+                "from distrainer.storage import resolve, s3_options_from_env\n"
+                f"fs, root = resolve({S3_BLOCKS!r}, create=False, **s3_options_from_env())\n"
+                f"print(len(read_audit(fs, root, {run_name!r})))\n",
+                env=env,
+            )
+            .strip()
+            .splitlines()
+        )
+        if out and out[-1].isdigit() and int(out[-1]) >= count:
+            return
+        time.sleep(2.0)
+    raise TimeoutError(f"{run_name}: fewer than {count} blocks on S3 after {timeout_s}s")
+
+
 def finish(proc: subprocess.Popen, timeout_s: float = 600, name: str = "train") -> str:
-    out, _ = proc.communicate(timeout=timeout_s)
+    try:
+        out, _ = proc.communicate(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, _ = proc.communicate()
+        raise RuntimeError(f"training did not finish within {timeout_s}s:\n{out[-2000:]}") from None
+    finally:
+        if proc in _running:
+            _running.remove(proc)
     logs = ROOT / ".harness" / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     (logs / f"{name}.log").write_text(out)
@@ -155,7 +211,13 @@ def scenario_s2() -> list[str]:
     finish(proc, name="s2")
     recs = records_for("s2")
     print(summarize(recs))
-    return check_recovery(recs, W, every_k=2, expected_world_sizes=[2, 2])
+    # Ray may need more than one restart while the dead node's heartbeat times out; every
+    # attempt must run at world size 2 and the trail must be consistent across all of them
+    problems = check_recovery(recs, W, every_k=2, expected_segments=SEGMENTS)
+    sizes = sorted({r.world_size for r in recs})
+    if sizes != [2]:
+        problems.append(f"world sizes {sizes}, expected only 2")
+    return problems
 
 
 def scenario_s3() -> list[str]:
@@ -164,12 +226,14 @@ def scenario_s3() -> list[str]:
     ensure_blocks()
     fresh("s3")
     proc = start_train(HARNESS_CFG, "run_name=s3")
-    wait_for_blocks("s3", 12)
+    wait_for_blocks("s3", 12, proc=proc)
     driver("scale", "3")
     finish(proc, name="s3")
     recs = records_for("s3")
     print(summarize(recs))
-    return check_recovery(recs, W, every_k=2, expected_world_sizes=[2, 3])
+    return check_recovery(
+        recs, W, every_k=2, expected_world_sizes=[2, 3], expected_segments=SEGMENTS
+    )
 
 
 def scenario_s4() -> list[str]:
@@ -178,12 +242,14 @@ def scenario_s4() -> list[str]:
     ensure_blocks()
     fresh("s4")
     proc = start_train(HARNESS_CFG, "run_name=s4")
-    wait_for_blocks("s4", 12)
+    wait_for_blocks("s4", 12, proc=proc)
     driver("scale", "2")
     finish(proc, name="s4")
     recs = records_for("s4")
     print(summarize(recs))
-    return check_recovery(recs, W, every_k=2, expected_world_sizes=[3, 2])
+    return check_recovery(
+        recs, W, every_k=2, expected_world_sizes=[3, 2], expected_segments=SEGMENTS
+    )
 
 
 def s3_rm(prefixes: list[str], env: dict[str, str]) -> None:
@@ -205,59 +271,70 @@ def head_python(code: str, env: dict[str, str] | None = None) -> str:
     return driver("exec-head", "python", "-c", code, env=env)
 
 
-def pick_checkpoint(run_uri: str, env: dict[str, str], which: str = "latest") -> tuple[str, int]:
-    """``(checkpoint uri, first position after it)`` for a checkpoint of a run on S3, listed from
-    inside the head container (it has the S3 credentials). ``which``: ``latest`` or ``middle``."""
+def pick_checkpoint(
+    run_uri: str, env: dict[str, str], which: str = "latest"
+) -> tuple[str, int, int]:
+    """``(checkpoint uri, ledger segment, ledger positions)`` for a checkpoint of a run on S3,
+    chosen among those with a readable ``.metadata.json`` ledger (a partial upload left by a
+    killed head has none). ``which``: ``latest`` or ``middle``, by data position."""
     out = (
         head_python(
-            "import pyarrow.fs as pafs\n"
-            "from distrainer.storage import resolve, s3_options_from_env\n"
-            f"fs, root = resolve({run_uri!r}, create=False, **s3_options_from_env())\n"
-            "infos = fs.get_file_info(pafs.FileSelector(root, recursive=False))\n"
-            "names = sorted(i.path.rsplit('/', 1)[-1] for i in infos if 'checkpoint_g' in i.path)\n"
-            "print(' '.join(names))\n",
+            "import json\n"
+            "from integration_tests.cluster.check_audit import checkpoint_ledgers\n"
+            f"led = checkpoint_ledgers({run_uri!r})\n"
+            "rows = sorted(\n"
+            "    (int(v['segment']), int(v['cursor']) * int(v['world_size']), k)\n"
+            "    for k, v in led.items()\n"
+            ")\n"
+            "print(json.dumps(rows))\n",
             env=env,
         )
         .strip()
         .splitlines()
     )
-    names = out[-1].split() if out else []
-    if not names:
-        raise RuntimeError(f"no checkpoints under {run_uri}")
-    name = names[-1] if which == "latest" else names[len(names) // 2]
-    import re
+    import json
 
-    m = re.match(r"checkpoint_g(\d+)_p(\d+)_n(\d+)_a(\d+)", name)
-    assert m, name
-    start = int(m.group(1)) * W + int(m.group(2))
-    return f"{run_uri}/{name}", start
+    rows = json.loads(out[-1]) if out else []
+    if not rows:
+        raise RuntimeError(f"no checkpoints with a ledger under {run_uri}")
+    seg, positions, name = rows[-1] if which == "latest" else rows[len(rows) // 2]
+    return f"{run_uri}/{name}", int(seg), int(positions)
 
 
-def resume_check(run_name: str, start: int, env: dict[str, str]) -> list[str]:
-    out = driver(
-        "exec-head",
-        "python",
-        "integration_tests/cluster/check_audit.py",
-        "--store-root",
-        "s3://distrainer/blocks",
-        "--run-name",
-        run_name,
-        "--scenario",
-        "resume",
-        "--W",
-        str(W),
-        "--start-position",
-        str(start),
-        env=env,
-        check=False,
+def resume_check(run_name: str, segment: int, positions: int, env: dict[str, str]) -> list[str]:
+    """Run check_audit --scenario resume inside the head (the audit is on S3); the start position
+    is derived from the ledger and the world size the resumed run actually had."""
+    proc = subprocess.run(
+        [
+            str(DRIVER),
+            "exec-head",
+            "python",
+            "integration_tests/cluster/check_audit.py",
+            "--store-root",
+            S3_BLOCKS,
+            "--run-name",
+            run_name,
+            "--scenario",
+            "resume",
+            "--W",
+            str(W),
+            "--ledger-segment",
+            str(segment),
+            "--ledger-positions",
+            str(positions),
+            "--expected-segments",
+            str(SEGMENTS),
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
     )
-    lines = [ln for ln in out.splitlines() if ln.strip()]
+    lines = [ln for ln in (proc.stdout + proc.stderr).splitlines() if ln.strip()]
     print("\n".join(lines[-3:]))
-    return (
-        []
-        if lines and lines[-1].endswith("PASS")
-        else [ln for ln in lines if "FAIL" in ln] or ["resume check failed"]
-    )
+    if proc.returncode == 0 and lines and lines[-1].endswith("PASS"):
+        return []
+    return [ln for ln in lines if "FAIL" in ln or "Error" in ln][-5:] or ["resume check failed"]
 
 
 def cli_resume(ckpt_uri: str, run_name: str, env: dict[str, str]) -> None:
@@ -286,10 +363,10 @@ def scenario_s9() -> list[str]:
     driver("mkbucket", "distrainer", env=env)
     s3_rm(
         [
-            "s3://distrainer/runs/s9",
-            "s3://distrainer/runs/s9_resume",
-            "s3://distrainer/blocks/audit/s9",
-            "s3://distrainer/blocks/audit/s9_resume",
+            f"{S3_RUNS}/s9",
+            f"{S3_RUNS}/s9_resume",
+            f"{S3_BLOCKS}/audit/s9",
+            f"{S3_BLOCKS}/audit/s9_resume",
         ],
         env,
     )
@@ -306,10 +383,10 @@ def scenario_s9() -> list[str]:
     driver("wipe-shared", env=env)
     up(2, "minio", env=env)
     # a completed run's newest checkpoint is the end of the log: resume from the middle one
-    ckpt, start = pick_checkpoint("s3://distrainer/runs/s9", env, which="middle")
-    print(f"S9 resuming from {ckpt} (position {start})")
+    ckpt, seg, positions = pick_checkpoint(f"{S3_RUNS}/s9", env, which="middle")
+    print(f"S9 resuming from {ckpt} (segment {seg}, {positions} positions done)")
     cli_resume(ckpt, "s9_resume", env)
-    return resume_check("s9_resume", start, env)
+    return resume_check("s9_resume", seg, positions, env)
 
 
 def scenario_s10() -> list[str]:
@@ -320,10 +397,10 @@ def scenario_s10() -> list[str]:
     driver("mkbucket", "distrainer", env=env)
     s3_rm(
         [
-            "s3://distrainer/runs/s10",
-            "s3://distrainer/runs/s10_resume",
-            "s3://distrainer/blocks/audit/s10",
-            "s3://distrainer/blocks/audit/s10_resume",
+            f"{S3_RUNS}/s10",
+            f"{S3_RUNS}/s10_resume",
+            f"{S3_BLOCKS}/audit/s10",
+            f"{S3_BLOCKS}/audit/s10_resume",
         ],
         env,
     )
@@ -336,14 +413,15 @@ def scenario_s10() -> list[str]:
         env=env,
     )
     proc = start_train(MINIO_CFG, "run_name=s10", env=env)
-    time.sleep(25)  # into the run: the audit is on S3, so wait by time rather than by file
-    subprocess.run(["docker", "kill", "distrainer-head-1"], check=True, capture_output=True)
+    wait_for_blocks_s3("s10", 24, env, proc=proc)  # a segment in, with checkpoints registered
+    driver("kill-head", env=env)
     proc.communicate(timeout=120)  # the exec dies with the head
+    _running.remove(proc)
     up(2, "minio", env=env)  # recreates the head; workers rejoin it
-    ckpt, start = pick_checkpoint("s3://distrainer/runs/s10", env)
-    print(f"S10 resuming from {ckpt} (position {start})")
+    ckpt, seg, positions = pick_checkpoint(f"{S3_RUNS}/s10", env)
+    print(f"S10 resuming from {ckpt} (segment {seg}, {positions} positions done)")
     cli_resume(ckpt, "s10_resume", env)
-    return resume_check("s10_resume", start, env)
+    return resume_check("s10_resume", seg, positions, env)
 
 
 SCENARIOS = {
@@ -369,6 +447,10 @@ def main(argv: list[str] | None = None) -> int:
                 problems = SCENARIOS[name]()
             except Exception as exc:  # report and continue with the next scenario
                 problems = [f"runner error: {exc}"]
+            finally:
+                for proc in list(_running):  # a scenario that raised must not leave a run behind
+                    proc.kill()
+                    _running.remove(proc)
             for p in problems:
                 print(f"{name} FAIL: {p}")
             print(f"{name}: {'PASS' if not problems else 'FAIL'} ({time.monotonic() - t0:.0f}s)")
