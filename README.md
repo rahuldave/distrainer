@@ -15,6 +15,8 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 - [`docs/running-modes.md`](docs/running-modes.md) — the four ways to run the same code: laptop
   single-node Ray, OrbStack containers as Ray nodes, uncloud machines, KubeRay; where the driver
   runs, which storage works where, how failures are injected, which scenarios each validates.
+- [`docs/handoff-m4.md`](docs/handoff-m4.md) — where development stands and the detailed plan for
+  M4 (hooks, re-mining, streaming) and M5 (KubeRay), for whoever picks it up next.
 - [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
   status.
