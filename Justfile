@@ -2,7 +2,6 @@
 # Native recipe dependencies compose ordered steps; harness targets take positional args.
 
 export UV_CACHE_DIR := ".local/uv-cache"
-compose := "docker compose -f deploy/docker-compose.yml"
 
 setup:
   uv sync --all-groups
@@ -13,6 +12,7 @@ fmt path=".":
 lint path=".":
   uv run ruff check {{path}}
   uv run ruff format --check {{path}}
+  bash -n deploy/driver.sh deploy/drivers/*.sh deploy/ray-head.sh deploy/ray-worker.sh
 
 typecheck:
   uv run ty check distrainer examples integration_tests
@@ -39,28 +39,38 @@ diff-check:
 
 verify: lint typecheck static test regression smoke diff-check
 
-# --- local multi-node harness (docker compose on OrbStack); see docs/distrainer-spec.md section 9 ---
+# --- local multi-node harness: every target is a deploy/driver.sh verb (spec section 9);
+# DISTRAINER_DRIVER selects the driver (compose today), DISTRAINER_MINIO=1 adds the MinIO profile ---
+
+build:
+  deploy/driver.sh build
 
 up N="2":
-  {{compose}} up -d --build --scale worker={{N}}
+  deploy/driver.sh up {{N}}
+
+up-minio N="2":
+  DISTRAINER_MINIO=1 deploy/driver.sh up {{N}} minio
 
 down:
-  {{compose}} down -v
+  deploy/driver.sh down
+
+nuke:
+  deploy/driver.sh nuke
 
 mkbucket:
-  {{compose}} exec minio mc mb -p local/distrainer
+  DISTRAINER_MINIO=1 deploy/driver.sh mkbucket distrainer
 
-blocks:
-  {{compose}} exec head python examples/toy_contrastive/make_blocks.py
+blocks CFG="examples/hello_blocks/harness.yaml":
+  deploy/driver.sh exec-head python examples/hello_blocks/make_blocks.py --config {{CFG}}
 
-train CFG:
-  {{compose}} exec head python examples/toy_contrastive/train.py --config {{CFG}}
+train CFG="examples/hello_blocks/harness.yaml":
+  deploy/driver.sh exec-head python examples/hello_blocks/train.py --config {{CFG}}
 
 kill-worker I:
-  docker kill $({{compose}} ps -q worker | sed -n '{{I}}p')
+  deploy/driver.sh kill-worker {{I}}
 
 scale N:
-  {{compose}} up -d --no-recreate --scale worker={{N}}
+  deploy/driver.sh scale {{N}}
 
 integration S="all":
   uv run python integration_tests/cluster/run_scenarios.py --scenario {{S}}

@@ -15,11 +15,11 @@ Every mode uses the same YAML shape (spec section 7); the fields that differ are
 | Milestone | M2 (done) | M3 | after M3, when machines are available | M5 |
 | Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (stub) | `deploy/drivers/kuberay.sh` |
 
-Modes B to D are the M3 and M5 plan (spec section 9); as of M2 only mode A runs, and `deploy/` is
-empty. The design rule already holds: the verbs of `deploy/driver.sh` (`up N`, `down`, `exec-head`,
-`kill-worker I`, `scale N`, `cp-from-head`, `endpoint`) will be the whole contract between the
+Modes A and B run today; C and D are the plan (spec section 9). The verbs of `deploy/driver.sh`
+(`build`, `up N [minio]`, `down`, `nuke`, `scale N`, `exec-head`, `kill-worker I`, `stop-worker I`,
+`cp-from-head`, `wipe-shared`, `shared`, `endpoint`, `mkbucket`) are the whole contract between the
 Justfile or the scenario runner and a mode; nothing under `distrainer/`, `tests/`, or
-`integration_tests/` may know which driver is active.
+`integration_tests/` knows which driver is active.
 
 ## A. Laptop, single node (what `just smoke` does)
 
@@ -53,15 +53,21 @@ loaded, because Ray Train workers do not share the driver's working directory. A
 integration is switched off by `distrainer.trainer.init_ray` so workers use the same interpreter
 instead of re-launching through `uv` from an uploaded copy of the repository.
 
-## B. OrbStack containers as Ray nodes (the local multi-node harness, M3, planned)
+## B. OrbStack containers as Ray nodes (the local multi-node harness, M3)
 
 OrbStack runs Linux containers in a lightweight VM on the Mac; Docker Compose gives them a private
 network and DNS, so a `head` container and `N` `worker` containers behave like `N + 1` machines.
-The plan: each worker container starts
-`ray start --address=head:6379 --num-cpus=1 --resources='{"trainer":1}'` and is therefore exactly
-one training worker; the head advertises no `trainer` resource, so it hosts the Ray head, the Train
-controller, the driver, and the dashboard but never trains. (The `trainer` key is already legal in
-`resources_per_worker`; nothing starts containers yet.)
+Each worker container runs `deploy/ray-worker.sh`:
+`ray start --address=head:6379 --num-cpus=1 --resources='{"trainer":1}'`, retried until the head
+answers, so it is exactly one training worker; the head (`deploy/ray-head.sh`) advertises no
+`trainer` resource, so it hosts the Ray head, the Train controller, the driver, and the dashboard
+(`http://localhost:8265`) but never trains. The image is built once from `uv.lock`
+(`just build`, 1.5 GB, arm64); `distrainer/`, `examples/`, and `integration_tests/` are mounted
+over the image copy, so code edits on the Mac are live in every node without a rebuild.
+`deploy/ray-head.sh` and `deploy/ray-worker.sh` run *inside* the image and do need `just build`;
+`deploy/driver.sh` and `deploy/drivers/*.sh` run on the Mac. Ports are published on
+`127.0.0.1` only: OrbStack forwards published ports to the LAN by default, and the Ray dashboard
+(8265) accepts job submissions without authentication.
 
 ```yaml
 ray_address: auto            # the driver runs inside the head container
@@ -85,16 +91,29 @@ storage_path: distrainer/runs   # bucket/prefix
 store_root: distrainer/blocks
 ```
 
+Two things S9 and S10 taught: `just down` keeps the MinIO volume (that is what a cold restore
+restores from; `just nuke` removes it), and a run name that already exists on the bucket is
+*restored* by Ray Train rather than started afresh, so the scenario runner deletes the old run
+state and audit trail on the bucket before each MinIO scenario. MinIO's image now lives at
+`quay.io/minio/minio`.
+
 ```bash
-# M3 targets; the Justfile entries exist, the driver and compose files do not yet
-just up 2            # head + 2 workers (+ MinIO with the minio profile)
+just build           # once, or after uv.lock changes
+just up 2            # head + 2 workers; just up-minio 2 adds MinIO
 just blocks          # build the corpus inside the head container
 just train CFG       # driver inside the head container
-just kill-worker 2   # SIGKILL a worker container: Ray sees the node die
+just kill-worker 2   # SIGKILL a worker container: Ray sees the node die; the container is
+                     # started again 5 s later as a new node (docker kill never triggers a
+                     # restart policy, so the driver does it)
 just scale 3         # elastic resize: the controller restarts the group at the new size
 just integration S2  # scenario runner drives the verbs and checks the audit trail
-just down
+just down            # containers go, the MinIO volume stays; just nuke removes everything
 ```
+
+Shared storage is a bind mount, `.harness/shared` on the Mac at `/shared` in every container, so
+audit trails and checkpoints can be read on the host while a run is going. The toy workload is
+slowed with `train.step_sleep_s` in the harness configs so that a run lasts long enough to be
+killed or resized mid-way (at full speed, 96 blocks take 0.35 s).
 
 The Mac has 16 GB and the OrbStack VM 8 GB, so scenarios are written for 2 to 3 worker containers.
 `docker kill` is node death; `docker stop` is a graceful drain that looks like a preemption notice.

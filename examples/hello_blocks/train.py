@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -50,6 +51,9 @@ def train_step(
     loss = torch.nn.functional.mse_loss(model(x), y)
     loss.backward()  # DDP all-reduces the gradients here
     optimizer.step()
+    sleep_s = float(info.train.get("step_sleep_s", 0))
+    if sleep_s:
+        time.sleep(sleep_s)  # harness runs: make the run long enough to break on purpose
     return {"loss": float(loss.item())}
 
 
@@ -108,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
     n_reports = int(
         (result.metrics or {}).get("reports", 0)
     )  # metrics_dataframe only keeps kept checkpoints
-    expected = expected_reports(len(records) // W, W, cfg.scaling.max_workers, cfg.checkpoint)
+    n_ranks = max((r.world_size for r in records), default=cfg.scaling.max_workers)
+    expected = expected_reports(len(records) // W, W, n_ranks, cfg.checkpoint)
     problems += check_report_count(n_reports, expected)
     print(f"reports per rank: {n_reports} (expected {expected})")
     for p in problems:

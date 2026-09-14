@@ -1,0 +1,22 @@
+.git
+.venv
+.local
+.harness
+.gest
+.agents
+.claude
+.codex
+.github
+.pytest_cache
+.ruff_cache
+.hypothesis
+__pycache__
+**/__pycache__
+blocks
+runs
+audit
+Claude outputs
+docs
+*.log
+.env
+.env.*

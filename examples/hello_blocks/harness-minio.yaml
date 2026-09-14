@@ -1,0 +1,33 @@
+# hello_blocks in the harness with everything on MinIO (S9 cold restore, S10 head loss).
+run_name: hello_s3
+storage_path: distrainer/runs      # bucket/prefix
+store_root: distrainer/blocks
+seed: 7
+ray_address: auto
+storage:
+  kind: s3
+  endpoint: http://minio:9000       # S3_ACCESS_KEY / S3_SECRET_KEY from the environment
+  region: auto
+log:
+  W: 24
+  passes: 1
+  wait_poll_s: 0.5
+checkpoint:
+  policy: any
+  every_k: 2
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: [2, 3]
+  resources_per_worker: {CPU: 1, trainer: 1}
+  elastic_resize_monitor_interval_s: 5
+failure:
+  max_failures: 3
+train:
+  n_blocks: 240            # 10 segments of 24: ~30 s at 2 workers with step_sleep_s 0.25
+  rows_per_block: 32
+  features: 8
+  lr: 0.05
+  step_sleep_s: 0.25       # ~12 s per run: long enough to kill or resize mid-way
