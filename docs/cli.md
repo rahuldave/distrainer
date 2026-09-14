@@ -133,7 +133,7 @@ head container against MinIO).
 | `just mkbucket` | create the `distrainer` bucket on MinIO |
 | `just blocks [CFG]`, `just train [CFG]` | `make_blocks.py` / `train.py` of hello_blocks inside the head container |
 | `just kill-worker I`, `just scale N` | SIGKILL worker `I` (restarted after `DISTRAINER_RESTART_DELAY` s); resize the worker set |
-| `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11 (or `all`) |
+| `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just docs` | list the docs |
 
 `DISTRAINER_DRIVER` selects the harness driver (`compose` today), `DISTRAINER_MINIO=1` adds the

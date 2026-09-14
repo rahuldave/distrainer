@@ -104,10 +104,9 @@ can fail on a tutorial.
 - Producer-side backpressure is a documented non-goal (a fast producer may run arbitrarily
   ahead; `gc` bounds the log behind the checkpoint only); the cases are tabulated in
   `docs/tutorials/streaming.md`.
-- Streaming to S3 has not been run: batch logs on MinIO are exercised by S9/S10, but no producer
-  or hook has appended segments to a bucket while ranks polled it, and `gc` has not deleted on
-  S3. An S11 variant on MinIO (`harness-stream-minio.yaml`, the runner reading the trail through
-  the head as S9 does) would close that.
+- Streaming to S3 is covered by S11s3 (`harness-stream-minio.yaml`: the producer puts segment
+  files to MinIO while the ranks poll the bucket, gc deletes objects); the re-mining hook has not
+  been run against a bucket, but it uses the same `BlockLog.append` path.
 - The upstream skills bundle issues listed in the M3 handoff (fix in
   `rahuldave/agent_gest_git_skills`, not here).
 

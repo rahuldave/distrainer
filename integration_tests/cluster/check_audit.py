@@ -235,6 +235,54 @@ def check_retention(
     return problems
 
 
+def check_streaming_run(
+    fs: Any,
+    root: str,
+    run_name: str,
+    committed_at: dict[int, float],
+    min_gap_s: float,
+    expected_segments: int,
+    run_uri: str,
+    retention_segments: int,
+) -> tuple[list[str], dict[str, Any]]:
+    """Every S11 assertion against a store that may be local or an object store: ``check_s11``
+    on the audit trail, the log ended, ``check_retention`` on what is left of the log and the
+    block directory against the newest checkpoint under ``run_uri``. Returns ``(problems,
+    info)`` with the audit summary, the segment start gaps, the kept segments and the last
+    checkpoint segment, so it can run inside the head container and print JSON."""
+    from distrainer.log import BlockLog
+
+    records = read_audit(fs, root, run_name)
+    log = BlockLog.open(fs, root)
+    problems = check_s11(records, log.W, committed_at, min_gap_s, expected_segments)
+    if not log.ended():
+        problems.append("the producer did not end the log")
+    starts = segment_starts(records)
+    seqs = sorted(starts)
+    kept = list(log.segments())
+    info: dict[str, Any] = {
+        "summary": summarize(records),
+        "gaps": [round(starts[b] - starts[a], 2) for a, b in zip(seqs, seqs[1:], strict=False)],
+        "kept": [seg.seq for seg in kept],
+        "last_ckpt": None,
+    }
+    ledgers = checkpoint_ledgers(run_uri)
+    if not ledgers:
+        return problems + [f"no checkpoint ledgers under {run_uri}"], info
+    info["last_ckpt"] = max(int(v["segment"]) for v in ledgers.values())
+    block_files = {
+        f"blocks/{n}" for n in list_names(fs, join(root, "blocks")) if n.endswith(".parquet")
+    }  # a leftover write_atomic temp file is an orphan, not a block
+    problems += check_retention(
+        info["kept"],
+        block_files,
+        {b.locator for seg in kept for b in seg.blocks},
+        info["last_ckpt"],
+        retention_segments,
+    )
+    return problems, info
+
+
 def check_s8(
     records: Sequence[AuditRecord],
     W: int,

@@ -483,13 +483,13 @@ Each scenario runs the toy workload with a distinct `run_name` and then asserts 
 | S4 | Elastic scale down | `up 3`, `train`; after a few blocks `scale 2` (the removed worker is stopped, not restarted) | A later attempt runs with `world_size=2`; assertions as S3 (first attempt at 3, last at 2). |
 | S5 | Checkpoint cadence | Runs with `every_k=1`, `every_k=4`, `segment_end`, all with `num_to_keep: null` | Number of checkpoints in the run dir matches the cadence; `ledger.cursor` of each checkpoint is a multiple of `k` (or equals `W/n`); directory names match their ledgers. |
 | S6 | Segment hook / re-mining (streaming mode) | Enable `remine` | Segment `seq+1` is committed before any rank consumes it (audit `ts` of first position in `seq+1` > commit time); block contents differ from the base corpus; audit shows the new block ids consumed. |
-| S11 | Streaming producer | Start `train` before `blocks` has finished writing; writer sleeps between segments | Ranks wait (audit gap) rather than fail; positions still contiguous; `_END` terminates the run cleanly; `gc` leaves ≥ `retention_segments` behind the last checkpoint. |
+| S11 | Streaming producer | `examples/streaming_producer/produce.py` in the head writes segments with sleeps while `train` runs; S11s3 is the same with the log, blocks, audit and checkpoints on MinIO (the segment's single put is the commit the ranks poll for) | Ranks wait (audit gap, and a segment committed after the trainer finished the previous one) rather than fail; positions still contiguous; `_END` terminates the run cleanly; `gc` leaves exactly `retention_segments` behind the last checkpoint and only the kept segments' blocks. |
 | S7 | Determinism | Two stores built from the same seed, two runs, no failures | Identical audit sequences per rank. |
 | S8 | Time-budget policy | `time_budget_s=5` | All ranks report the same number of checkpoints (consensus via broadcast). |
 | S9 | Cold restore | Full run on MinIO keeping every checkpoint; `down`; `wipe-shared`; `up`; `distrainer resume` from a mid-run checkpoint URI into a new run | The resumed run's positions are exactly the ledger's resume position (round-down for its world size) to the end of the log, once, dealt by the rule (`check_resume`). |
 | S10 | Head loss | `kill-head` mid-run on MinIO; `up` (workers rejoin); resume from the newest checkpoint with a readable ledger into a new run | As S9. |
 
-Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 green against MinIO.
+Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 and S11s3 green against MinIO.
 
 ## 11. Phase 2: k3s / KubeRay on OrbStack
 

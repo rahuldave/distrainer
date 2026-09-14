@@ -1,7 +1,8 @@
 """Cluster scenarios (spec section 10) driven through the deploy/driver.sh verbs.
 
 S2 worker kill mid-run, S3 elastic scale up, S4 scale down, S6 re-mining hook, S8 time-budget
-policy, S9 cold restore and S10 head loss against MinIO, S11 streaming producer. Each scenario
+policy, S9 cold restore and S10 head loss against MinIO, S11 streaming producer (S11s3: the same
+with the log and the run on MinIO, so the segment put is the commit). Each scenario
 brings the cluster to the state it needs, runs an example inside the head container, injects
 the failure while training runs, waits for the run to finish, and checks the audit trail on the
 shared mount. Run: ``just integration S2`` (or ``all``).
@@ -24,19 +25,15 @@ from distrainer.audit import read_audit  # noqa: E402
 from distrainer.config import load_config  # noqa: E402
 from distrainer.log import BlockLog  # noqa: E402
 from distrainer.storage import (  # noqa: E402
-    join,
-    list_names,
     resolve,  # noqa: E402
 )
 from integration_tests.cluster.check_audit import (  # noqa: E402
     by_attempt,
     check_recovery,
-    check_retention,
     check_s6,
     check_s8,
-    check_s11,
+    check_streaming_run,
     checkpoint_ledgers,
-    segment_starts,
     summarize,
 )
 
@@ -45,6 +42,7 @@ HARNESS_CFG = "examples/hello_blocks/harness.yaml"
 MINIO_CFG = "examples/hello_blocks/harness-minio.yaml"
 REMINE_CFG = "examples/toy_contrastive/harness-remine.yaml"
 STREAM_CFG = "examples/hello_blocks/harness-stream.yaml"
+STREAM_MINIO_CFG = "examples/hello_blocks/harness-stream-minio.yaml"
 _cfg = load_config(str(ROOT / HARNESS_CFG))
 _minio_cfg = load_config(str(ROOT / MINIO_CFG))
 W = _cfg.log.W
@@ -382,68 +380,98 @@ def scenario_s8() -> list[str]:
 def scenario_s11() -> list[str]:
     """Streaming producer: a separate process in the head creates the log and commits a segment
     every few seconds while the ranks train and wait; gc keeps the log short."""
-    cfg = load_config(str(ROOT / STREAM_CFG))
-    store = Path(cfg.store_root).name  # /shared/<store>
+    return streaming_scenario(STREAM_CFG, "s11")
+
+
+def scenario_s11s3() -> list[str]:
+    """S11 with the store and the run on MinIO: every segment commit is one S3 put, the ranks
+    poll the bucket, gc deletes objects behind the retention window."""
+    return streaming_scenario(STREAM_MINIO_CFG, "s11s3", env={"DISTRAINER_MINIO": "1"})
+
+
+def streaming_scenario(
+    cfg_path: str, run_name: str, env: dict[str, str] | None = None
+) -> list[str]:
+    cfg = load_config(str(ROOT / cfg_path))
     segments, sleep_s = 10, 6.0
-    up(2)
-    fresh_store(store)
-    fresh("s11", store)
+    s3 = cfg.storage.kind == "s3"
+    if s3:
+        up(2, "minio", env=env)
+        driver("mkbucket", "distrainer", env=env)
+        store_uri = f"s3://{cfg.store_root}"  # the whole streamed store belongs to this run
+        run_uri = f"s3://{cfg.storage_path}/{run_name}"
+        s3_rm([store_uri, run_uri], env or {})
+    else:
+        up(2)
+        store = Path(cfg.store_root).name  # /shared/<store>
+        fresh_store(store)
+        fresh(run_name, store)
+        store_uri = str(shared() / store)
+        run_uri = str(shared() / "runs" / run_name)
     producer = start_head(
         "examples/streaming_producer/produce.py",
-        ["--config", STREAM_CFG, "--segments", str(segments), "--sleep-s", str(sleep_s)],
-        name="s11-producer",
+        ["--config", cfg_path, "--segments", str(segments), "--sleep-s", str(sleep_s)],
+        env=env,
+        name=f"{run_name}-producer",
     )
-    meta = shared() / store / "log" / "_meta.json"
     deadline = time.monotonic() + 60
-    while not meta.exists():  # the trainer must find the log, not build a batch one
+    while not log_exists(store_uri, env):  # the trainer must find the log, not build a batch one
         _check_alive(producer)
         if time.monotonic() > deadline:
             raise TimeoutError("the producer did not create the log")
         time.sleep(0.5)
-    proc = start_train(STREAM_CFG, "run_name=s11", name="s11")
-    producer_out = finish(producer, name="s11-producer")
-    finish(proc, name="s11")
+    proc = start_train(cfg_path, f"run_name={run_name}", env=env, name=run_name)
+    producer_out = finish(producer, name=f"{run_name}-producer")
+    finish(proc, name=run_name)
     committed_at = {
         int(ln.split()[1]): float(ln.rsplit(" ", 1)[1])
         for ln in producer_out.splitlines()
         if ln.startswith("segment ") and " committed at " in ln
     }
-    fs, root = resolve(str(shared() / store), create=False)
-    recs = read_audit(fs, root, "s11")
-    print(summarize(recs))
-    starts = segment_starts(recs)
-    seqs = sorted(starts)
-    print(
-        "S11 segment start gaps:",
-        [round(starts[b] - starts[a], 2) for a, b in zip(seqs, seqs[1:], strict=False)],
-    )
-    log = BlockLog.open(fs, root)
-    problems = check_s11(
-        recs,
-        log.W,
+    args = (
+        run_name,
         committed_at,
-        min_gap_s=sleep_s - cfg.log.wait_poll_s - 1.0,
-        expected_segments=segments,
-    )
-    if not log.ended():
-        problems.append("the producer did not end the log")
-    kept = list(log.segments())
-    ledgers = checkpoint_ledgers(str(shared() / "runs" / "s11"))
-    if not ledgers:
-        return problems + ["no checkpoint ledgers under runs/s11"]
-    last_ckpt = max(int(v["segment"]) for v in ledgers.values())
-    block_files = {
-        f"blocks/{n}" for n in list_names(fs, join(root, "blocks")) if n.endswith(".parquet")
-    }  # a leftover write_atomic temp file is an orphan, not a block
-    problems += check_retention(
-        [s.seq for s in kept],
-        block_files,
-        {b.locator for s in kept for b in s.blocks},
-        last_ckpt,
+        sleep_s - cfg.log.wait_poll_s - 1.0,
+        segments,
+        run_uri,
         cfg.log.retention_segments,
     )
-    print(f"S11: log keeps segments {[s.seq for s in kept]}, last checkpoint segment {last_ckpt}")
+    if s3:  # the trail, the log and the checkpoints are on the bucket: check inside the head
+        import json
+
+        out = head_python(
+            "import json\n"
+            "from distrainer.storage import resolve, s3_options_from_env\n"
+            "from integration_tests.cluster.check_audit import check_streaming_run\n"
+            f"fs, root = resolve({store_uri!r}, create=False, **s3_options_from_env())\n"
+            f"print(json.dumps(check_streaming_run(fs, root, *{args!r})))\n",
+            env=env,
+        )
+        problems, info = json.loads(out.strip().splitlines()[-1])
+    else:
+        fs, root = resolve(store_uri, create=False)
+        problems, info = check_streaming_run(fs, root, *args)
+    print(info["summary"])
+    print(f"{run_name.upper()} segment start gaps: {info['gaps']}")
+    print(
+        f"{run_name.upper()}: log keeps segments {info['kept']}, "
+        f"last checkpoint segment {info['last_ckpt']}"
+    )
     return problems
+
+
+def log_exists(store_uri: str, env: dict[str, str] | None = None) -> bool:
+    """Whether a block log exists under ``store_uri`` (a bucket is probed inside the head)."""
+    if store_uri.startswith("s3://"):
+        out = head_python(
+            "from distrainer.log import BlockLog\n"
+            "from distrainer.storage import resolve, s3_options_from_env\n"
+            f"fs, root = resolve({store_uri!r}, create=False, **s3_options_from_env())\n"
+            "print(BlockLog(fs, root).exists())\n",
+            env=env,
+        )
+        return out.strip().splitlines()[-1:] == ["True"]
+    return (Path(store_uri) / "log" / "_meta.json").exists()
 
 
 def s3_rm(prefixes: list[str], env: dict[str, str]) -> None:
@@ -630,6 +658,7 @@ SCENARIOS = {
     "S9": scenario_s9,
     "S10": scenario_s10,
     "S11": scenario_s11,
+    "S11s3": scenario_s11s3,
 }
 
 

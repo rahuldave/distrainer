@@ -78,7 +78,7 @@ def test_trainer_waits_for_a_live_producer_and_gc_keeps_the_window(tmp_path, fak
     from integration_tests.cluster.check_audit import (
         check_retention,
         check_s11,
-        checkpoint_ledgers,
+        check_streaming_run,
         segment_starts,
     )
 
@@ -139,11 +139,26 @@ def test_trainer_waits_for_a_live_producer_and_gc_keeps_the_window(tmp_path, fak
     assert check_s11(records, 4, committed_at, min_gap_s=0.25, expected_segments=5) == []
     starts = segment_starts(records)
     assert max(starts[k + 1] - starts[k] for k in range(4)) >= 0.25  # the rank waited
+    # the same checks packaged for the scenario runner (local here, inside the head on S3);
+    # the fake Ray Train keeps no run directory, so build one from the reported checkpoints
+    import json
+
+    from distrainer.trainer import CheckpointIO
+
+    run_dir = tmp_path / "runs" / "stream"
+    for _, _, name, ckpt in fake_ray["reports"]:
+        if ckpt is not None:
+            (run_dir / name).mkdir(parents=True, exist_ok=True)
+            ledger = CheckpointIO.read_ledger(ckpt).asdict()
+            (run_dir / name / ".metadata.json").write_text(json.dumps({"ledger": ledger}))
+    problems, info = check_streaming_run(
+        fs, root, "stream", committed_at, 0.25, 5, str(tmp_path / "runs" / "stream"), 1
+    )
+    assert problems == [] and info["kept"] == [3, 4] and info["last_ckpt"] == 4
+    assert len(info["gaps"]) == 4 and "5 blocks" not in info["summary"]
     log = BlockLog.open(fs, root)
     kept = list(log.segments())
     assert [s.seq for s in kept] == [3, 4]  # last checkpoint in segment 4, retention 1
-    ledgers = {n: c for _, _, n, c in fake_ray["reports"] if c is not None}
-    assert max(int(n.split("_g")[1][:6]) for n in ledgers) == 4
     block_files = {f"blocks/{n}" for n in list_names(fs, join(root, "blocks"))}
     assert (
         check_retention(
@@ -152,4 +167,5 @@ def test_trainer_waits_for_a_live_producer_and_gc_keeps_the_window(tmp_path, fak
         == []
     )
     assert len(block_files) == 8
-    del checkpoint_ledgers  # the cluster runner reads the run dir; here the reports suffice
+    bad, _ = check_streaming_run(fs, root, "stream", committed_at, 0.25, 5, str(tmp_path / "x"), 1)
+    assert any("no checkpoint ledgers" in p for p in bad)

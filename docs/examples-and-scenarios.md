@@ -94,6 +94,7 @@ producer).
 |---|---|---|
 | `hello_blocks/local-stream.yaml` | laptop, local Ray, 2 workers | `W=12`, `gc: true` with `retention_segments: 2`; producer started by hand (Tutorial 2) |
 | `hello_blocks/harness-stream.yaml` | container cluster, 2 workers, shared mount `/shared/blocks_stream` | `W=24`, `step_sleep_s: 0.25`, `gc: true` with `retention_segments: 2`; producer started by the S11 runner in the head container |
+| `hello_blocks/harness-stream-minio.yaml` | container cluster, log, blocks, audit and checkpoints all on MinIO | same shape, `storage.kind: s3`: the segment file's single S3 put is the commit the ranks poll for (S11s3) |
 
 Start the producer first (it creates the log at once, so `train.py` finds it instead of building
 a batch log), then the trainer:
@@ -161,7 +162,7 @@ before a failure can still be in flight, so the controller may resume from the o
 | S8 | time-budget policy | B | `just integration S8` | hello_blocks with `checkpoint.policy: time`, `time_budget_s: 5`, `time_poll_every: 2`, `num_to_keep: null` (rank 0 decides every 2 steps whether 5 s have passed and broadcasts it) | the run finishes (Ray Train v2 would deadlock inside `report` if the ranks disagreed); `check_s8` on the audit trail, rank 0's `reports` metric and the checkpoint directories | green |
 | S9 | cold restore | B + MinIO | `just integration S9` | full run on MinIO with all checkpoints kept, `down`, `wipe-shared`, `up`, `distrainer resume` from a mid-run checkpoint URI into a new run | `check_resume` from the checkpoint's position | green |
 | S10 | head loss | B + MinIO | `just integration S10` | `docker kill` of the head 25 s into the run, `up` (workers rejoin), resume from the newest registered checkpoint | `check_resume` | green |
-| S11 | streaming producer | B | `just integration S11` | `produce.py` in the head container writes 10 segments 6 s apart into `/shared/blocks_stream`; the runner waits for the log to exist, then starts hello_blocks with `harness-stream.yaml` (`gc: true`, `retention_segments: 2`) | `check_s11` (ranks waited, commit precedes consumption, all 10 segments consumed once, `_END` ended the run) and `check_retention` (the log keeps segments 7..9 and exactly their blocks). The printed segment-start gaps show two phases: about 3 s while the trainer drains the segments the producer committed during Ray's startup, then about 6 s once it has caught up and waits for each commit | green |
+| S11 | streaming producer | B | `just integration S11` | `produce.py` in the head container writes 10 segments 6 s apart into `/shared/blocks_stream`; the runner waits for the log to exist, then starts hello_blocks with `harness-stream.yaml` (`gc: true`, `retention_segments: 2`) | `check_s11` (ranks waited, commit precedes consumption, all 10 segments consumed once, `_END` ended the run) and `check_retention` (the log keeps segments 7..9 and exactly their blocks). The printed segment-start gaps show two phases: about 3 s while the trainer drains the segments the producer committed during Ray's startup, then about 6 s once it has caught up and waits for each commit. `just integration S11s3` runs the same scenario with the log, blocks, audit trail and checkpoints on MinIO (`harness-stream-minio.yaml`), the checks executed inside the head: this is the only scenario in which a reader polls a bucket while a segment is being put, so it is the test of the single-put commit on S3 | green |
 
 Modes: A is the laptop (local Ray), B the OrbStack container cluster; see `docs/running-modes.md`.
 
@@ -171,7 +172,7 @@ Modes: A is the laptop (local Ray), B the OrbStack container cluster; see `docs/
 just smoke                      # S1 on the laptop, under a minute
 just local-scenarios            # S1, S5, S7 on the laptop, about 3 minutes
 just build && just up 2         # container cluster (once; the image is rebuilt only if uv.lock changes)
-just integration S2             # one scenario; `all` runs S2, S3, S4, S6, S8, S9, S10, S11 (about 20 minutes)
+just integration S2             # one scenario; `all` runs S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (about 25 minutes)
 just down                       # containers stop, the MinIO volume stays; `just nuke` removes it
 ```
 
