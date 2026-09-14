@@ -21,8 +21,10 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 
 ## Status
 
-Pre-M0 skeleton. Milestones are in the spec (section 12); development follows the
-`agent_gest_git_skills` workflow (section 14).
+M1 in progress: the core library (`storage`, `block`, `ledger`, `planner`, `log`, `policy`,
+`writer`, `loader`, `audit`, `config`) exists with unit tests; `DistTrainer` and the examples
+arrive with M2. Milestones are in the spec (section 12); development follows the
+`agent_gest_git_skills` workflow (section 14) and is tracked in GitHub issues #1 to #7.
 
 ## Development
 

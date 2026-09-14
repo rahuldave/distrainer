@@ -97,7 +97,7 @@ flowchart TB
 
 **Segments are always complete before they are trained on.** A segment file is written only after all of its `W` block files exist, in one atomic operation, and the trainer reads only committed segment files. So in both modes the segment being trained on is fully known, which is what makes resume well defined: the ledger names a segment and a cursor, the segment file cannot have changed, and the blocks it names are retained until a later checkpoint exists. The writer therefore needs to be exactly one segment ahead of the trainer, never more; `W` is also the streaming latency (the trainer cannot start a segment until `W` blocks have arrived), so streaming logs typically use a smaller `W` than batch logs. If a writer crashes mid-segment, block files not referenced from any committed segment are orphans: ignored by readers and removed by `gc`.
 
-**Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (If a final partial segment is allowed at `_END`, its last `len mod n` positions are dropped, `drop_last` semantics.)
+**Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (v0.1 does not allow partial segments: a segment file always lists exactly `W` blocks, and `BatchWriter`/`StreamingWriter` handle a corpus that is not a multiple of `W` with an explicit tail policy, `error` (default), `drop`, or `wrap`.)
 
 **Step** — one block per rank, all ranks, ending in the all-reduce + optimizer update, followed by `ray.train.report` (a barrier).
 
@@ -105,7 +105,7 @@ flowchart TB
 
 **Resume rule** — read segment `segment` from the log, skip `cursor * world_size_old` positions, re-deal the rest (and all later segments) over the current `n` with the assignment rule. Positions between the last checkpoint and the failure are replayed; the window is bounded by the checkpoint cadence. Requires retention: a segment and its blocks may only be deleted once a checkpoint with a later `segment` exists (plus a configurable margin of segments).
 
-**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<storage>/audit/<run_name>/<attempt>-<rank>.jsonl`. This is what the verification harness reads.
+**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<store_root>/audit/<run_name>/<attempt>-<rank>.jsonl` (on object stores the file is split into `<attempt>-<rank>.<part>.jsonl` parts). Records are ordered by file order within a rank, never by `ts`. This is what the verification harness reads.
 
 ## 3. Package layout
 
@@ -169,7 +169,7 @@ pyproject.toml         # uv-managed; ruff, ty, pytest
   log/_meta.json                   # {"W": 256, "seed": 1234, "created_by": ..., "schema_version": 1}
 ```
 
-Commit protocol: block files first, then the segment file. A reader only trusts blocks referenced from a committed segment. Segment numbers are contiguous; the reader's discovery is "does `log/<next>.json` exist?" (one `exists` call, not a listing, once the reader knows where it is). Local: write `log/.tmp-<seq>.json` then `os.replace`. S3: a single `put_object` is atomic and strongly consistent.
+Commit protocol: block files first, then the segment file. A reader only trusts blocks referenced from a committed segment. Segment numbers are contiguous; the reader's discovery is "does `log/<next>.json` exist?" (one `exists` call, not a listing, once the reader knows where it is). Local: write `<file>.tmp-<uuid>` next to the target then `os.replace` (readers ignore `.tmp-*` names). S3: a single `put_object` is atomic and strongly consistent. The within-segment permutation uses `random.Random(hash((seed, seq)))`; `hash` of an int tuple does not depend on `PYTHONHASHSEED` and is stable across CPython 3.11–3.13, and because the permutation is materialised in the immutable segment file, resume never recomputes it.
 
 ## 4. Interfaces
 
@@ -208,8 +208,10 @@ class BlockLog:
         # returns None only if ended() and seq does not exist
     def last_seq(self) -> int | None                            # highest committed segment (listing)
     # writer side
-    def append(self, blocks: list[BlockRef], *, pass_idx: int = 0, meta: dict | None = None) -> Segment
-        # requires len(blocks) == W; shuffles with Random(hash((seed, seq))); commits atomically
+    def append(self, blocks: list[BlockRef], *, pass_idx: int = 0, meta: dict | None = None,
+               verify_blocks: bool = True) -> Segment
+        # requires len(blocks) == W; verify_blocks reads every Parquet footer first; shuffles with
+        # Random(hash((seed, seq))); commits atomically; refuses to overwrite a committed seq
     def end(self) -> None                                       # write _END
     # retention
     def gc(self, keep_from_seq: int) -> list[int]               # delete segments < keep_from_seq and their blocks
@@ -253,9 +255,11 @@ Any(policies)              # OR-combination
 
 # loader.py
 class LaneLoader:
-    """Prefetching iterator over (position, BlockRef) pairs; yields (position, BlockRef, pyarrow.Table).
-    Accepts an iterator of lanes so prefetch continues across segment boundaries."""
-    def __init__(self, fs, root, lanes: Iterator[list[tuple[int, BlockRef]]], prefetch: int = 2, threads: int = 2): ...
+    """Prefetching iterator; yields (segment, (position, BlockRef, pyarrow.Table)) in lane order.
+    `lanes` yields (segment, lane) pairs (see section 5) or is a callable taking the loader's
+    stop Event, so a blocking wait_segment inside it can be interrupted by close(). A producer
+    thread walks the lanes so prefetch continues across segment boundaries. Iterate once."""
+    def __init__(self, fs, root, lanes, prefetch: int = 2, threads: int = 2): ...
     def __iter__(self): ...
     def close(self): ...
 
@@ -383,11 +387,13 @@ Verification scenario **S9 — cold restore**: run S1 to completion against MinI
 
 ```yaml
 run_name: toy
-storage_path: /shared/runs
-store_root: /shared/blocks
+storage_path: /shared/runs     # checkpoints and Ray Train run state
+store_root: /shared/blocks     # blocks, log, audit
 seed: 1234
+storage:                       # the filesystem both paths live on (section 6.3)
+  kind: local                  # local | s3; s3 adds endpoint, region, access_key_env, secret_key_env
 log:
-  W: 16                     # blocks per segment; multiple of every allowed world size
+  W: 24                     # blocks per segment; multiple of every allowed world size (2, 3 and 4 here: lcm 12)
   passes: 2                 # batch mode: BatchWriter passes over the corpus (epochs); ignored in streaming
   wait_poll_s: 1.0          # streaming: how often ranks poll for the next segment
   retention_segments: 4     # gc keeps this many segments behind the last checkpointed one
@@ -413,7 +419,7 @@ hooks:
 
 ## 8. Toy workload (examples/toy_contrastive)
 
-Synthetic data: `N=8192` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=16`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 256 blocks should train in well under a minute on an M1 with 4 worker containers.
+Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 
