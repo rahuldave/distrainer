@@ -12,11 +12,16 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 
 - [`docs/introduction.md`](docs/introduction.md) — a from-zero introduction to distributed
   training, Ray Train, Ray Data, what Anyscale adds, and how distrainer's block abstraction works.
+- [`docs/tutorials/batch.md`](docs/tutorials/batch.md) — tutorial 1: build a block log, train on
+  it, read checkpoints and the ledger, resume with a different number of workers, passes.
+- [`docs/tutorials/streaming.md`](docs/tutorials/streaming.md) — tutorial 2: train on a log that
+  is still being written (an external producer, the re-mining segment hook), retention `gc`.
 - [`docs/running-modes.md`](docs/running-modes.md) — the four ways to run the same code: laptop
   single-node Ray, OrbStack containers as Ray nodes, uncloud machines, KubeRay; where the driver
   runs, which storage works where, how failures are injected, which scenarios each validates.
-- [`docs/handoff-m4.md`](docs/handoff-m4.md) — where development stands and the detailed plan for
-  M4 (hooks, re-mining, streaming) and M5 (KubeRay), for whoever picks it up next.
+- [`docs/handoff-m5.md`](docs/handoff-m5.md) — where development stands after M4 (hooks,
+  re-mining, streaming, gc), what it taught, and the plan for M5 (KubeRay), for whoever picks it
+  up next.
 - [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
   status.
@@ -29,11 +34,14 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 
 ## Status
 
-M1 (core library) is merged. M2 adds `DistTrainer` on Ray Train v2, the `hello_blocks` example
-(`just smoke`), the `toy_contrastive` example (`just contrastive`), the `distrainer` CLI, and the
-single-node scenarios S1, S5, S7 (`just local-scenarios`). Multi-container runs (M3) and segment
-hooks / streaming (M4) come next. Milestones are in the spec (section 12); development follows
-the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub issues #1 to #7.
+M1 (core library), M2 (`DistTrainer` on Ray Train v2, the `hello_blocks` and `toy_contrastive`
+examples, the `distrainer` CLI, single-node scenarios S1, S5, S7) and M3 (the OrbStack container
+harness behind a driver interface, scenarios S2, S3, S4 on a shared mount and S9, S10 on MinIO)
+are merged. M4 adds segment hooks configured in YAML, the re-mining hook that streams the
+`toy_contrastive` log (S6), an external streaming producer (S11), the time-budget checkpoint
+policy (S8) and retention `gc`. M5 (KubeRay) is next. Milestones are in the spec (section 12);
+development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
+issues #1 to #7.
 
 ## Quick start
 
@@ -42,7 +50,8 @@ just setup                 # uv sync (Python 3.13, CPU torch, Ray 2.58)
 just smoke                 # hello_blocks: 48 linear-regression blocks, 2 local workers, S1 check
 just contrastive           # toy_contrastive: 240 mined blocks, InfoNCE encoder, 2 passes
 just local-scenarios       # S1 happy path, S5 checkpoint cadence, S7 determinism
-# multi-container harness (M3, not built yet): just up 2 / just integration S2
+just contrastive examples/toy_contrastive/local-remine.yaml   # the log streamed by the re-mining hook
+just build && just up 2 && just integration S2 && just down   # multi-container harness (OrbStack)
 uv run distrainer log-ls blocks/hello -v
 uv run distrainer inspect runs/hello/hello/checkpoint_g000003_p000012_n02_a00
 ```
@@ -58,5 +67,5 @@ Requires `uv`, `just`, and Python 3.13 (`.python-version`; 3.11+ supported). For
 ```bash
 just setup      # uv sync
 just verify     # lint, typecheck, static, unit tests, smoke, diff-check
-just up 2       # head + 2 worker containers + MinIO
+just up 2       # head + 2 worker containers (just up-minio 2 adds MinIO)
 ```
