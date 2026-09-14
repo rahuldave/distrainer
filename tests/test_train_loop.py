@@ -321,3 +321,32 @@ def test_dist_trainer_rejects_an_unimportable_hook_entry(tmp_path):
     cfg = make_store(tmp_path, W=8, segments=1, hooks={"h": "no.such.module:Hook"})
     with pytest.raises(ValueError, match="cannot import"):
         DistTrainer(train_step, build_model, cfg)
+
+
+class DieBeforeAppending:
+    """Simulates rank 0 dying between the segment-end checkpoint report and the hook."""
+
+    def on_segment_end(self, model, ledger, log, ctx):
+        raise RuntimeError("node died before the hook appended the next segment")
+
+
+def test_restart_at_a_segment_boundary_replays_the_pending_hook_call(tmp_path, fake_ray):
+    cfg = make_store(tmp_path, W=8, segments=1, end=False)
+    with pytest.raises(RuntimeError, match="node died"):
+        run_world(fake_ray, cfg, n=1, loop_extra={"hooks": [DieBeforeAppending()]})
+    ckpts = {name: c for _, _, name, c in fake_ray["reports"] if c is not None}
+    boundary = ckpts["checkpoint_g000000_p000008_n01_a00"]  # segment 0 complete, no segment 1
+    fs, root = cfg.store_fs()
+    assert BlockLog.open(fs, root).committed_seqs() == [0]
+    hook = AppendNextSegments(segments=3)
+    run_world(fake_ray, cfg, n=1, checkpoint=boundary, loop_extra={"hooks": [hook]})
+    calls = AppendNextSegments.calls
+    assert [c["ledger"].segment for c in calls] == [0, 1, 2]  # the replayed end of segment 0 first
+    assert calls[0]["ctx"].attempt == 1 and calls[0]["ledger"].cursor == 8
+    records = [r for r in read_audit(fs, root, "fake") if r.attempt == 1]
+    assert sorted(r.position for r in records) == list(range(8, 24))
+    assert BlockLog.open(fs, root).ended()
+    # nothing to replay when the previous attempt did append (or the log is a finished batch)
+    fake_ray["reports"].clear()
+    run_world(fake_ray, cfg, n=1, checkpoint=boundary, loop_extra={"hooks": [hook]})
+    assert [c["ledger"].segment for c in calls[3:]] == [1, 2]

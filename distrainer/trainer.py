@@ -292,6 +292,8 @@ def train_loop(loop_config: dict[str, Any]) -> None:
         ledger = CheckpointIO.load(checkpoint, model, optimizer)
     last_ckpt_segment = ledger.segment  # gc keeps retention_segments behind this
     seq, start_step = resume_start(ledger, n, W=W)
+    resumed_at_segment_end = checkpoint is not None and ledger.done_positions() == W
+    ckpt_ledger = replace(ledger)
     ledger = Ledger(
         segment=seq, cursor=start_step, world_size=n, pass_idx=ledger.pass_idx, run_attempt=attempt
     )
@@ -305,6 +307,24 @@ def train_loop(loop_config: dict[str, Any]) -> None:
         prefetch=cfg.loader.prefetch,
         threads=cfg.loader.threads,
     )
+    if hook_log is not None and resumed_at_segment_end and hooks:
+        # a segment-end checkpoint is reported before the hooks run: if the previous attempt
+        # died in between, the segment end was never served (hooks are at-least-once), and
+        # without the next segment every rank would wait forever
+        if not hook_log.ended() and not hook_log.has_segment(seq):
+            replay_info = TrainInfo(
+                rank=rank,
+                world_size=n,
+                config=cfg,
+                device=device,
+                position=seq * W - 1,
+                segment=ckpt_ledger.segment,
+                step_in_segment=ckpt_ledger.cursor,
+                pass_idx=ckpt_ledger.pass_idx,
+                attempt=attempt,
+            )
+            for hook in hooks:
+                hook.on_segment_end(unwrap(model), replace(ckpt_ledger), hook_log, replay_info)
     t0 = time.monotonic()
     agg = MetricAggregator()
     reported_last = True
