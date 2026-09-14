@@ -9,9 +9,9 @@ below. Everything here was true when written; verify the Gest ids and branch sta
 
 - M0 bootstrap, M1 core library, M2 trainer + examples + single-node scenarios: merged to `main`
   (PRs #8, #9, #10; issues #2, #3, #4 closed).
-- M3 container harness: branch `gest/uvrtvnno-m3-harness`, PR opened at the end of the M3 session
-  (issue #5). Scenarios S2, S3, S4 (shared mount) and S9, S10 (MinIO) are green on OrbStack. If the
-  PR is not merged yet when you start, ask Rahul to merge it before branching M4 from `main`.
+- M3 container harness: branch `gest/uvrtvnno-m3-harness`, PR #11 (issue #5). Scenarios S2, S3,
+  S4 (shared mount) and S9, S10 (MinIO) are green on OrbStack. If PR #11 is not merged yet when
+  you start, ask Rahul to merge it before branching M4 from `main`.
 - Gest: root task `qvuukpsm` (tracking issue #1). M4 parent `vnupztox` (issue #6), iteration
   `kvxwtzwv`, leaves: `uxqnrqym` hooks.py wiring, `yvmqsynm` remine.py + S6, `xxwrtxok` streaming
   producer + S11 + gc, `wmkxvwrk` TimeBudget + S8, `pzvrvmzx` review/docs/PR. M5 parent
