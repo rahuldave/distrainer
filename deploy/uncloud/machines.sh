@@ -8,10 +8,11 @@
 #   up        create the machines that do not exist yet, init the cluster on the first, add the rest
 #   status    the machines as OrbStack and uncloud see them
 #   destroy   remove the machines from the cluster, delete them, drop the uc context
-# Settings (environment; the defaults fit a 16 GB Mac with the 8 GB OrbStack VM):
+# Settings (environment; the defaults are cgroup caps, not reservations, and suit the 8 GB
+# OrbStack VM of a 16 GB Mac: about 5 GB is in use with three workers training):
 #   DISTRAINER_UNCLOUD_MACHINES        "uc1 uc2 uc3"; the first is the head machine (head + MinIO)
 #   DISTRAINER_UNCLOUD_CONTEXT         distrainer (the uc context; every driver call names it)
-#   DISTRAINER_UNCLOUD_HEAD_MEMORY     3G      DISTRAINER_UNCLOUD_WORKER_MEMORY  1536M
+#   DISTRAINER_UNCLOUD_HEAD_MEMORY     5G      DISTRAINER_UNCLOUD_WORKER_MEMORY  2G
 #   DISTRAINER_UNCLOUD_CPUS            2       DISTRAINER_UNCLOUD_DISTRO         ubuntu:noble
 #   DISTRAINER_UNCLOUD_NETWORK         10.210.0.0/16 (uncloud's machine and container subnet)
 #   DISTRAINER_UNCLOUD_SSH_KEY         ~/.orbstack/ssh/id_ed25519 (the key `uc` logs in with)
@@ -26,8 +27,15 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 machines_str="${DISTRAINER_UNCLOUD_MACHINES:-uc1 uc2 uc3}"
 read -r -a machines <<< "$machines_str"
 ctx="${DISTRAINER_UNCLOUD_CONTEXT:-distrainer}"
-head_mem="${DISTRAINER_UNCLOUD_HEAD_MEMORY:-3G}"
-worker_mem="${DISTRAINER_UNCLOUD_WORKER_MEMORY:-1536M}"
+# The limits are cgroup caps, not reservations. The head machine runs the Ray head (GCS, dashboard,
+# autoscaler, Train controller), the driver and MinIO, about 2 GB of process memory plus the page
+# cache of the image: under a 3G cap it thrashed (millions of cap hits, VM load above 200, ssh and
+# GCS keepalives failing, steps stalling for tens of seconds), and a worker placed next to it made
+# world size 3 five times slower, which is why the compose file keeps workers off the head machine.
+# A worker machine needs about 1G per Ray worker; two fit in 2G. Raise a limit later with
+# `orb config set machine.NAME.memory_mib`.
+head_mem="${DISTRAINER_UNCLOUD_HEAD_MEMORY:-5G}"
+worker_mem="${DISTRAINER_UNCLOUD_WORKER_MEMORY:-2G}"
 cpus="${DISTRAINER_UNCLOUD_CPUS:-2}"
 distro="${DISTRAINER_UNCLOUD_DISTRO:-ubuntu:noble}"
 network="${DISTRAINER_UNCLOUD_NETWORK:-10.210.0.0/16}"
@@ -111,6 +119,11 @@ case "$verb" in
       mem="$worker_mem"; [ "$i" = 0 ] && mem="$head_mem"
       if orb_has "$m"; then
         echo "machine $m exists (not created here: destroy will leave it in place)"
+        have="$(orb config get "machine.$m.memory_mib" 2>/dev/null || true)"
+        want="$(python3 -c "import re,sys; v=sys.argv[1].upper(); n=float(re.sub('[A-Z]', '', v)); print(int(n * 1024) if v.endswith('G') else int(n))" "$mem")"
+        if [ -n "$have" ] && [ "$have" -lt "$want" ]; then
+          echo "  its memory cap is ${have} MiB, below the ${want} MiB default: orb config set machine.$m.memory_mib $want" >&2
+        fi
       else
         echo "creating $m ($distro, $mem, $cpus cpus)"
         orb create --memory "$mem" --cpus "$cpus" "$distro" "$m"

@@ -3,8 +3,10 @@
 # nodes (docs/running-modes.md C; OrbStack Linux machines on the Mac through deploy/uncloud/
 # machines.sh, or real machines). See deploy/driver.sh for the verbs. Compared with compose:
 #   - deploy/uncloud/compose.yml is deployed with `uc deploy` (head and MinIO pinned to the head
-#     machine, workers spread over the cluster); `up N` sets the replica count, `scale N` uses
-#     `uc scale`, which stops a removed worker gracefully (a preemption notice, as `docker stop`).
+#     machine, DISTRAINER_UNCLOUD_HEAD_MACHINE, the first of DISTRAINER_UNCLOUD_MACHINES; workers
+#     spread over the other machines, DISTRAINER_UNCLOUD_WORKER_MACHINES); `up N` sets the replica
+#     count, `scale N` uses `uc scale`, which stops a removed worker gracefully (a preemption
+#     notice, as `docker stop`).
 #   - nothing spans machines: storage is S3 only (MinIO on the head machine, or any endpoint),
 #     `shared` prints nothing, `wipe-shared` has nothing to wipe, `cp-from-head` streams a tar
 #     through `uc exec`. The MinIO volume lives on the head machine; `down` keeps it, `nuke` drops it.
@@ -35,6 +37,13 @@ machines_sh="$root/deploy/uncloud/machines.sh"
 read -r -a machines <<< "${DISTRAINER_UNCLOUD_MACHINES:-uc1 uc2 uc3}"
 head_machine="${DISTRAINER_UNCLOUD_HEAD_MACHINE:-${machines[0]}}"
 export DISTRAINER_UNCLOUD_HEAD_MACHINE="$head_machine"
+if [ -z "${DISTRAINER_UNCLOUD_WORKER_MACHINES:-}" ]; then   # every machine but the head machine, comma-separated
+  DISTRAINER_UNCLOUD_WORKER_MACHINES="$(for m in "${machines[@]}"; do [ "$m" != "$head_machine" ] && printf '%s,' "$m"; done | sed 's/,$//')"
+  if [ -z "$DISTRAINER_UNCLOUD_WORKER_MACHINES" ]; then
+    echo "no worker machine: DISTRAINER_UNCLOUD_MACHINES needs a machine besides the head machine $head_machine" >&2; exit 2
+  fi
+fi
+export DISTRAINER_UNCLOUD_WORKER_MACHINES
 ssh_template="${DISTRAINER_UNCLOUD_SSH:-%s@orb}"
 if [ -z "${DISTRAINER_UNCLOUD_HOST_PREFIX:-}" ]; then
   # published ports (dashboard, MinIO) bind only to the head machine's addresses inside this
@@ -56,13 +65,13 @@ machine_ssh() {   # machine_ssh MACHINE CMD...: run a docker command on the mach
 # a failing uc must fail the verb, never read as "no containers": the listings below abort on error,
 # explicitly with `|| exit 1` at every capture (an `exit` inside a command substitution ends only
 # that subshell), and a table whose header changed is a failure too, not an empty listing
-uc_table() {   # uc_table HEADER ARGS...: stdout of a uc listing whose first column is HEADER
-  local header="$1" out; shift
+uc_table() {   # uc_table HEADER[|HEADER] ARGS...: stdout of a uc listing whose first column is one of HEADER
+  local headers="$1" out h; shift
   out="$(uc "$@" 2>/dev/null)" || { echo "uc $* failed (context $ctx); is the cluster up?" >&2; uc "$@" >/dev/null; exit 1; }
-  case "$out" in
-    "$header"*) printf '%s\n' "$out" ;;
-    *) echo "uc $*: unexpected output (no $header header):" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
-  esac
+  for h in ${headers//|/ }; do
+    case "$out" in "$h"*) printf '%s\n' "$out"; return 0 ;; esac
+  done
+  echo "uc $*: unexpected output (no $headers header):" >&2; printf '%s\n' "$out" >&2; exit 1
 }
 containers() {   # containers SERVICE -> "id machine status" per line, sorted by machine then id;
   # CREATED ("About a minute ago") and STATUS ("Up 3 minutes (healthy)") contain spaces
@@ -77,10 +86,28 @@ container() {   # container SERVICE [I] -> "id machine" of the I-th container (d
   if [ -z "$line" ]; then echo "no container ${2:-1} of service $1 (run 'up' first):" >&2; echo "$all" >&2; exit 1; fi
   echo "${line% *}"
 }
-services_present() {   # names of our services that exist in the cluster
+services_present() {   # "ref name" of our services in the cluster, ref being what `uc rm` takes:
+  # uncloud can end up with two services of one name (seen after a run whose `down` failed
+  # mid-way); `uc ls` then adds an ID column in front of NAME and every command that takes a
+  # name refuses to choose, so the ref is the id when that column exists, else the name
   local all
-  all="$(uc_table NAME ls)" || exit 1
-  awk 'NR > 1 {print $1}' <<< "$all" | grep -Ex 'head|worker|minio' || true   # no match is fine
+  all="$(uc_table 'ID|NAME' ls)" || exit 1
+  case "$all" in
+    ID*)   awk 'NR > 1 && ($2 == "head" || $2 == "worker" || $2 == "minio") {print $1, $2}' <<< "$all" ;;
+    *)     awk 'NR > 1 && ($1 == "head" || $1 == "worker" || $1 == "minio") {print $1, $1}' <<< "$all" ;;
+  esac
+}
+remove_duplicates() {   # a name registered twice breaks deploy and scale: remove every copy first
+  local present names dup id name
+  present="$(services_present)" || exit 1
+  names="$(awk '{print $2}' <<< "$present" | sort | uniq -d)"
+  [ -n "$names" ] || return 0
+  for dup in $names; do
+    echo "up: service '$dup' is registered more than once; removing every copy before deploying" >&2
+    while read -r id name; do
+      [ "$name" = "$dup" ] && uc rm "$id"
+    done <<< "$present"
+  done
 }
 head_address() {   # the head machine's address other hosts and the Mac reach (its WireGuard endpoint)
   local all
@@ -88,6 +115,15 @@ head_address() {   # the head machine's address other hosts and the Mac reach (i
   awk -v m="$head_machine" '$1 == m {for (i = 1; i <= NF; i++) if ($i ~ /:[0-9]+$/) {sub(/:[0-9]+$/, "", $i); print $i; exit}}' <<< "$all"
 }
 exec_head() { uc exec -T head -- "$@"; }
+retry_once() {   # retry_once CMD...: uncloud's membership can show a machine as DOWN for a moment
+  # (seen right as a container was being started on it); a second attempt of a declarative
+  # deploy or scale reconciles
+  if ! "$@"; then
+    echo "$1 $2 failed once; retrying in 10 s" >&2
+    sleep 10
+    "$@"
+  fi
+}
 need_cluster() {
   if ! uc machine ls >/dev/null 2>&1; then
     echo "uc context '$ctx' unreachable: run 'deploy/driver.sh machines-up' (just uncloud-machines) once" >&2; exit 2
@@ -110,7 +146,9 @@ case "$verb" in
     need_cluster
     services=(head worker)
     if [ "$minio" = "1" ]; then services=(minio head worker); fi
-    DISTRAINER_WORKERS="$n" uc deploy -f "$compose" -y "${services[@]}"
+    export DISTRAINER_WORKERS="$n"
+    remove_duplicates
+    retry_once uc deploy -f "$compose" -y "${services[@]}"
     # uc deploy recreates a container it finds stopped (observed with a killed head and a stopped
     # worker); should one stay stopped, start it: `up` must always end with every node running
     for s in head worker; do
@@ -122,10 +160,17 @@ case "$verb" in
     done
     uc ps ;;
   down)
-    # the services go, the MinIO volume on the head machine stays (S9 restores from it); nuke drops it
+    # the services go (by id, every copy), the MinIO volume on the head machine stays (S9 restores
+    # from it); nuke drops it
     present="$(services_present)" || exit 1
     for s in worker head minio; do
-      if grep -qx "$s" <<< "$present"; then uc rm "$s"; fi
+      while read -r id name; do
+        [ "$name" = "$s" ] || continue
+        if ! uc rm "$id"; then   # a failed rm may still have removed the service: re-check first
+          sleep 10
+          if services_present | grep -q "^$id "; then uc rm "$id"; fi
+        fi
+      done <<< "$present"
     done ;;
   nuke)
     "$0" down
@@ -135,7 +180,7 @@ case "$verb" in
     echo "uncloud: no shared mount (storage is S3 only); nothing to wipe" ;;
   scale)
     n="${1:?worker count}"
-    uc scale worker "$n" -y ;;
+    retry_once uc scale worker "$n" -y ;;
   exec-head)
     exec_head "$@" ;;
   kill-worker)
@@ -182,8 +227,9 @@ case "$verb" in
   endpoint)
     ip="${DISTRAINER_UNCLOUD_HEAD_ADDRESS:-}"
     if [ -z "$ip" ]; then ip="$(head_address)" || exit 1; fi
-    echo "dashboard=http://${ip:-<no head machine>}:8265"
-    echo "minio=http://${ip:-<no head machine>}:9000 console=http://${ip:-<no head machine>}:9001" ;;
+    if [ -z "$ip" ]; then echo "endpoint: no address for head machine '$head_machine' in uc machine ls" >&2; exit 1; fi
+    echo "dashboard=http://$ip:8265"
+    echo "minio=http://$ip:9000 console=http://$ip:9001" ;;
   mkbucket)
     bucket="${1:-distrainer}"
     for attempt in $(seq 1 15); do

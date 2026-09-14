@@ -198,10 +198,13 @@ def test_uncloud_compose_carries_everything_in_the_image_and_pulls_nothing():
     assert not volume.startswith(("/", ".")) and volume.endswith(":/data")
 
 
-def test_uncloud_compose_pins_head_and_minio_together_and_spreads_workers():
+def test_uncloud_compose_pins_head_and_minio_together_and_workers_elsewhere():
     raw = yaml.safe_load(UNCLOUD.read_text())["services"]
     assert raw["head"]["x-machines"] == raw["minio"]["x-machines"]
-    assert "x-machines" not in raw["worker"]  # any machine: the third worker lands wherever
+    (head_var,) = INTERPOLATION.findall(raw["head"]["x-machines"][0])
+    (worker_var,) = INTERPOLATION.findall(raw["worker"]["x-machines"])  # a comma-separated string
+    assert head_var[0] == "DISTRAINER_UNCLOUD_HEAD_MACHINE"
+    assert worker_var[0] == "DISTRAINER_UNCLOUD_WORKER_MACHINES"  # never the head machine's
     replicas = str(raw["worker"]["deploy"]["replicas"])
     assert INTERPOLATION.fullmatch(replicas) and "DISTRAINER_WORKERS" in replicas  # `up N`
     assert "head" in raw["worker"]["depends_on"]

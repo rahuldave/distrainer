@@ -1,6 +1,7 @@
 # distrainer on an uncloud cluster (docs/running-modes.md C): one container per Ray node across
 # Docker hosts joined by uncloud's WireGuard mesh. Deployed by deploy/drivers/uncloud.sh through
-# `uc deploy`; the head and MinIO are pinned to one machine, the workers spread over every machine.
+# `uc deploy`; the head and MinIO are pinned to the head machine, the workers spread over the other
+# machines (a worker next to the head starved it: world size 3 ran five times slower).
 # Compared with deploy/docker-compose.yml (the same node image, scripts and environment):
 #   - no build and pull_policy never: `build` pushes the locally built image to every machine
 #     (`uc image push`), nothing is pulled from a registry
@@ -46,6 +47,7 @@ services:
     pull_policy: never
     command: ["deploy/ray-worker.sh"]
     depends_on: [head]           # deploy order only; the worker script retries until the head answers
+    x-machines: "${DISTRAINER_UNCLOUD_WORKER_MACHINES:?set by deploy/drivers/uncloud.sh}"   # comma-separated
     shm_size: "1g"
     environment: *env
     deploy:
