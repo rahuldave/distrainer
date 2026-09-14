@@ -12,12 +12,13 @@ fmt path=".":
 
 lint path=".":
   uv run ruff check {{path}}
+  uv run ruff format --check {{path}}
 
 typecheck:
-  uv run ty check distrainer
+  uv run ty check distrainer examples integration_tests
 
 static:
-  uv run python -m compileall -q distrainer examples tests
+  uv run python -m compileall -q distrainer examples tests integration_tests
 
 test target="tests":
   uv run python -m pytest {{target}}
@@ -63,6 +64,10 @@ scale N:
 
 integration S="all":
   uv run python integration_tests/cluster/run_scenarios.py --scenario {{S}}
+
+# single-node scenarios S1, S5, S7 on a local Ray cluster (no containers needed)
+local-scenarios S="all":
+  uv run python integration_tests/single_node/run_scenarios.py --scenario {{S}}
 
 docs:
   @ls docs

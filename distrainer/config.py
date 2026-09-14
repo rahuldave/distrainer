@@ -8,6 +8,7 @@ covers a local folder and an S3-compatible bucket alike.
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
@@ -39,6 +40,10 @@ class CheckpointConfig:
     time_budget_s: float | None = None
     time_poll_every: int = 1
     num_to_keep: int | None = 3
+    upload_mode: str = "async"  # async | sync
+    report_every_step: bool = (
+        False  # True: ray.train.report on every step (throughput cap, see spec 5)
+    )
 
     def as_policy_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -81,6 +86,8 @@ class DistrainerConfig:
     storage_path: str = "runs"
     store_root: str = "blocks"
     seed: int = 1234
+    ray_address: str | None = None  # None = local ray.init(); "auto" inside a cluster
+    ray_health_check_interval_s: float | None = 0.5  # Train v2 controller poll; caps report rate
     storage: StorageConfig = field(default_factory=StorageConfig)
     log: LogConfig = field(default_factory=LogConfig)
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
@@ -130,6 +137,11 @@ class DistrainerConfig:
 
     def __post_init__(self) -> None:
         self.validate()
+        if self.storage.kind == "local":
+            # Ray Train workers do not share the driver's working directory
+            self.storage_path = os.path.abspath(os.path.expanduser(self.storage_path))
+            self.store_root = os.path.abspath(os.path.expanduser(self.store_root))
+        self.storage = replace(self.storage, path=self.storage_path)
 
     def asdict(self) -> dict[str, Any]:
         """Plain dict (YAML-safe: ``num_workers`` becomes a list, ``storage.path`` is dropped)."""
@@ -180,6 +192,10 @@ class DistrainerConfig:
             raise ValueError("checkpoint.every_k must be positive or null")
         if c.time_budget_s is not None and c.time_budget_s <= 0:
             raise ValueError("checkpoint.time_budget_s must be positive or null")
+        if c.upload_mode not in ("async", "sync"):
+            raise ValueError("checkpoint.upload_mode must be async or sync")
+        if self.ray_health_check_interval_s is not None and self.ray_health_check_interval_s <= 0:
+            raise ValueError("ray_health_check_interval_s must be positive or null")
         if c.num_to_keep is not None and c.num_to_keep <= 0:
             raise ValueError("checkpoint.num_to_keep must be positive or null")
         if self.loader.prefetch <= 0 or self.loader.threads <= 0:
@@ -203,5 +219,26 @@ class DistrainerConfig:
         return self._fs_for(self.store_root)
 
 
-def load_config(path: str) -> DistrainerConfig:
-    return DistrainerConfig.from_yaml(path)
+def apply_overrides(d: dict[str, Any], overrides: list[str]) -> dict[str, Any]:
+    """``a.b.c=value`` assignments (values parsed as YAML) applied to a nested dict copy."""
+    import copy
+
+    out = copy.deepcopy(d)
+    for item in overrides:
+        key, sep, raw = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"override must look like key=value, got {item!r}")
+        node = out
+        parts = key.split(".")
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                raise ValueError(f"cannot set {key}: {part} is not a section")
+        node[parts[-1]] = yaml.safe_load(raw)
+    return out
+
+
+def load_config(path: str, overrides: list[str] | None = None) -> DistrainerConfig:
+    with open(path, encoding="utf-8") as f:
+        d = yaml.safe_load(f) or {}
+    return DistrainerConfig.from_dict(apply_overrides(d, overrides or []))

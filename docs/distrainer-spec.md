@@ -105,7 +105,7 @@ flowchart TB
 
 **Resume rule** — read segment `segment` from the log, skip `cursor * world_size_old` positions, re-deal the rest (and all later segments) over the current `n` with the assignment rule. Positions between the last checkpoint and the failure are replayed; the window is bounded by the checkpoint cadence. Requires retention: a segment and its blocks may only be deleted once a checkpoint with a later `segment` exists (plus a configurable margin of segments).
 
-**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<store_root>/audit/<run_name>/<attempt>-<rank>.jsonl` (on object stores the file is split into `<attempt>-<rank>.<part>.jsonl` parts). Records are ordered by file order within a rank, never by `ts`. This is what the verification harness reads.
+**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<store_root>/audit/<run_name>/<attempt>-<rank>.jsonl`; `attempt` is one more than the highest attempt already on disk (rank 0 decides, broadcast), so every restart, even from the same checkpoint, has its own files (on object stores the file is split into `<attempt>-<rank>.<part>.jsonl` parts). Records are ordered by file order within a rank, never by `ts`. This is what the verification harness reads.
 
 ## 3. Package layout
 
@@ -324,7 +324,7 @@ for segment, (position, ref, table) in loader:
 loader.close()
 ```
 
-Notes: `report` is called on every step so all ranks call it the same number of times regardless of policy; the cost of a metrics-only `report` is one small RPC. The checkpoint directory is a non-temporary dir (ASYNC upload requirement). Rank 0 saves the ledger *after* incrementing the cursor, so the ledger describes "steps completed including this one". Elastic resize or failure: Train restarts `train_func`; `resume_start` uses the ledger's old `world_size` and re-deals over the new `n`. In streaming mode `wait_segment` blocks all ranks equally at a segment boundary when the writer is behind (backpressure); the lane loader's prefetch across segments hides producer jitter when the writer is ahead. The hook runs *before* the barrier so the segment it appends is visible to `wait_segment` on every rank immediately after.
+Notes: in Ray Train v2 `report` is not a cheap RPC: each worker has a one-slot result queue that the controller drains only every `RAY_TRAIN_HEALTH_CHECK_INTERVAL_S` (2 s by default), so a `report` per step caps training at about one step per poll interval regardless of model size (measured: 480 tiny steps took 8.5 minutes at 8% CPU). The loop therefore calls `report` only at the steps where the policy takes a checkpoint (every policy decides identically on all ranks: index-based ones by construction, `TimeBudget` through a broadcast), averages the numeric metrics of the steps in between (`<key>_mean`, `steps_in_report`), and issues one final metrics-only `report` if the last step was not a checkpoint; all ranks still call `report` the same number of times. `checkpoint.report_every_step: true` restores a report per step for debugging, and `ray_health_check_interval_s` (default 0.5) lowers the controller poll interval through the job runtime env in `distrainer.trainer.init_ray`. The checkpoint directory is a non-temporary dir (ASYNC upload requirement). Rank 0 saves the ledger *after* incrementing the cursor, so the ledger describes "steps completed including this one". Elastic resize or failure: Train restarts `train_func`; `resume_start` uses the ledger's old `world_size` and re-deals over the new `n`. In streaming mode `wait_segment` blocks all ranks equally at a segment boundary when the writer is behind (backpressure); the lane loader's prefetch across segments hides producer jitter when the writer is ahead. The hook runs *before* the barrier so the segment it appends is visible to `wait_segment` on every rank immediately after.
 
 ## 6. Checkpointing: where it happens, layout, storage, reconstitution
 
@@ -341,7 +341,7 @@ Head container role: it hosts the Ray head, the Train controller, the driver (`t
 ```
 <storage_path>/<run_name>/
   checkpoint_manager_snapshot.json         # Train's own bookkeeping (controller restarts)
-  checkpoint_g{segment:06d}_s{cursor:04d}/  # checkpoint_dir_name set by distrainer
+  checkpoint_g{segment:06d}_p{positions:06d}_n{world_size:02d}_a{attempt:02d}/  # checkpoint_dir_name set by distrainer; positions = cursor*world_size, unique across resizes and attempts
     model.pt                               # state_dict (rank 0) or model_rank{r}.pt shards
     optimizer.pt
     ledger.json                            # {"segment","cursor","world_size","pass_idx","run_attempt"}
@@ -376,12 +376,12 @@ Worker-local scratch (`/tmp/distrainer`) is the only non-shared location; nothin
 Three entry points, all built on `ray.train.Checkpoint(path, filesystem)`:
 
 1. **Automatic** — worker failure, preemption, or elastic resize: Train restarts the worker group and `ray.train.get_checkpoint()` returns the latest reported checkpoint; `train_func` loads the ledger and resumes at `cursor * world_size_old` (section 5).
-2. **Explicit, from a run** — `Result.from_path("<storage_path>/<run_name>", storage_filesystem=fs)` restores the `Result` (latest and best checkpoints, metrics); `DistTrainer(..., resume_from_checkpoint=result.checkpoint)` starts a *new* run from it. This is the path for driver/head loss and for "continue training tomorrow".
-3. **Explicit, from a URI** — `Checkpoint("s3://bucket/distrainer/runs/toy/checkpoint_e0_c3_s16", filesystem=fs)` (or a local path) → `resume_from_checkpoint=`. Works across runs, clusters, and world sizes because the ledger carries `world_size`.
+2. **Explicit, from a run** — `Result.from_path("<storage_path>/<run_name>", storage_filesystem=fs)` restores the `Result` (latest and best checkpoints, metrics); `DistTrainer(..., resume_from_checkpoint=result.checkpoint)` starts a *new* run (new `run_name`) from it. Ray Train v2 deprecated `TorchTrainer(resume_from_checkpoint=)`, so distrainer carries the checkpoint in the train loop config and loads it when `ray.train.get_checkpoint()` is empty. This is the path for driver/head loss and for "continue training tomorrow".
+3. **Explicit, from a URI** — `Checkpoint("s3://bucket/distrainer/runs/toy/checkpoint_g000003_p000016_n02_a00", filesystem=fs)` (or a local path) → `resume_from_checkpoint=`. Works across runs, clusters, and world sizes because the ledger carries `world_size`.
 
-CLI: `distrainer inspect <uri>` prints the ledger from `.metadata.json` without downloading weights; `distrainer resume <uri> --config cfg.yaml [--seed-override]` starts a run from it; `distrainer export <uri> <local_dir>` = `to_directory`. Reconstitution of the data position needs only the ledger plus the log (segment files are immutable, so `segment` + `cursor` + `world_size` identify the exact position), so no per-rank state is ever required.
+CLI: `distrainer inspect <uri>` prints the ledger from `.metadata.json` without downloading weights; `distrainer resume <uri> --config cfg.yaml --entry pkg.module:function [--run-name] [--seed]` starts a new run from it (the entry function returns the user's `(train_step, build_model)` for the config); `distrainer export <uri> <local_dir>` = `to_directory`; `distrainer log-ls <store> [-v]` and `distrainer gc <store> --keep-from N` inspect and prune a block log. Example scripts accept `--set key.path=value` overrides so scenarios reuse one YAML. Reconstitution of the data position needs only the ledger plus the log (segment files are immutable, so `segment` + `cursor` + `world_size` identify the exact position), so no per-rank state is ever required.
 
-Verification scenario **S9 — cold restore**: run S1 to completion against MinIO, `down -v` the cluster (destroying the shared volume), `up`, then `distrainer resume s3://…/checkpoint_g000003_s0016` for one more segment and assert the audit positions continue from `cursor * world_size`. **S10 — head loss**: `docker kill head` mid-run, `up` again, `Result.from_path` + resume; same assertion. (S11, streaming producer, is defined in section 10.)
+Verification scenario **S9 — cold restore**: run S1 to completion against MinIO, `down -v` the cluster (destroying the shared volume), `up`, then `distrainer resume s3://…/checkpoint_g000003_p000016_n02_a00` for one more segment and assert the audit positions continue from `cursor * world_size`. **S10 — head loss**: `docker kill head` mid-run, `up` again, `Result.from_path` + resume; same assertion. (S11, streaming producer, is defined in section 10.)
 
 ## 7. Configuration
 
@@ -390,6 +390,8 @@ run_name: toy
 storage_path: /shared/runs     # checkpoints and Ray Train run state
 store_root: /shared/blocks     # blocks, log, audit
 seed: 1234
+ray_address: auto              # null = local ray.init() (examples on a laptop)
+ray_health_check_interval_s: 0.5   # Train v2 controller poll interval (default 2 s caps report rate)
 storage:                       # the filesystem both paths live on (section 6.3)
   kind: local                  # local | s3; s3 adds endpoint, region, access_key_env, secret_key_env
 log:
@@ -403,6 +405,8 @@ checkpoint:
   every_k: 4
   time_budget_s: null
   num_to_keep: 3
+  upload_mode: async        # async | sync (ray.train.report checkpoint_upload_mode)
+  report_every_step: false  # true = report on every step (about 1 step/s in Train v2; debugging only)
 loader:
   prefetch: 2
   threads: 2
@@ -422,6 +426,8 @@ hooks:
 Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
+
+`docs/running-modes.md` compares this harness with the laptop single-node mode (M2), uncloud, and KubeRay: where the driver runs, which storage each can use, how failures are injected, and which scenarios each mode validates.
 
 **Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `up N`, `down`, `exec-head CMD...`, `kill-worker I`, `scale N`, `cp-from-head SRC DST`, `endpoint` (dashboard/S3 URLs). The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available, and on KubeRay in phase 2. The uncloud driver ships as a documented stub in v0.1.
 
@@ -519,7 +525,7 @@ OrbStack ships a built-in Kubernetes; enable it, then `helm install kuberay-oper
 
 ## 13. Open questions (decide at M1/M2)
 
-- Whether `report` on every step is acceptable overhead at very small blocks, or whether to batch metrics and call `report` only at policy points *and* guarantee equal counts by making the policy purely index-based (dropping `TimeBudget`).
+- ~~Whether `report` on every step is acceptable overhead at very small blocks~~ Decided in M2: it is not (Train v2 drains one result per poll interval); `report` happens only at policy points with aggregated metrics, and `TimeBudget` stays because its broadcast keeps the counts equal (section 5).
 - Multiple producers: v0.1 has one writer per log. If several miners must contribute, either serialize through one sequencer process or give each producer its own log and let a merge writer interleave them.
 - Simulating inter-node latency in the harness (`tc netem` on one worker container) so audit wait times become meaningful (see the straggler discussion in `docs/introduction.md`).
 - Audit log location under heavy step rates: per-rank JSONL on the shared volume is fine for tests; production would want it optional.
@@ -554,8 +560,9 @@ typecheck:        uv run ty check distrainer
 static:           uv run python -m compileall -q distrainer examples tests
 test target="tests":  uv run python -m pytest {{target}}
 regression:       uv run python -m pytest regression_tests   # exit code 5 (no tests yet) is tolerated
-smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 1 segment
+smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 4 segments of 12 blocks
 contrastive:      uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml   # the section 8 toy, not part of verify
+local-scenarios S="all":  uv run python integration_tests/single_node/run_scenarios.py --scenario {{S}}   # S1, S5, S7 on a local Ray cluster
 diff-check:       git diff --check
 verify: lint typecheck static test regression smoke diff-check
 

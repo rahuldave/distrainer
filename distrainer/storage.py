@@ -95,6 +95,15 @@ def resolve(uri: str, create: bool = True, **s3_options: Any) -> tuple[pafs.File
     return build_filesystem(StorageConfig(kind="local", path=uri), create=create)
 
 
+def s3_options_from_env() -> dict[str, Any]:
+    """``resolve``/``StorageConfig`` keyword arguments for an S3-compatible endpoint set through
+    ``S3_ENDPOINT`` (and ``S3_REGION``); empty when the environment names no endpoint."""
+    endpoint = os.environ.get("S3_ENDPOINT")
+    if not endpoint:
+        return {}
+    return {"endpoint": endpoint, "region": os.environ.get("S3_REGION", "auto")}
+
+
 # ---- small filesystem helpers shared by log, block, audit, checkpoint code ----
 
 
