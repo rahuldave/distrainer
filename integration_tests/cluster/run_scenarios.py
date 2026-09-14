@@ -94,8 +94,13 @@ def start_train(
     """Start train.py inside the head; its output streams to .harness/logs/<name>.log (a pipe
     that nobody drains while waiting would fill up and stall the trainer)."""
     cmd = [
-        str(DRIVER), "exec-head", "python", "examples/hello_blocks/train.py",
-        "--config", cfg, "--no-check",
+        str(DRIVER),
+        "exec-head",
+        "python",
+        "examples/hello_blocks/train.py",
+        "--config",
+        cfg,
+        "--no-check",
     ]
     for o in overrides:
         cmd += ["--set", o]
@@ -103,7 +108,11 @@ def start_train(
     logs.mkdir(parents=True, exist_ok=True)
     log = open(logs / f"{name}.log", "w")  # noqa: SIM115 (closed in finish)
     proc = subprocess.Popen(
-        cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, text=True,
+        cmd,
+        cwd=ROOT,
+        stdout=log,
+        stderr=subprocess.STDOUT,
+        text=True,
         env={**os.environ, **(env or {})},
     )
     _logs[proc.pid] = (logs / f"{name}.log", log)
@@ -128,9 +137,7 @@ def _output(proc: subprocess.Popen) -> str:
 
 def _check_alive(proc: subprocess.Popen | None) -> None:
     if proc is not None and proc.poll() is not None and proc.returncode != 0:
-        raise RuntimeError(
-            f"training exited early ({proc.returncode}):\n{_output(proc)[-2000:]}"
-        )
+        raise RuntimeError(f"training exited early ({proc.returncode}):\n{_output(proc)[-2000:]}")
 
 
 def wait_for_blocks(
