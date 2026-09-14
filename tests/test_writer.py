@@ -30,8 +30,9 @@ def test_cut_segments_tail_modes():
     assert wrapped[2] == refs[8:] + refs[:2]
     assert cut_segments([], 4) == []
     assert [len(c) for c in cut_segments(make_refs(8), 4)] == [4, 4]
-    with pytest.raises(ValueError):
-        cut_segments(make_refs(3), 8, "wrap")
+    small = cut_segments(make_refs(3), 8, "wrap")
+    assert len(small) == 1 and len(small[0]) == 8
+    assert [b.block_id for b in small[0]][:3] == ["b0000", "b0001", "b0002"]
 
 
 def test_batch_writer_two_passes_regroup_segments(store):
@@ -84,6 +85,7 @@ def test_streaming_writer_shuffle_buffer_mixes_beyond_window(store):
     assert len(committed) == 2 and sw.buffered == 4
     first = {b.block_id for b in committed[0].blocks}
     assert first <= {r.block_id for r in refs[:8]}
+    assert first != {r.block_id for r in refs[:4]}, "a plain window would take the first 4"
     rest = sw.close()
     assert len(rest) == 1
     all_ids = sorted(b.block_id for s in committed + rest for b in s.blocks)
@@ -100,3 +102,53 @@ def test_streaming_writer_wrap_tail(store):
     assert log.last_seq() == 1
     with pytest.raises(ValueError):
         StreamingWriter(log, shuffle_buffer_segments=0)
+
+
+def test_streaming_sampling_is_reproducible_and_rejects_duplicates(store, tmp_path):
+    from distrainer.storage import StorageConfig, build_filesystem
+
+    runs = []
+    for i in range(2):
+        st = build_filesystem(StorageConfig(kind="local", path=str(tmp_path / f"s{i}")))
+        log, refs = corpus(st, 8, W=4)
+        sw = StreamingWriter(log, shuffle_buffer_segments=2)
+        for r in refs:
+            sw.push(r)
+        runs.append([[b.block_id for b in s.blocks] for s in sw.close()])
+    assert runs[0] == runs[1]
+    log, refs = corpus(store, 4, W=4)
+    sw = StreamingWriter(log)
+    sw.push(refs[0])
+    with pytest.raises(ValueError):
+        sw.push(refs[0])
+    with pytest.raises(ValueError):
+        sw.flush(tail="sideways")
+
+
+def test_batch_writer_corpus_smaller_than_w(store):
+    log, refs = corpus(store, 3, W=4)
+    with pytest.raises(ValueError):
+        BatchWriter(log, refs, tail="drop").run()  # would produce an empty, ended log
+    assert not log.ended()
+    segs = BatchWriter(log, refs, tail="wrap").run()
+    assert len(segs) == 1 and len(segs[0].blocks) == 4 and log.ended()
+    with pytest.raises(ValueError):
+        cut_segments(refs, 4, "sideways")
+
+
+def test_batch_writer_on_ended_log_fails(store):
+    log, refs = corpus(store, 4, W=4)
+    BatchWriter(log, refs).run()
+    with pytest.raises(RuntimeError):
+        BatchWriter(log, refs).run()
+    fresh, refs2 = corpus((log.fs, f"{log.root}/again"), 4, W=4)
+    fresh.append(refs2)
+    assert BatchWriter(fresh, refs2).run()[0].seq == 1  # continues after existing segments
+
+
+def test_streaming_wrap_needs_enough_blocks(store):
+    log, refs = corpus(store, 2, W=4)
+    sw = StreamingWriter(log)
+    sw.push(refs[0])
+    with pytest.raises(ValueError):
+        sw.flush(tail="wrap")

@@ -1,4 +1,5 @@
-import pyarrow.fs as pafs
+import pytest
+from conftest import MemoryFS
 
 from distrainer.audit import AuditRecord, AuditWriter, audit_dir, read_audit
 from distrainer.storage import join, list_names
@@ -41,20 +42,38 @@ def test_reopen_appends_and_json_roundtrip(store):
     assert AuditRecord.from_json(recs[1].to_json()) == recs[1]
 
 
-def test_non_local_filesystem_rewrites_on_flush(store, monkeypatch):
-    fs, root = store
-
-    class NotLocal(pafs.LocalFileSystem):
-        pass
-
-    # AuditWriter decides by isinstance(LocalFileSystem); simulate an object store by patching
-    monkeypatch.setattr("distrainer.audit.pafs.LocalFileSystem", NotLocal)
-    w = AuditWriter(fs, root, "s3run", 1, 0)
+def test_object_store_writer_buffers_parts_and_reopens():
+    fs = MemoryFS()
+    fs.create_dir("root")
+    w = AuditWriter(fs, "root", "s3run", 1, 0, part_lines=2)
     w.append(1, 0, 0, 0, "a")
-    assert read_audit(fs, root, "s3run") == []  # nothing written until flush
+    assert read_audit(fs, "root", "s3run") == []  # nothing written until flush
     w.flush()
-    assert [r.block_id for r in read_audit(fs, root, "s3run")] == ["a"]
-    w2 = AuditWriter(fs, root, "s3run", 1, 0)  # reopen keeps earlier lines
-    w2.append(1, 0, 1, 1, "b")
+    assert [r.block_id for r in read_audit(fs, "root", "s3run")] == ["a"]
+    w.append(1, 0, 1, 1, "b")  # reaches part_lines: part 0 is written, part 1 starts
+    w.append(1, 0, 2, 2, "c")
+    w.close()
+    w.close()  # idempotent
+    with pytest.raises(ValueError):
+        w.append(1, 0, 3, 3, "d")
+    assert sorted(list_names(fs, audit_dir("root", "s3run"))) == ["1-0.0.jsonl", "1-0.1.jsonl"]
+    assert [r.block_id for r in read_audit(fs, "root", "s3run")] == ["a", "b", "c"]
+    w2 = AuditWriter(fs, "root", "s3run", 1, 0)  # reopen continues with a new part
+    w2.flush()  # empty flush writes nothing
+    w2.append(1, 0, 3, 3, "d")
     w2.close()
-    assert [r.block_id for r in read_audit(fs, root, "s3run")] == ["a", "b"]
+    assert [r.block_id for r in read_audit(fs, "root", "s3run")] == ["a", "b", "c", "d"]
+    assert "1-0.2.jsonl" in list_names(fs, audit_dir("root", "s3run"))
+
+
+def test_ordering_is_file_order_not_timestamp(store):
+    fs, root = store
+    w = AuditWriter(fs, root, "clock", 1, 0)
+    w.append(1, 0, 0, 0, "first", ts=100.0)
+    w.append(1, 0, 1, 1, "second", ts=50.0)  # clock stepped backwards
+    w.append(1, 0, 2, 2, "third", ts=50.0)
+    w.close()
+    w.close()
+    assert [r.block_id for r in read_audit(fs, root, "clock")] == ["first", "second", "third"]
+    with pytest.raises(ValueError):
+        AuditWriter(fs, root, "bad/name", 1, 0)

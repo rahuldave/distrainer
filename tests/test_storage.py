@@ -2,6 +2,7 @@ import os
 
 import pyarrow.fs as pafs
 import pytest
+from conftest import MemoryFS
 
 from distrainer import storage
 from distrainer.storage import StorageConfig, build_filesystem, resolve
@@ -111,21 +112,14 @@ def test_resolve_rejects_unknown_schemes_and_can_skip_creation(tmp_path):
 def test_write_atomic_through_a_subtree_view(tmp_path):
     base = pafs.LocalFileSystem()
     sub = pafs.SubTreeFileSystem(str(tmp_path), base)
-    assert storage.is_local(sub) and not storage.is_local(
-        pafs.SubTreeFileSystem("x", FakeNonLocal())
-    )
+    assert storage.is_local(sub) and not storage.is_local(pafs.SubTreeFileSystem("x", MemoryFS()))
     storage.write_atomic(sub, "seg.json", b"{}")
     assert (tmp_path / "seg.json").read_bytes() == b"{}"
     assert [p.name for p in tmp_path.iterdir()] == ["seg.json"]  # no temp file left
 
 
-class FakeNonLocal(pafs.PyFileSystem):
-    def __init__(self):
-        super().__init__(pafs.FSSpecHandler(__import__("fsspec").filesystem("memory")))
-
-
 def test_write_atomic_on_a_generic_filesystem_uses_temp_and_move():
-    fs = FakeNonLocal()
+    fs = MemoryFS()
     fs.create_dir("d")
     storage.write_atomic(fs, "d/f.json", b"1")
     assert storage.read_bytes(fs, "d/f.json") == b"1"

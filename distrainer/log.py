@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import random
 import re
+import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -130,13 +131,15 @@ class BlockLog:
         self._meta: LogMeta | None = None
         self._segments: dict[int, Segment] = {}  # bounded cache, see _cache
         self._next_seq: int | None = None
+        self._lock = threading.RLock()  # one instance may be shared by a reader thread and a hook
 
     SEGMENT_CACHE_SIZE = 8
 
     def _cache(self, seg: Segment) -> Segment:
-        self._segments[seg.seq] = seg
-        while len(self._segments) > self.SEGMENT_CACHE_SIZE:
-            self._segments.pop(next(iter(self._segments)))
+        with self._lock:
+            self._segments[seg.seq] = seg
+            while len(self._segments) > self.SEGMENT_CACHE_SIZE:
+                self._segments.pop(next(iter(self._segments)))
         return seg
 
     # ---- creation / metadata ----
@@ -176,6 +179,10 @@ class BlockLog:
         return exists(self.fs, self._meta_path)
 
     def meta(self) -> LogMeta:
+        with self._lock:
+            return self._meta_locked()
+
+    def _meta_locked(self) -> LogMeta:
         if self._meta is None:
             if not self.exists():
                 raise FileNotFoundError(f"no block log at {self.log_dir} (missing {META_FILE})")
@@ -195,7 +202,8 @@ class BlockLog:
         return seq in self._segments or exists(self.fs, self.segment_path(seq))
 
     def read_segment(self, seq: int) -> Segment:
-        seg = self._segments.get(seq)
+        with self._lock:
+            seg = self._segments.get(seq)
         if seg is None:
             if not exists(self.fs, self.segment_path(seq)):
                 raise FileNotFoundError(f"segment {seq} not committed in {self.log_dir}")
@@ -215,12 +223,17 @@ class BlockLog:
         return exists(self.fs, self._end_path)
 
     def wait_segment(
-        self, seq: int, poll_s: float = 1.0, timeout_s: float | None = None
+        self,
+        seq: int,
+        poll_s: float = 1.0,
+        timeout_s: float | None = None,
+        stop: threading.Event | None = None,
     ) -> Segment | None:
         """Block until segment ``seq`` is committed.
 
-        Returns ``None`` only when the log has ended and ``seq`` does not exist. Raises
-        ``TimeoutError`` after ``timeout_s`` seconds of waiting (``None`` = wait forever).
+        Returns ``None`` when the log has ended and ``seq`` does not exist, or when ``stop`` is
+        set (a loader closing). Raises ``TimeoutError`` after ``timeout_s`` seconds of waiting
+        (``None`` = wait forever).
         """
         deadline = None if timeout_s is None else time.monotonic() + timeout_s
         while True:
@@ -229,9 +242,14 @@ class BlockLog:
             if self.ended():
                 # a segment may have been committed between the two checks
                 return self.read_segment(seq) if self.has_segment(seq) else None
+            if stop is not None and stop.is_set():
+                return None
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError(f"segment {seq} did not appear within {timeout_s}s")
-            time.sleep(poll_s)
+            if stop is not None:
+                stop.wait(poll_s)
+            else:
+                time.sleep(poll_s)
 
     def committed_seqs(self) -> list[int]:
         """All committed segment numbers from one directory listing."""
@@ -286,6 +304,16 @@ class BlockLog:
     ) -> Segment:
         """Shuffle ``blocks`` with ``Random(hash((seed, seq)))`` and commit them as the next
         segment."""
+        with self._lock:
+            return self._append_locked(blocks, pass_idx, meta, verify_blocks)
+
+    def _append_locked(
+        self,
+        blocks: list[BlockRef],
+        pass_idx: int,
+        meta: dict[str, Any] | None,
+        verify_blocks: bool,
+    ) -> Segment:
         W = self.W
         if len(blocks) != W:
             raise ValueError(f"append needs exactly W={W} blocks, got {len(blocks)}")

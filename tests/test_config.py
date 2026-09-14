@@ -94,6 +94,9 @@ def test_s3_storage_section_uses_paths_from_top_level(monkeypatch):
         {"scaling": {"num_workers": [3, 2]}},
         {"scaling": {"num_workers": 0}},
         {"checkpoint": {"policy": "weekly"}},
+        {"checkpoint": {"policy": "time", "time_budget_s": None}},
+        {"checkpoint": {"policy": "every_k", "every_k": None}},
+        {"storage": {"kind": "local", "path": "elsewhere"}},
         {"checkpoint": {"every_k": 0}},
         {"loader": {"prefetch": 0}},
         {"run_name": "a/b"},
@@ -111,3 +114,16 @@ def test_w_must_cover_every_allowed_world_size():
     assert list(cfg.allowed_world_sizes()) == [2, 3, 4]
     with pytest.raises(ValueError):
         DistrainerConfig.from_dict({"log": {"W": 8}, "scaling": {"num_workers": [2, 3]}})
+
+
+def test_asdict_yaml_roundtrip_and_direct_construction_validates(tmp_path):
+    import yaml
+
+    from distrainer.config import DistrainerConfig, LogConfig
+
+    cfg = DistrainerConfig.from_dict({"scaling": {"num_workers": [2, 4]}, "log": {"W": 24}})
+    text = yaml.safe_dump(cfg.asdict())
+    again = DistrainerConfig.from_dict(yaml.safe_load(text))
+    assert again.scaling.num_workers == (2, 4) and again.log.W == 24
+    with pytest.raises(ValueError):
+        DistrainerConfig(log=LogConfig(W=0))

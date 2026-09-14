@@ -1,4 +1,6 @@
+import fsspec
 import pyarrow as pa
+import pyarrow.fs as pafs
 import pytest
 
 from distrainer.block import BlockRef, write_block
@@ -28,3 +30,12 @@ def make_segment(seq: int, W: int, pass_idx: int = 0, seed: int = 1) -> Segment:
 def written_blocks(store):
     fs, root = store
     return fs, root, [write_block(fs, root, f"b{i}", make_table(3, i * 10)) for i in range(3)]
+
+
+class MemoryFS(pafs.PyFileSystem):
+    """A non-local pyarrow filesystem (fsspec memory) standing in for an object store."""
+
+    def __init__(self):
+        fs = fsspec.filesystem("memory")
+        fs.store.clear()
+        super().__init__(pafs.FSSpecHandler(fs))

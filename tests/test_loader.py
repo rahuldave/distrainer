@@ -19,9 +19,9 @@ def build(store, n_segments=2, W=4, rank=0, n=2):
     return fs, root, log
 
 
-def lanes_for(log, rank, n, start_seq=0, start_step=0, poll=0.02, timeout=5):
+def lanes_for(log, rank, n, start_seq=0, start_step=0, poll=0.02, timeout=5, stop=None):
     s, first = start_seq, start_step
-    while (segment := log.wait_segment(s, poll_s=poll, timeout_s=timeout)) is not None:
+    while (segment := log.wait_segment(s, poll_s=poll, timeout_s=timeout, stop=stop)) is not None:
         yield segment, lane(segment, rank, n, first)
         s, first = s + 1, 0
 
@@ -61,9 +61,10 @@ def test_prefetch_spans_segment_boundary_while_writer_is_behind(store):
     for _seg, (p, _, _) in LaneLoader(fs, root, lanes_for(log, 0, 1), prefetch=2):
         consumed.append((p, time.monotonic() - t0))
     assert [p for p, _ in consumed] == [0, 1, 2, 3, 4, 5, 6, 7]
-    # the first segment's blocks were delivered before the late writer committed
-    assert consumed[3][1] < 0.4
-    assert consumed[4][1] >= 0.35
+    # the boundary is where the consumer waited: a visible gap between positions 3 and 4,
+    # and no comparable gap inside either segment
+    gaps = [b - a for (_, a), (_, b) in zip(consumed, consumed[1:], strict=False)]
+    assert gaps[3] == max(gaps) and gaps[3] >= 0.2
 
 
 def test_close_stops_early_and_errors_propagate(store):
@@ -93,3 +94,81 @@ def test_missing_block_file_raises_in_consumer(store):
     fs.delete_file(f"{root}/{seg.blocks[2].locator}")
     with pytest.raises(OSError):
         list(LaneLoader(fs, root, lanes_for(log, 0, 1)))
+
+
+def test_close_from_another_thread_unblocks_a_waiting_consumer(store):
+    fs, root, log = build(store, n_segments=1, W=4)  # not ended: the lanes generator will wait
+    loader = LaneLoader(fs, root, lambda stop: lanes_for(log, 0, 1, stop=stop, timeout=None))
+    got = []
+    done = threading.Event()
+
+    def consume():
+        for _, (p, _, _) in loader:
+            got.append(p)
+        done.set()
+
+    threading.Thread(target=consume, daemon=True).start()
+    time.sleep(0.3)  # consumer has drained segment 0 and is blocked on the next segment
+    t0 = time.monotonic()
+    loader.close()
+    assert done.wait(2), "consumer never returned after close()"
+    assert time.monotonic() - t0 < 1.5
+    assert got == [0, 1, 2, 3]
+    assert not [t for t in threading.enumerate() if t.name == "distrainer-lanes" and t.is_alive()]
+
+
+def test_loader_iterates_once(store):
+    fs, root, log = build(store, n_segments=1, W=4)
+    log.end()
+    loader = LaneLoader(fs, root, lanes_for(log, 0, 1))
+    assert len(list(loader)) == 4
+    with pytest.raises(RuntimeError):
+        list(loader)
+
+
+def test_error_on_first_next_of_lanes_generator(store):
+    fs, root = store
+
+    def broken_from_start():
+        raise RuntimeError("no lanes")
+        yield  # pragma: no cover
+
+    with pytest.raises(RuntimeError, match="no lanes"):
+        list(LaneLoader(fs, root, broken_from_start()))
+
+
+def test_backpressure_bounds_reads_in_flight(store, monkeypatch):
+    fs, root, log = build(store, n_segments=2, W=8)
+    log.end()
+    import distrainer.loader as loader_mod
+
+    in_flight = {"now": 0, "max": 0}
+    lock = threading.Lock()
+    real_read = loader_mod.read_block
+
+    def slow_read(*args):
+        with lock:
+            in_flight["now"] += 1
+            in_flight["max"] = max(in_flight["max"], in_flight["now"])
+        try:
+            time.sleep(0.02)
+            return real_read(*args)
+        finally:
+            with lock:
+                in_flight["now"] -= 1
+
+    monkeypatch.setattr(loader_mod, "read_block", slow_read)
+    out = list(LaneLoader(fs, root, lanes_for(log, 0, 1), prefetch=2, threads=2))
+    assert len(out) == 16
+    assert in_flight["max"] <= 2  # never more reads running than worker threads
+    assert LaneLoader(fs, root, iter([]), prefetch=2, threads=2)._queue.maxsize == 2
+
+
+@pytest.mark.parametrize("n", [3, 4])
+def test_union_of_all_ranks_lanes_is_the_segment(store, n):
+    fs, root, log = build(store, n_segments=2, W=12)
+    log.end()
+    seen = []
+    for rank in range(n):
+        seen += [p for _, (p, _, _) in LaneLoader(fs, root, lanes_for(log, rank, n))]
+    assert sorted(seen) == list(range(24))

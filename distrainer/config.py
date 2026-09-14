@@ -113,22 +113,30 @@ class DistrainerConfig:
                 kwargs[key] = sections[key](**sub)
             elif key == "storage":
                 sub = dict(value or {})
-                sub.setdefault("path", d.get("storage_path", "runs"))
+                if "path" in sub:
+                    raise ValueError(
+                        "storage.path is not used; set storage_path and store_root at the top level"
+                    )
+                sub["path"] = d.get("storage_path", "runs")
                 kwargs[key] = StorageConfig.from_dict(sub)
             else:
                 kwargs[key] = value
-        cfg = cls(**kwargs)
-        cfg.validate()
-        return cfg
+        return cls(**kwargs)
 
     @classmethod
     def from_yaml(cls, path: str) -> DistrainerConfig:
         with open(path, encoding="utf-8") as f:
             return cls.from_dict(yaml.safe_load(f) or {})
 
+    def __post_init__(self) -> None:
+        self.validate()
+
     def asdict(self) -> dict[str, Any]:
+        """Plain dict (YAML-safe: ``num_workers`` becomes a list, ``storage.path`` is dropped)."""
         d = asdict(self)
-        d["storage"] = self.storage.asdict()
+        d["storage"] = {k: v for k, v in self.storage.asdict().items() if k != "path"}
+        if isinstance(self.scaling.num_workers, tuple):
+            d["scaling"]["num_workers"] = list(self.scaling.num_workers)
         return d
 
     # ---- validation ----
@@ -164,6 +172,10 @@ class DistrainerConfig:
         c = self.checkpoint
         if c.policy not in ("any", "every_k", "segment_end", "pass_end", "time", "never"):
             raise ValueError(f"unknown checkpoint.policy {c.policy!r}")
+        if c.policy == "every_k" and c.every_k is None:
+            raise ValueError("checkpoint.policy every_k needs checkpoint.every_k")
+        if c.policy == "time" and c.time_budget_s is None:
+            raise ValueError("checkpoint.policy time needs checkpoint.time_budget_s")
         if c.every_k is not None and c.every_k <= 0:
             raise ValueError("checkpoint.every_k must be positive or null")
         if c.time_budget_s is not None and c.time_budget_s <= 0:

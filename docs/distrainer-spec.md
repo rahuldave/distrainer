@@ -105,7 +105,7 @@ flowchart TB
 
 **Resume rule** — read segment `segment` from the log, skip `cursor * world_size_old` positions, re-deal the rest (and all later segments) over the current `n` with the assignment rule. Positions between the last checkpoint and the failure are replayed; the window is bounded by the checkpoint cadence. Requires retention: a segment and its blocks may only be deleted once a checkpoint with a later `segment` exists (plus a configurable margin of segments).
 
-**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<storage>/audit/<run_name>/<attempt>-<rank>.jsonl`. This is what the verification harness reads.
+**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<store_root>/audit/<run_name>/<attempt>-<rank>.jsonl` (on object stores the file is split into `<attempt>-<rank>.<part>.jsonl` parts). Records are ordered by file order within a rank, never by `ts`. This is what the verification harness reads.
 
 ## 3. Package layout
 
@@ -208,8 +208,10 @@ class BlockLog:
         # returns None only if ended() and seq does not exist
     def last_seq(self) -> int | None                            # highest committed segment (listing)
     # writer side
-    def append(self, blocks: list[BlockRef], *, pass_idx: int = 0, meta: dict | None = None) -> Segment
-        # requires len(blocks) == W; shuffles with Random(hash((seed, seq))); commits atomically
+    def append(self, blocks: list[BlockRef], *, pass_idx: int = 0, meta: dict | None = None,
+               verify_blocks: bool = True) -> Segment
+        # requires len(blocks) == W; verify_blocks reads every Parquet footer first; shuffles with
+        # Random(hash((seed, seq))); commits atomically; refuses to overwrite a committed seq
     def end(self) -> None                                       # write _END
     # retention
     def gc(self, keep_from_seq: int) -> list[int]               # delete segments < keep_from_seq and their blocks
@@ -253,9 +255,11 @@ Any(policies)              # OR-combination
 
 # loader.py
 class LaneLoader:
-    """Prefetching iterator over (position, BlockRef) pairs; yields (position, BlockRef, pyarrow.Table).
-    Accepts an iterator of lanes so prefetch continues across segment boundaries."""
-    def __init__(self, fs, root, lanes: Iterator[list[tuple[int, BlockRef]]], prefetch: int = 2, threads: int = 2): ...
+    """Prefetching iterator; yields (segment, (position, BlockRef, pyarrow.Table)) in lane order.
+    `lanes` yields (segment, lane) pairs (see section 5) or is a callable taking the loader's
+    stop Event, so a blocking wait_segment inside it can be interrupted by close(). A producer
+    thread walks the lanes so prefetch continues across segment boundaries. Iterate once."""
+    def __init__(self, fs, root, lanes, prefetch: int = 2, threads: int = 2): ...
     def __iter__(self): ...
     def close(self): ...
 
@@ -383,9 +387,11 @@ Verification scenario **S9 — cold restore**: run S1 to completion against MinI
 
 ```yaml
 run_name: toy
-storage_path: /shared/runs
-store_root: /shared/blocks
+storage_path: /shared/runs     # checkpoints and Ray Train run state
+store_root: /shared/blocks     # blocks, log, audit
 seed: 1234
+storage:                       # the filesystem both paths live on (section 6.3)
+  kind: local                  # local | s3; s3 adds endpoint, region, access_key_env, secret_key_env
 log:
   W: 24                     # blocks per segment; multiple of every allowed world size (2, 3 and 4 here: lcm 12)
   passes: 2                 # batch mode: BatchWriter passes over the corpus (epochs); ignored in streaming

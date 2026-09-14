@@ -30,8 +30,11 @@ def cut_segments(order: list[BlockRef], W: int, tail: Tail = "error") -> list[li
 
     ``tail`` says what to do with the last ``len % W`` blocks: ``error`` (default), ``drop``
     them for this pass, or ``wrap`` the chunk up with the first blocks of the same pass so no
-    segment is short (those blocks are seen twice in the pass).
+    segment is short (those blocks are seen twice in the pass; a corpus smaller than ``W``
+    repeats within the segment).
     """
+    if tail not in ("error", "drop", "wrap"):
+        raise ValueError(f"tail must be error, drop or wrap, got {tail!r}")
     n = len(order)
     if n == 0:
         return []
@@ -44,9 +47,8 @@ def cut_segments(order: list[BlockRef], W: int, tail: Tail = "error") -> list[li
             )
         if tail == "wrap":
             last = order[n - remainder :]
-            fill = [b for b in order if b not in last][: W - remainder]
-            if len(fill) < W - remainder:
-                raise ValueError(f"cannot wrap: only {n} blocks for W={W}")
+            pool = order[: n - remainder] or order  # a corpus smaller than W repeats itself
+            fill = [pool[i % len(pool)] for i in range(W - remainder)]
             chunks.append(last + fill)
     return chunks
 
@@ -83,11 +85,17 @@ class BatchWriter:
         ]
 
     def run(self) -> list[Segment]:
+        plan = self.plan()
+        if self.blocks and not plan:
+            raise ValueError(
+                f"{len(self.blocks)} blocks with W={self.log.W} and tail={self.tail!r} yields no "
+                "segment; use tail='wrap' or a smaller W"
+            )
         segments = [
             self.log.append(
                 chunk, pass_idx=p, meta={"writer": "batch"}, verify_blocks=self.verify_blocks
             )
-            for p, chunk in self.plan()
+            for p, chunk in plan
         ]
         self.log.end()
         return segments
@@ -115,7 +123,10 @@ class StreamingWriter:
         self.pass_idx = pass_idx
         self.verify_blocks = verify_blocks
         self._buffer: list[BlockRef] = []
-        self._rng = random.Random(hash((log.meta().seed, "stream")))
+        # str seeds go through SHA-512 in random.Random: reproducible across processes,
+        # unlike hash(str) which is salted by PYTHONHASHSEED
+        self._rng = random.Random(f"{log.meta().seed}:stream")
+        self._seen: set[str] = set()
         self.committed: list[Segment] = []
 
     @property
@@ -124,6 +135,9 @@ class StreamingWriter:
 
     def push(self, block: BlockRef) -> Segment | None:
         """Add one block; returns the segment committed by this push, if any."""
+        if block.block_id in self._seen:
+            raise ValueError(f"duplicate block_id {block.block_id!r} pushed to the stream")
+        self._seen.add(block.block_id)
         self._buffer.append(block)
         if len(self._buffer) >= self.k * self.log.W:
             return self._commit_one()
@@ -147,6 +161,8 @@ class StreamingWriter:
     def flush(self, tail: Tail = "drop") -> list[Segment]:
         """Commit remaining full segments; ``tail`` handles the last partial one."""
         W = self.log.W
+        if tail not in ("error", "drop", "wrap"):
+            raise ValueError(f"tail must be error, drop or wrap, got {tail!r}")
         out: list[Segment] = []
         while len(self._buffer) >= W:
             out.append(self._commit_one())
@@ -155,6 +171,10 @@ class StreamingWriter:
                 raise ValueError(f"{len(self._buffer)} blocks left in the buffer, fewer than W={W}")
             if tail == "wrap":
                 seen = [b for s in self.committed for b in s.blocks]
+                if len(self._buffer) + len(seen) < W:
+                    raise ValueError(
+                        f"cannot wrap: only {len(self._buffer)} blocks ever pushed, W={W}"
+                    )
                 chunk = cut_segments(self._buffer + seen, W, "drop")[:1]
                 if chunk:
                     out.append(
