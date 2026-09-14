@@ -376,7 +376,7 @@ def scenario_s8() -> list[str]:
     n_reports = int(final_metrics(out).get("reports", 0))
     ledgers = checkpoint_ledgers(str(shared() / "runs" / "s8"))
     print(f"S8: {len(ledgers)} time-budget checkpoints, {n_reports} reports per rank")
-    return check_s8(recs, W, n_reports, ledgers)
+    return check_s8(recs, W, n_reports, ledgers, poll_every=2)
 
 
 def scenario_s11() -> list[str]:
@@ -429,8 +429,12 @@ def scenario_s11() -> list[str]:
         problems.append("the producer did not end the log")
     kept = list(log.segments())
     ledgers = checkpoint_ledgers(str(shared() / "runs" / "s11"))
-    last_ckpt = max(int(v["segment"]) for v in ledgers.values()) if ledgers else 0
-    block_files = {f"blocks/{n}" for n in list_names(fs, join(root, "blocks"))}
+    if not ledgers:
+        return problems + ["no checkpoint ledgers under runs/s11"]
+    last_ckpt = max(int(v["segment"]) for v in ledgers.values())
+    block_files = {
+        f"blocks/{n}" for n in list_names(fs, join(root, "blocks")) if n.endswith(".parquet")
+    }  # a leftover write_atomic temp file is an orphan, not a block
     problems += check_retention(
         [s.seq for s in kept],
         block_files,

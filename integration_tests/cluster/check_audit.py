@@ -156,33 +156,49 @@ def check_s11(
     committed_at: dict[int, float],
     min_gap_s: float,
     expected_segments: int | None = None,
+    clock_tolerance_s: float = 0.05,
 ) -> list[str]:
     """Streaming producer: S1 holds; no segment was consumed before the producer committed it
-    (``committed_at``: seq -> commit time, e.g. parsed from the producer's output, so gc'd
-    segments count too); every segment up to ``expected_segments`` was consumed (the run ended
-    at ``_END``); and the ranks waited for the producer at least once: some two consecutive
-    segments started at least ``min_gap_s`` apart (the producer's sleep minus the poll interval
-    and a tolerance), which a trainer that is faster than its producer must show."""
+    (``committed_at``: seq -> commit time, parsed from the producer's output so gc'd segments
+    count too); every segment up to ``expected_segments`` was consumed (the run ended at
+    ``_END``); and the ranks waited for the producer at least once: some segment was committed
+    only after the trainer had finished the previous one (the direct signal), and some two
+    consecutive segments started at least ``min_gap_s`` apart (the producer's sleep minus the
+    poll interval and a tolerance; the steady state of a trainer faster than its producer).
+    ``clock_tolerance_s`` absorbs skew between the producer's and the ranks' clocks."""
     problems = check_s1(records, W)
     if not records:
         return problems
     starts = segment_starts(records)
+    ends: dict[int, float] = {}
+    for r in records:
+        ends[r.segment] = max(ends.get(r.segment, r.ts), r.ts)
     seqs = sorted(starts)
     if expected_segments is not None and seqs != list(range(expected_segments)):
         problems.append(f"consumed segments {seqs}, expected 0..{expected_segments - 1}")
     for seq in seqs:
         if seq not in committed_at:
             problems.append(f"segment {seq}: no commit time known")
-        elif committed_at[seq] > starts[seq]:
+        elif committed_at[seq] > starts[seq] + clock_tolerance_s:
             problems.append(
                 f"segment {seq}: consumed at {starts[seq]:.3f} before its commit at "
                 f"{committed_at[seq]:.3f}"
             )
+    waited = [
+        seq
+        for seq in seqs[1:]
+        if seq in committed_at and committed_at[seq] > ends[seq - 1] + clock_tolerance_s
+    ]
+    if not waited:
+        problems.append(
+            "ranks never waited for the producer: no segment was committed after the trainer "
+            "had finished the previous one"
+        )
     gaps = [starts[b] - starts[a] for a, b in zip(seqs, seqs[1:], strict=False)]
     if gaps and max(gaps) < min_gap_s:
         problems.append(
-            f"ranks never waited for the producer: segment start gaps {[round(g, 2) for g in gaps]}"
-            f" all below {min_gap_s:.2f}s"
+            f"segment start gaps {[round(g, 2) for g in gaps]} all below {min_gap_s:.2f}s: the "
+            "trainer never reached the producer's pace"
         )
     return problems
 
@@ -220,18 +236,34 @@ def check_retention(
 
 
 def check_s8(
-    records: Sequence[AuditRecord], W: int, n_reports: int, ledgers: dict[str, dict]
+    records: Sequence[AuditRecord],
+    W: int,
+    n_reports: int,
+    ledgers: dict[str, dict],
+    poll_every: int = 1,
 ) -> list[str]:
     """Time-budget policy: one attempt with S1 dealing (the run finishing at all proves every
     rank called ``report`` equally often, Ray Train v2 enforces it inside ``report``); the budget
     fired more than once; rank 0's ``reports`` count equals the number of checkpoints written,
-    plus one when the last step was a metrics-only report; each ledger is a valid step boundary
+    plus one when the last step was a metrics-only report (so the run must keep every
+    checkpoint: ``num_to_keep: null``); consecutive checkpoints are at least ``poll_every``
+    steps apart (the policy only decides on poll steps); each ledger is a valid step boundary
     and its directory name matches."""
     problems = check_s1(records, W)
     if len(ledgers) < 2:
         problems.append(f"expected at least 2 time-budget checkpoints, found {len(ledgers)}")
     if n_reports not in (len(ledgers), len(ledgers) + 1):
         problems.append(f"rank 0 reported {n_reports} times for {len(ledgers)} checkpoints")
+    positions = sorted(
+        int(led["segment"]) * W + int(led["cursor"]) * int(led["world_size"])
+        for led in ledgers.values()
+    )
+    for a, b in zip(positions, positions[1:], strict=False):
+        n = next(int(led["world_size"]) for led in ledgers.values())
+        if b - a < poll_every * n:
+            problems.append(
+                f"checkpoints at positions {a} and {b} are closer than {poll_every} poll steps"
+            )
     for name, led in sorted(ledgers.items()):
         cursor, n = int(led["cursor"]), int(led["world_size"])
         if cursor <= 0 or cursor * n > W:

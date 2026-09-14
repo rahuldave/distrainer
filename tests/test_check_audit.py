@@ -231,7 +231,8 @@ def test_check_s8_counts_reports_against_time_budget_checkpoints():
         "checkpoint_g000001_p000004_n02_a00": {"segment": 1, "cursor": 2, "world_size": 2},
     }
     assert check_s8(recs, 8, 3, ledgers) == []  # final metrics-only report after the last one
-    assert check_s8(recs, 8, 2, ledgers) == []
+    assert check_s8(recs, 8, 2, ledgers, poll_every=2) == []  # positions 6 and 12: 3 steps apart
+    assert any("closer than 4" in p for p in check_s8(recs, 8, 2, ledgers, poll_every=4))
     assert any("reported 5" in p for p in check_s8(recs, 8, 5, ledgers))
     one = dict(list(ledgers.items())[:1])
     assert any("at least 2" in p for p in check_s8(recs, 8, 1, one))
@@ -252,9 +253,11 @@ def test_check_s11_wants_commits_before_consumption_and_a_real_wait():
                 pos = seg * W + step * n + rank
                 recs.append(rec(0, rank, n, seg, step, pos, ts=10.0 * seg + step))
     assert segment_starts(recs) == {0: 0.0, 1: 10.0, 2: 20.0}
-    committed = {0: -1.0, 1: 9.5, 2: 19.0}
+    committed = {0: -1.0, 1: 9.5, 2: 19.0}  # each commit after the trainer finished the previous
     assert check_s11(recs, W, committed, min_gap_s=8.0, expected_segments=3) == []
-    assert any("never waited" in p for p in check_s11(recs, W, committed, min_gap_s=11.0))
+    assert any("never reached" in p for p in check_s11(recs, W, committed, min_gap_s=11.0))
+    ahead = {0: -1.0, 1: 0.5, 2: 0.6}  # the producer was always ahead: nobody waited
+    assert any("never waited" in p for p in check_s11(recs, W, ahead, min_gap_s=8.0))
     late = {**committed, 2: 20.5}
     assert any("before its commit" in p for p in check_s11(recs, W, late, 8.0))
     assert any("no commit time" in p for p in check_s11(recs, W, {0: 0.0, 1: 9.0}, 8.0))

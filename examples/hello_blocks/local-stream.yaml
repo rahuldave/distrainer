@@ -1,0 +1,34 @@
+# hello_blocks trained on a log that examples/streaming_producer/produce.py is writing at the same
+# time, on a laptop (Tutorial 2). Start the producer first (it creates the log), then train.py in
+# a second terminal; the ranks wait at every segment boundary until the next segment is committed.
+run_name: hello_stream
+storage_path: runs/hello_stream
+store_root: blocks/hello_stream
+seed: 7
+ray_address: null
+storage:
+  kind: local
+log:
+  W: 12
+  passes: 1                # unused: the producer decides how many segments exist
+  wait_poll_s: 0.2
+  retention_segments: 2
+  gc: true                 # rank 0 drops segments more than 2 behind its last checkpoint
+  gc_blocks: true
+  shuffle_buffer_segments: 1
+checkpoint:
+  policy: any
+  every_k: 2
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: 2
+  resources_per_worker: {CPU: 1}
+failure:
+  max_failures: 1
+train:
+  rows_per_block: 32
+  features: 8
+  lr: 0.05
