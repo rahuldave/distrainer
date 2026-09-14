@@ -464,7 +464,7 @@ services:
     environment: [RAY_TRAIN_V2_ENABLED=1]
     deploy: {replicas: 2}
   minio:
-    image: minio/minio
+    image: quay.io/minio/minio   # the Docker Hub image was retired
     command: server /data --console-address ":9001"
     environment: [MINIO_ROOT_USER=distrainer, MINIO_ROOT_PASSWORD=distrainer123]
     ports: ["9000:9000", "9001:9001"]

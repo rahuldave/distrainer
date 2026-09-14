@@ -87,6 +87,12 @@ storage_path: distrainer/runs   # bucket/prefix
 store_root: distrainer/blocks
 ```
 
+Two things S9 and S10 taught: `just down` keeps the MinIO volume (that is what a cold restore
+restores from; `just nuke` removes it), and a run name that already exists on the bucket is
+*restored* by Ray Train rather than started afresh, so the scenario runner deletes the old run
+state and audit trail on the bucket before each MinIO scenario. MinIO's image now lives at
+`quay.io/minio/minio`.
+
 ```bash
 just build           # once, or after uv.lock changes
 just up 2            # head + 2 workers; just up-minio 2 adds MinIO

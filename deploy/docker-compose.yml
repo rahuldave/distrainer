@@ -38,7 +38,7 @@ services:
     environment: *env
     deploy: { replicas: 2 }
   minio:
-    image: minio/minio:latest
+    image: quay.io/minio/minio:latest   # the Docker Hub image was retired
     profiles: [minio]
     command: server /data --console-address ":9001"
     environment:
@@ -46,8 +46,8 @@ services:
       MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-distrainer123}
     ports: ["9000:9000", "9001:9001"]
     volumes: ["minio:/data"]
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
+    healthcheck:   # the image ships neither mc nor curl; probe the port with bash
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/9000' || exit 1"]
       interval: 5s
       timeout: 5s
       retries: 20

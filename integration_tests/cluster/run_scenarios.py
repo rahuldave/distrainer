@@ -186,34 +186,51 @@ def scenario_s4() -> list[str]:
     return check_recovery(recs, W, every_k=2, expected_world_sizes=[3, 2])
 
 
+def s3_rm(prefixes: list[str], env: dict[str, str]) -> None:
+    """Delete run state and audit trails of earlier scenario runs from the bucket."""
+    head_python(
+        "from distrainer.storage import resolve, s3_options_from_env\n"
+        f"for uri in {prefixes!r}:\n"
+        "    fs, root = resolve(uri, create=False, **s3_options_from_env())\n"
+        "    try:\n"
+        "        fs.delete_dir(root)\n"
+        "    except FileNotFoundError:\n"
+        "        pass\n"
+        "print('cleaned')\n",
+        env=env,
+    )
+
+
 def head_python(code: str, env: dict[str, str] | None = None) -> str:
     return driver("exec-head", "python", "-c", code, env=env)
 
 
-def latest_checkpoint(run_uri: str, env: dict[str, str]) -> tuple[str, int]:
-    """``(checkpoint uri, first position after it)`` for the newest checkpoint of a run on S3;
-    listed from inside the head container, which has the S3 credentials."""
+def pick_checkpoint(run_uri: str, env: dict[str, str], which: str = "latest") -> tuple[str, int]:
+    """``(checkpoint uri, first position after it)`` for a checkpoint of a run on S3, listed from
+    inside the head container (it has the S3 credentials). ``which``: ``latest`` or ``middle``."""
     out = (
         head_python(
-            "import re, pyarrow.fs as pafs\n"
+            "import pyarrow.fs as pafs\n"
             "from distrainer.storage import resolve, s3_options_from_env\n"
             f"fs, root = resolve({run_uri!r}, create=False, **s3_options_from_env())\n"
             "infos = fs.get_file_info(pafs.FileSelector(root, recursive=False))\n"
             "names = sorted(i.path.rsplit('/', 1)[-1] for i in infos if 'checkpoint_g' in i.path)\n"
-            "print(names[-1] if names else '')\n",
+            "print(' '.join(names))\n",
             env=env,
         )
         .strip()
-        .splitlines()[-1]
+        .splitlines()
     )
-    if not out:
+    names = out[-1].split() if out else []
+    if not names:
         raise RuntimeError(f"no checkpoints under {run_uri}")
+    name = names[-1] if which == "latest" else names[len(names) // 2]
     import re
 
-    m = re.match(r"checkpoint_g(\d+)_p(\d+)_n(\d+)_a(\d+)", out)
-    assert m, out
+    m = re.match(r"checkpoint_g(\d+)_p(\d+)_n(\d+)_a(\d+)", name)
+    assert m, name
     start = int(m.group(1)) * W + int(m.group(2))
-    return f"{run_uri}/{out}", start
+    return f"{run_uri}/{name}", start
 
 
 def resume_check(run_name: str, start: int, env: dict[str, str]) -> list[str]:
@@ -267,6 +284,15 @@ def scenario_s9() -> list[str]:
     env = {"DISTRAINER_MINIO": "1"}
     up(2, "minio", env=env)
     driver("mkbucket", "distrainer", env=env)
+    s3_rm(
+        [
+            "s3://distrainer/runs/s9",
+            "s3://distrainer/runs/s9_resume",
+            "s3://distrainer/blocks/audit/s9",
+            "s3://distrainer/blocks/audit/s9_resume",
+        ],
+        env,
+    )
     driver(
         "exec-head",
         "python",
@@ -275,11 +301,12 @@ def scenario_s9() -> list[str]:
         MINIO_CFG,
         env=env,
     )
-    finish(start_train(MINIO_CFG, "run_name=s9", env=env), name="s9")
+    finish(start_train(MINIO_CFG, "run_name=s9", "checkpoint.num_to_keep=null", env=env), name="s9")
     driver("down", env=env)
     driver("wipe-shared", env=env)
     up(2, "minio", env=env)
-    ckpt, start = latest_checkpoint("s3://distrainer/runs/s9", env)
+    # a completed run's newest checkpoint is the end of the log: resume from the middle one
+    ckpt, start = pick_checkpoint("s3://distrainer/runs/s9", env, which="middle")
     print(f"S9 resuming from {ckpt} (position {start})")
     cli_resume(ckpt, "s9_resume", env)
     return resume_check("s9_resume", start, env)
@@ -291,6 +318,15 @@ def scenario_s10() -> list[str]:
     env = {"DISTRAINER_MINIO": "1"}
     up(2, "minio", env=env)
     driver("mkbucket", "distrainer", env=env)
+    s3_rm(
+        [
+            "s3://distrainer/runs/s10",
+            "s3://distrainer/runs/s10_resume",
+            "s3://distrainer/blocks/audit/s10",
+            "s3://distrainer/blocks/audit/s10_resume",
+        ],
+        env,
+    )
     driver(
         "exec-head",
         "python",
@@ -304,7 +340,7 @@ def scenario_s10() -> list[str]:
     subprocess.run(["docker", "kill", "distrainer-head-1"], check=True, capture_output=True)
     proc.communicate(timeout=120)  # the exec dies with the head
     up(2, "minio", env=env)  # recreates the head; workers rejoin it
-    ckpt, start = latest_checkpoint("s3://distrainer/runs/s10", env)
+    ckpt, start = pick_checkpoint("s3://distrainer/runs/s10", env)
     print(f"S10 resuming from {ckpt} (position {start})")
     cli_resume(ckpt, "s10_resume", env)
     return resume_check("s10_resume", start, env)
