@@ -41,9 +41,10 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 M1 (core library), M2 (`DistTrainer` on Ray Train v2, the `hello_blocks` and `toy_contrastive`
 examples, the `distrainer` CLI, single-node scenarios S1, S5, S7) and M3 (the OrbStack container
 harness behind a driver interface, scenarios S2, S3, S4 on a shared mount and S9, S10 on MinIO)
-are merged. M4 adds segment hooks configured in YAML, the re-mining hook that streams the
-`toy_contrastive` log (S6), an external streaming producer (S11), the time-budget checkpoint
-policy (S8) and retention `gc`. M5 (KubeRay) is next. Milestones are in the spec (section 12);
+are merged, and so is M4 (PR #12): segment hooks configured in YAML, the re-mining hook that
+streams the `toy_contrastive` log (S6), an external streaming producer (S11, and S11s3 on
+MinIO), the time-budget checkpoint policy (S8) and retention `gc`. M5 (KubeRay) is next.
+Milestones are in the spec (section 12);
 development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
 issues #1 to #7.
 

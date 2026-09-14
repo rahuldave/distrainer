@@ -9,14 +9,15 @@ below. Everything here was true when written; verify the Gest ids and branch sta
 
 - M0 bootstrap, M1 core library, M2 trainer + examples + single-node scenarios, M3 container
   harness: merged to `main` (PRs #8 to #11; issues #2 to #5 closed).
-- M4 segment hooks and streaming: branch `gest/vnupztox-m4-hooks`, PR #12 (issue #6). Scenarios
-  S6 (re-mining hook), S8 (time-budget policy) and S11 (streaming producer with gc) are green on
-  OrbStack next to S2, S3, S4, S9, S10; S1, S5, S7 on the laptop. Tutorials
-  (`docs/tutorials/`), a CLI reference (`docs/cli.md`) and the scenario docs are part of the PR.
+- M4 segment hooks and streaming: merged to `main` as PR #12 (squash commit `319eb1c`, issue #6
+  closed). Scenarios S6 (re-mining hook), S8 (time-budget policy), S11 (streaming producer with
+  gc) and S11s3 (the same on MinIO) are green on OrbStack next to S2, S3, S4, S9, S10; S1, S5,
+  S7 on the laptop. Tutorials (`docs/tutorials/`), a CLI reference (`docs/cli.md`), a gc
+  reference (`docs/retention.md`) and the scenario docs are in.
 - Gest: root task `qvuukpsm` (tracking issue #1). M4 parent `vnupztox`, iteration `kvxwtzwv`.
   M5 parent `lntryyqu` (issue #7), iteration `ukvruwwu`, leaves `ykkvnqtp` (KubeRay manifests +
   driver) and `ywuxrspm` (S1 to S4 under KubeRay). `gest iteration graph ukvruwwu` shows the
-  tree. Branch M5 from `main` once PR #12 is merged: `gest/lntryyqu-m5-kuberay`.
+  tree. Branch M5 from `main`: `gest/lntryyqu-m5-kuberay`.
 - Commits need the `AGENT_GEST_ALLOW_RAW_GIT_WRITES=1` prefix on raw git writes (see
   `CLAUDE.md`); one PR per milestone, `gpa` review by an Opus subagent, ask before merging.
 
