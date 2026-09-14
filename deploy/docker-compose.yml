@@ -4,7 +4,7 @@ name: distrainer
 services:
   head:
     build: { context: ., dockerfile: deploy/Dockerfile }
-    image: distrainer:local
+    image: ${DISTRAINER_IMAGE:-distrainer:local}
     command: ["deploy/ray-head.sh"]
     ports: ["127.0.0.1:8265:8265"]   # loopback only: OrbStack forwards published ports to the LAN
     shm_size: "1g"
@@ -32,7 +32,7 @@ services:
       retries: 30
       start_period: 10s
   worker:
-    image: distrainer:local
+    image: ${DISTRAINER_IMAGE:-distrainer:local}
     command: ["deploy/ray-worker.sh"]
     depends_on:
       head: { condition: service_healthy }

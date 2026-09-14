@@ -316,7 +316,7 @@ Anyscale solves the resume problem by recording every row id that was consumed a
 - **Nothing to track at row level.** No id column requirement, no sidecar bookkeeping on shared storage, no restriction to map-only pipelines. The pipeline can do anything it likes, because it runs *before* blocks are written.
 - **Batch composition is yours.** A block is a batch you designed. Contrastive training with hard negatives, curriculum ordering, mixing several datasets in a chosen ratio, all become "what the writer puts in a segment", not "what the shuffle happened to produce".
 - **Shuffling is at block level and reproducible.** Two runs with the same seed consume identical block sequences per rank.
-- **It runs on open-source Ray**, on a laptop, in Docker, or on Kubernetes, and stores blocks and checkpoints on any S3-compatible service.
+- **It runs on open-source Ray**, on a laptop, in Docker, or on Kubernetes (the same scenarios are verified on all three, `docs/running-modes.md`), and stores blocks and checkpoints on any S3-compatible service.
 
 The trade-off is that data must be pre-blocked. If your training set is a live streaming pipeline with a global shuffle in the middle, Ray Data's streaming split is the better tool and Anyscale's row tracking is the way to resume it. For workloads where you *want* to control what is in a batch, pre-blocking is not a cost; it is the point.
 

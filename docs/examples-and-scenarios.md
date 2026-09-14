@@ -152,19 +152,21 @@ before a failure can still be in flight, so the controller may resume from the o
 
 | # | scenario | mode | driven by | injects | asserts | status |
 |---|---|---|---|---|---|---|
-| S1 | happy path | A (also B) | `just smoke`; `just local-scenarios S1`; `just train` in the harness | nothing | `check_s1`, report count | green |
-| S2 | worker kill mid-segment | B | `just integration S2` | `kill-worker 2` after 12 blocks; the container is started again 5 s later | `check_recovery` with world sizes `[2, 2]` | green |
-| S3 | elastic scale up | B | `just integration S3` | `scale 3` after 12 blocks | `check_recovery` with `[2, 3]` | green |
-| S4 | elastic scale down | B | `just integration S4` | start with 3, `scale 2` after 12 blocks | `check_recovery` with `[3, 2]` | green |
+| S1 | happy path | A (also B, D) | `just smoke`; `just local-scenarios S1`; `just train` in the harness (D: also as a RayJob through `submit`) | nothing | `check_s1`, report count | green |
+| S2 | worker kill mid-segment | B, D | `just integration S2` | `kill-worker 2` after 12 blocks; B starts the container again 5 s later, D force-deletes the pod and the operator starts a replacement at once | `check_recovery` with world sizes `[2, 2]` | green |
+| S3 | elastic scale up | B, D | `just integration S3` | `scale 3` after 12 blocks | `check_recovery` with `[2, 3]` | green |
+| S4 | elastic scale down | B, D | `just integration S4` | start with 3, `scale 2` after 12 blocks (B: `docker stop` of one container, D: one pod gets `ray stop` and 10 s, then dies) | `check_recovery` with `[3, 2]` | green |
 | S5 | checkpoint cadence | A | `just local-scenarios S5` | three runs: `every_k=1`, `every_k=4`, `segment_end`, all with `num_to_keep: null` | `check_s5` with the expected count per cadence | green |
-| S6 | segment hook / re-mining | B | `just integration S6` | `toy_contrastive` with `hooks.remine`: segment 0 from `make_blocks.py`, segments 1..5 mined by rank 0 with the current encoder at each segment end, `_END` from the hook | `check_s6`: S1 holds; every hook-made segment's `created_at` precedes the first audit `ts` that consumed it; its records name exactly its blocks and none of the base corpus; the log has the configured number of segments and ended | green |
+| S6 | segment hook / re-mining | B, D | `just integration S6` | `toy_contrastive` with `hooks.remine`: segment 0 from `make_blocks.py`, segments 1..5 mined by rank 0 with the current encoder at each segment end, `_END` from the hook | `check_s6`: S1 holds; every hook-made segment's `created_at` precedes the first audit `ts` that consumed it; its records name exactly its blocks and none of the base corpus; the log has the configured number of segments and ended | green |
 | S7 | determinism | A | `just local-scenarios S7` | two stores built from the same seed, two runs | `check_s7` | green |
-| S8 | time-budget policy | B | `just integration S8` | hello_blocks with `checkpoint.policy: time`, `time_budget_s: 5`, `time_poll_every: 2`, `num_to_keep: null` (rank 0 decides every 2 steps whether 5 s have passed and broadcasts it) | the run finishes (Ray Train v2 would deadlock inside `report` if the ranks disagreed); `check_s8` on the audit trail, rank 0's `reports` metric and the checkpoint directories (per-rank equality is enforced by Ray Train itself: the run cannot finish otherwise) | green |
-| S9 | cold restore | B + MinIO | `just integration S9` | full run on MinIO with all checkpoints kept, `down`, `wipe-shared`, `up`, `distrainer resume` from a mid-run checkpoint URI into a new run | `check_resume` from the checkpoint's position | green |
-| S10 | head loss | B + MinIO | `just integration S10` | `docker kill` of the head 25 s into the run, `up` (workers rejoin), resume from the newest registered checkpoint | `check_resume` | green |
-| S11 | streaming producer | B | `just integration S11` | `produce.py` in the head container writes 10 segments 6 s apart into `/shared/blocks_stream`; the runner waits for the log to exist, then starts hello_blocks with `harness-stream.yaml` (`gc: true`, `retention_segments: 2`) | `check_s11` (ranks waited, commit precedes consumption, all 10 segments consumed once, `_END` ended the run) and `check_retention` (the log keeps segments 7..9 and exactly their blocks). The printed segment-start gaps show two phases: about 3 s while the trainer drains the segments the producer committed during Ray's startup, then about 6 s once it has caught up and waits for each commit. `just integration S11s3` runs the same scenario with the log, blocks, audit trail and checkpoints on MinIO (`harness-stream-minio.yaml`), the checks executed inside the head: this is the only scenario in which a reader polls a bucket while a segment is being put, so it is the test of the single-put commit on S3 | green |
+| S8 | time-budget policy | B, D | `just integration S8` | hello_blocks with `checkpoint.policy: time`, `time_budget_s: 5`, `time_poll_every: 2`, `num_to_keep: null` (rank 0 decides every 2 steps whether 5 s have passed and broadcasts it) | the run finishes (Ray Train v2 would deadlock inside `report` if the ranks disagreed); `check_s8` on the audit trail, rank 0's `reports` metric and the checkpoint directories (per-rank equality is enforced by Ray Train itself: the run cannot finish otherwise) | green |
+| S9 | cold restore | B, D + MinIO | `just integration S9` | full run on MinIO with all checkpoints kept, `down`, `wipe-shared`, `up`, `distrainer resume` from a mid-run checkpoint URI into a new run | `check_resume` from the checkpoint's position | green |
+| S10 | head loss | B, D + MinIO | `just integration S10` | `kill-head` once 24 blocks (one segment) are in the audit trail on the bucket (B: `docker kill` of the head container; D: the head pod force-deleted and recreated by the operator), `up` (workers rejoin), resume from the newest registered checkpoint | `check_resume` | green |
+| S11 | streaming producer | B, D | `just integration S11` | `produce.py` in the head container writes 10 segments 6 s apart into `/shared/blocks_stream`; the runner waits for the log to exist, then starts hello_blocks with `harness-stream.yaml` (`gc: true`, `retention_segments: 2`) | `check_s11` (ranks waited, commit precedes consumption, all 10 segments consumed once, `_END` ended the run) and `check_retention` (the log keeps segments 7..9 and exactly their blocks). The printed segment-start gaps show two phases: about 3 s while the trainer drains the segments the producer committed during Ray's startup, then about 6 s once it has caught up and waits for each commit. `just integration S11s3` runs the same scenario with the log, blocks, audit trail and checkpoints on MinIO (`harness-stream-minio.yaml`), the checks executed inside the head: this is the only scenario in which a reader polls a bucket while a segment is being put, so it is the test of the single-put commit on S3 | green |
 
-Modes: A is the laptop (local Ray), B the OrbStack container cluster; see `docs/running-modes.md`.
+Modes: A is the laptop (local Ray), B the OrbStack container cluster, D the same cluster as KubeRay
+pods (`DISTRAINER_DRIVER=kuberay`); every B scenario ran under D on 2026-09-14 with the runner and
+the checks unchanged. See `docs/running-modes.md`.
 
 ### Running them
 
@@ -174,6 +176,8 @@ just local-scenarios            # S1, S5, S7 on the laptop, about 3 minutes
 just build && just up 2         # container cluster (once; the image is rebuilt only if uv.lock changes)
 just integration S2             # one scenario; `all` runs S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (about 25 minutes)
 just down                       # containers stop, the MinIO volume stays; `just nuke` removes it
+just kuberay-operator                            # once: the KubeRay operator on OrbStack's Kubernetes
+DISTRAINER_DRIVER=kuberay just integration S2    # the same scenarios with pods as Ray nodes (docs/running-modes.md, D)
 ```
 
 Each cluster scenario brings the cluster to the size it needs, waits until Ray reports that many
@@ -188,6 +192,30 @@ producer before the trainer. The driver's output for the run is saved under
 shared-mount scenario is under `.harness/shared/<store>/audit/<scenario>/`, and the checkpoints
 under `.harness/shared/runs/<scenario>/`.
 
+### Under KubeRay
+
+`DISTRAINER_DRIVER=kuberay` swaps `deploy/drivers/compose.sh` for `deploy/drivers/kuberay.sh`;
+the runner and the checks do not change, the paths above are the same (the pods mount
+`.harness/shared` as a `hostPath` volume), and "the head container" is the head pod. What the
+verbs do differently, and what it means for the scenarios:
+
+| verb | compose (B) | KubeRay (D) | scenarios |
+|---|---|---|---|
+| `up N [minio]` | `docker compose up --scale worker=N` | apply the `RayCluster` with N replicas (+ the MinIO Deployment), wait for the head to be Ready | all |
+| `kill-worker I` | `docker kill`, `docker start` 5 s later | `kubectl delete pod --force`; the operator starts a replacement at once | S2 |
+| `scale N` | `up --scale worker=N`; a removed container gets `docker stop` (10 s) | JSON-patch `replicas`; a removed pod gets `ray stop` (a preemption notice to the trainer) and is killed after 10 s | S3, S4 |
+| `kill-head` | `docker kill` of the head | `kubectl delete pod --force` of the head; the operator recreates it, the workers restart into it | S10 |
+| `down`, `wipe-shared`, `up` | containers go, the MinIO volume stays | the `RayCluster` and MinIO go, the PVC stays | S9 |
+| `exec-head`, `cp-from-head` | `docker compose exec`, `cp` | `kubectl exec`, `kubectl cp` | all |
+
+Two things the pods do that the containers do not, both handled in `deploy/k8s/raycluster.yaml`:
+a graceful deletion is a *notice*, not a death (Kubernetes' default 30 s grace let S4's drained
+worker train to the end, so the manifest sets 10 s, the same as `docker stop`), and
+`torch.distributed` reverse-resolves every peer at process-group setup, which CoreDNS forwards
+outside the cluster unless the pods sit behind a headless Service (a slow upstream once cost
+15 s per lookup, the trainer took 40 s to start and S11's producer ran away from it). Tutorial 3
+(`docs/tutorials/kuberay.md`) walks through the same failures by hand.
+
 ### Reading a failure
 
 The runner prints one line per problem and then `S<n>: FAIL`. Three kinds of problem have come up
@@ -200,3 +228,10 @@ while building the harness and are worth recognising:
 - `resume FAIL: no audit records` on S9/S10: the resumed run had nothing left to do, usually
   because it resumed from the end of a completed run, or because a run with the same name already
   existed on the bucket and Ray Train restored it instead of starting afresh.
+- `expected at least 2 attempts, found [0]` on S4 under KubeRay, with "received preemption
+  signal" in the log: the removed pod was drained but not killed before the run ended; check
+  `terminationGracePeriodSeconds` in `deploy/k8s/raycluster.yaml`.
+- `ranks never waited for the producer` on S11 under KubeRay, with two c10d warnings ("The
+  hostname of the client socket cannot be retrieved") 15 s apart in the log: reverse DNS for the
+  worker pods is being forwarded outside the cluster; check that the headless
+  `distrainer-workers` Service exists (`kubectl -n distrainer get svc`).

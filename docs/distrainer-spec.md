@@ -143,12 +143,13 @@ integration_tests/
   cluster/             # scenario runner that drives the cluster through deploy/driver.sh verbs and checks audit logs (S1–S11)
 deploy/
   driver.sh            # cluster-driver verb interface (up N, down, exec-head, kill-worker I, scale N, cp-from-head, endpoint)
-  drivers/compose.sh   # docker compose on OrbStack (the only implemented driver in v0.1)
+  drivers/compose.sh   # docker compose on OrbStack (the default driver)
+  drivers/kuberay.sh   # KubeRay on OrbStack's Kubernetes (DISTRAINER_DRIVER=kuberay, section 11)
   drivers/uncloud.sh   # stub with the same verbs for uncloud (`uc deploy`, `uc scale`, `uc exec`), filled in when machines exist
   Dockerfile
   docker-compose.yml
   ray-head.sh, ray-worker.sh
-  k8s/                 # phase 2: KubeRay manifests (driver kuberay)
+  k8s/                 # KubeRay manifests: raycluster.yaml, minio.yaml, rayjob.yaml (rendered by drivers/kuberay.sh)
 docs/                  # introduction, this spec, design, research report, gest_codex_workflow.md
 AGENTS.md              # from agent_gest_git_skills AGENTS.template.md, project section filled in
 CLAUDE.md              # adapter pointing at AGENTS.md / .agents/skills
@@ -443,7 +444,7 @@ Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clust
 
 `docs/running-modes.md` compares this harness with the laptop single-node mode (M2), uncloud, and KubeRay: where the driver runs, which storage each can use, how failures are injected, and which scenarios each mode validates.
 
-**Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `build`, `up N [minio]`, `down`, `nuke`, `wipe-shared`, `scale N`, `exec-head CMD...`, `kill-worker I`, `kill-head`, `stop-worker I`, `cp-from-head SRC DST`, `shared`, `endpoint`, `mkbucket`. The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available, and on KubeRay in phase 2. The uncloud driver ships as a documented stub in v0.1.
+**Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `build`, `up N [minio]`, `down`, `nuke`, `wipe-shared`, `scale N`, `exec-head CMD...`, `kill-worker I`, `kill-head`, `stop-worker I`, `cp-from-head SRC DST`, `shared`, `endpoint`, `mkbucket`. The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on KubeRay (`DISTRAINER_DRIVER=kuberay`, section 11), and on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available. A driver may add verbs of its own (`kuberay`: `operator`, `submit`); the Justfile and the runner use only the common set. The uncloud driver ships as a documented stub in v0.1.
 
 Containers are Ray nodes: one `head` and `N` `worker` services on the compose network, sharing `/shared` (block store, checkpoints, audit logs), which is a bind mount of `.harness/shared` on the Mac so the host can read audit trails and checkpoints during a run. Ray Train needs shared storage across nodes; the mount provides it (MinIO is the alternative). The source directories are mounted over the image copy, so code edits are live in every node without rebuilding.
 
@@ -491,9 +492,11 @@ Each scenario runs the toy workload with a distinct `run_name` and then asserts 
 
 Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 and S11s3 green against MinIO.
 
-## 11. Phase 2: k3s / KubeRay on OrbStack
+## 11. Phase 2: KubeRay on OrbStack Kubernetes (M5)
 
-OrbStack ships a built-in Kubernetes; enable it, then `helm install kuberay-operator kuberay/kuberay-operator`. Define a `RayCluster` with a head pod and a worker group (`minReplicas`/`maxReplicas` matching `num_workers=(min,max)`) and a `RayJob` that runs `train.py`. Node failure = `kubectl delete pod <worker>`; elasticity = `kubectl scale`/edit `replicas` (the KubeRay autoscaler can also react to Train's elastic requests). Shared storage = a `hostPath` or `local-path` PVC mounted at `/shared` in all pods. The same `check_audit.py` applies. This phase mostly validates that nothing in v0.1 assumes docker compose networking.
+OrbStack's built-in Kubernetes (k3s-based, `orb config set k8s.enable true`, applied by an OrbStack restart) runs in the same VM as its Docker engine, so it uses locally built images without a registry (`imagePullPolicy: IfNotPresent`) and a `hostPath` volume reaches the Mac filesystem. `just kuberay-operator` installs the KubeRay operator once (v1.7.0, its kustomize base through `kubectl apply --server-side -k`; no Helm). `deploy/k8s/raycluster.yaml` declares a `RayCluster` with a head pod (2 CPUs, no `trainer` resource) and a `workers` group whose pods offer `trainer: 1` through `rayStartParams.resources`; `minReplicas`/`maxReplicas` bound the pod count the driver may ask for, while the trainer's elastic bounds remain `scaling.num_workers`. `deploy/k8s/minio.yaml` adds MinIO as a Deployment, a Service (`minio:9000`, the endpoint the harness configs use) and a PVC that `down` keeps and `nuke` deletes; `deploy/k8s/rayjob.yaml` runs `train.py` as a `RayJob` (`submit [CONFIG]`, the Kubernetes-native alternative to `exec-head`).
+
+`deploy/drivers/kuberay.sh` implements the driver verbs on `kubectl`: `up N` renders the host paths, image and replica count into the manifests and applies them, `scale N` JSON-patches `replicas`, `kill-worker I` and `kill-head` force-delete the pod (node death; the operator starts a replacement at once, so a killed node always comes back and `DISTRAINER_RESTART_DELAY` does not apply), `stop-worker I` and a `scale` down delete gracefully (KubeRay's `preStop` runs `ray stop`, which Ray reports to the trainer as a preemption notice; the pod is killed after `terminationGracePeriodSeconds`, 10 s in the manifest to match `docker stop`, because Kubernetes' 30 s default let a scaled-down worker train to the end of a short run), `exec-head` is `kubectl exec` into the head pod, `cp-from-head` is `kubectl cp`. `/shared` in every pod is the `hostPath` of `.harness/shared`, the same directory the compose driver bind-mounts, and the source tree is mounted over the image copy as in compose, so `run_scenarios.py` and `check_audit.py` are unchanged: `DISTRAINER_DRIVER=kuberay just integration S2` (S3, S4, and the other cluster scenarios) is the acceptance. KubeRay's readiness and liveness probes are HTTP checks against Ray's dashboard agent and `ray job submit` talks to the dashboard, so the dependency is `ray[data,default,train]` (the minimal install disables the dashboard's HTTP server and the pods never become Ready). `raycluster.yaml` also adds a headless Service over the worker pods so CoreDNS answers `torch.distributed`'s reverse lookups of peer IPs locally (it forwards unknown PTR queries outside the cluster, where a slow upstream cost 15 s per lookup) and bounds the pods' resolver timeouts. This phase validated that nothing in v0.1 assumed docker compose networking.
 
 ## 12. Milestones (each is one Gest development iteration, see section 14)
 
@@ -502,7 +505,7 @@ OrbStack ships a built-in Kubernetes; enable it, then `helm install kuberay-oper
 2. **M2 — DistTrainer + examples single-node** (`ray.init()` local, `num_workers=2`): `hello_blocks` (the `just smoke` gate), `toy_contrastive` (`just contrastive`), CLI; S1, S5, S7. Test strategy: test-after with `just smoke` as the gate.
 3. **M3 — harness**: driver interface (`deploy/driver.sh`, compose driver, uncloud stub), Dockerfile, compose, Justfile targets, `run_scenarios.py` + `check_audit.py`; S2, S3, S4 on local shared storage, then S9, S10 against MinIO. Test strategy: characterization-first (record the audit logs of a green run, then assert).
 4. **M4 — segment hooks and streaming mode**: `remine.py` as a streaming writer, S6, S11; time-budget policy, S8; `gc`.
-5. **M5 — KubeRay variant** (phase 2).
+5. **M5 — KubeRay variant** (phase 2): `deploy/k8s` manifests (RayCluster, MinIO, RayJob), `deploy/drivers/kuberay.sh` with the same verbs, `ray[default]` in the image; S1 to S4 and then every cluster scenario green under `DISTRAINER_DRIVER=kuberay` with the runner and the checker unchanged (section 11). Test strategy: characterization-first against the existing checks.
 
 ## 13. Open questions (decide at M1/M2)
 
@@ -561,7 +564,7 @@ docs:             @ls docs
 # agent context targets from templates/just/agent-contract.just (agent-contract, agent-test-plan, agent-review-plan)
 ```
 
-`smoke` is the fast gate run by `verify`; the compose scenarios run via `just integration` and are not part of `verify` because they need OrbStack up. `cx` is optional and, if adopted, wraps only file-producing stages such as `make_blocks.py` (blocks are durable outputs of an explicit input), never tests or lint.
+`smoke` is the fast gate run by `verify`; the cluster scenarios (compose, or KubeRay with `DISTRAINER_DRIVER=kuberay`) run via `just integration` and are not part of `verify` because they need OrbStack up. `cx` is optional and, if adopted, wraps only file-producing stages such as `make_blocks.py` (blocks are durable outputs of an explicit input), never tests or lint.
 
 ### 14.3 Workflow rules for this project
 
@@ -581,8 +584,8 @@ Acceptance for M0: `just lint`, `just typecheck`, `just static`, `just test`, `j
 Answers given before implementation started; they override earlier sections where they differ.
 
 - **Repository**: `github.com/rahuldave/distrainer`, public, MIT. Every milestone M0–M5 is a "major task" with its own GitHub issue; leaf tasks are Gest-only and carry `parent_task` pointing at the milestone task that is paired with the issue.
-- **Harness driver**: compose on OrbStack is the only implemented driver in v0.1; uncloud is a stub with the same verb interface until machines are available. Nothing in `distrainer/`, `tests/`, or `integration_tests/` may depend on the driver.
-- **Cluster size**: scenarios target 2–3 worker containers on the 8 GB OrbStack VM (16 GB Mac).
+- **Harness driver**: compose on OrbStack (the default) and KubeRay on OrbStack's Kubernetes (M5, section 11) are the implemented drivers; uncloud is a stub with the same verb interface until machines are available. Nothing in `distrainer/`, `tests/`, or `integration_tests/` may depend on the driver.
+- **Cluster size**: scenarios target 2–3 worker containers or pods on the 8 GB OrbStack VM (16 GB Mac).
 - **Examples**: `hello_blocks` is the `just smoke` gate; `toy_contrastive` gets its own `just contrastive` target and is used by the integration scenarios; `streaming_producer` is added in M4 for S11.
 - **Storage**: local shared storage is the default everywhere; MinIO/S3 is a config option (`storage.kind: s3`) supported by the API from M1 and exercised only by S9/S10.
 - **Python**: 3.13 in `.python-version` and the Docker image; `requires-python >= 3.11` and ruff `target-version = py311` keep the code 3.11-compatible. Ray 2.58 and CPU torch 2.14 ship wheels for 3.10–3.14.

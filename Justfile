@@ -41,7 +41,7 @@ diff-check:
 verify: lint typecheck static test regression smoke diff-check
 
 # --- local multi-node harness: every target is a deploy/driver.sh verb (spec section 9);
-# DISTRAINER_DRIVER selects the driver (compose today), DISTRAINER_MINIO=1 adds the MinIO profile ---
+# DISTRAINER_DRIVER selects the driver (compose or kuberay), DISTRAINER_MINIO=1 adds MinIO ---
 
 build:
   deploy/driver.sh build
@@ -57,6 +57,10 @@ down:
 
 nuke:
   deploy/driver.sh nuke
+
+# KubeRay driver (DISTRAINER_DRIVER=kuberay on OrbStack's Kubernetes): install the operator once
+kuberay-operator:
+  DISTRAINER_DRIVER=kuberay deploy/driver.sh operator
 
 mkbucket:
   DISTRAINER_MINIO=1 deploy/driver.sh mkbucket distrainer

@@ -8,14 +8,14 @@ Every mode uses the same YAML shape (spec section 7); the fields that differ are
 |---|---|---|---|---|
 | Ray nodes | one: this Python process starts a local cluster | one container per node on a compose network | one container per node across a WireGuard mesh | one pod per node in a `RayCluster` |
 | Training workers | Ray actors on the laptop | one worker container each (`trainer: 1` resource) | same | one worker pod each |
-| Driver (`train.py`) | the same process (`ray_address: null`) | inside the `head` container (`ray_address: auto`) | inside the head container via `uc exec` | a `RayJob` |
-| Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines) | a PVC (`hostPath` / `local-path`) or S3 |
-| Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `uc rm` / `uc scale` | `kubectl delete pod`, `kubectl scale` |
-| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | the same set, once machines exist | S1 to S4 |
-| Milestone | M2 (done) | M3 | after M3, when machines are available | M5 |
-| Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (stub) | `deploy/drivers/kuberay.sh` |
+| Driver (`train.py`) | the same process (`ray_address: null`) | inside the `head` container (`ray_address: auto`) | inside the head container via `uc exec` | inside the head pod via `kubectl exec`, or a `RayJob` |
+| Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines) | a `hostPath` volume at `/shared` (or a PVC), or MinIO in the cluster |
+| Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `uc rm` / `uc scale` | `kubectl delete pod --force` (node death; the operator replaces the pod), a `replicas` patch |
+| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | the same set, once machines exist | the same set as B (S2, S3, S4 are the acceptance) |
+| Milestone | M2 (done) | M3 (done) | after M5, when machines are available | M5 (done) |
+| Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (stub) | `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`) |
 
-Modes A and B run today; C and D are the plan (spec section 9). The verbs of `deploy/driver.sh`
+Modes A, B and D run today; C is the plan (spec section 9). The verbs of `deploy/driver.sh`
 (`build`, `up N [minio]`, `down`, `nuke`, `scale N`, `exec-head`, `kill-worker I`, `stop-worker I`,
 `cp-from-head`, `wipe-shared`, `shared`, `endpoint`, `mkbucket`) are the whole contract between the
 Justfile or the scenario runner and a mode; nothing under `distrainer/`, `tests/`, or
@@ -141,12 +141,68 @@ enough because uncloud wants a Docker host per node.
 
 ## D. KubeRay on OrbStack Kubernetes (M5)
 
-OrbStack has a built-in Kubernetes (k3s-based, `orb config set k8s.enable true`), so this mode
-is also testable on the Mac. With the KubeRay operator, a `RayCluster` resource declares a
-head pod and a worker group (`minReplicas` / `maxReplicas` mirror `num_workers: [min, max]`), and a
-`RayJob` runs `train.py`. Node death is `kubectl delete pod`, elasticity is editing `replicas`,
-storage is a PVC mounted at `/shared` in every pod or S3. The purpose of this mode is to prove that
-nothing in v0.1 assumed compose networking; the scenario checker is unchanged.
+OrbStack has a built-in Kubernetes (k3s-based). With the KubeRay operator installed, a
+`RayCluster` resource declares the head pod and a worker group, and the operator keeps the pods
+matching it. `deploy/drivers/kuberay.sh` implements the driver verbs on top of that, so every
+harness target and every cluster scenario runs unchanged with `DISTRAINER_DRIVER=kuberay`:
+
+```bash
+orb config set k8s.enable true      # once; restart OrbStack (orb stop && orb start) to apply it
+just kuberay-operator               # once: KubeRay v1.7.0 through kubectl's kustomize (no Helm)
+just build                          # the same image as mode B; OrbStack's Kubernetes sees Docker's images
+export DISTRAINER_DRIVER=kuberay
+just up 2 && just blocks && just train && just down
+just integration S2                 # S3, S4, S6, S8 likewise; S9, S10, S11s3 bring MinIO up in the cluster
+```
+
+What is where:
+
+- `deploy/k8s/raycluster.yaml`: one `RayCluster` named `distrainer` (namespace `distrainer`): the
+  head pod (`num-cpus: 2`, no `trainer` resource) and the `workers` group (`num-cpus: 1`,
+  `resources: {"trainer": 1}` in `rayStartParams`). The driver renders the host paths, the image
+  and the replica count into it (`up N`) and JSON-patches `replicas` (`scale N`);
+  `minReplicas` / `maxReplicas` (1 to 8) bound what `scale` may ask for, while the trainer's
+  elastic bounds stay `scaling.num_workers` in the training config.
+- Storage: `/shared` in every pod is a `hostPath` volume of `.harness/shared`, the same directory
+  the compose driver bind-mounts, because OrbStack's Kubernetes runs in the VM that already sees
+  the Mac filesystem. The scenario runner reads audit trails and checkpoints exactly as in mode
+  B, and the source tree is mounted over the image copy the same way (edits are live).
+- MinIO: `deploy/k8s/minio.yaml` (a Deployment, a Service `minio:9000`, a PVC that `down` keeps
+  and `nuke` deletes), applied by `up N minio` or `DISTRAINER_MINIO=1`; the harness configs'
+  `endpoint: http://minio:9000` resolves through cluster DNS. The `S3_*` settings (endpoint,
+  region, credentials) come from `.env` with the same defaults as `docker-compose.yml`.
+- Break things: `kill-worker I` force-deletes the I-th worker pod (creation order, 1-based); the
+  operator starts a replacement pod at once, which joins as a new Ray node, so a killed worker
+  always comes back (mode B's `DISTRAINER_RESTART_DELAY=0` has no equivalent). `kill-head`
+  force-deletes the head pod; the operator recreates it and the workers restart into the new
+  head. `stop-worker I` and a `scale` down delete gracefully: KubeRay's `preStop` hook runs
+  `ray stop`, Ray reports that to the trainer as a preemption notice ("received preemption
+  signal" in the driver log), and the pod is killed when `terminationGracePeriodSeconds` (10 s in
+  the manifest, the same notice `docker stop` gives in mode B) runs out. Kubernetes' default of
+  30 s let a scaled-down worker train to the end of a short run without ever dying, which is why
+  the manifest sets it.
+- The driver process: `exec-head` is `kubectl exec` into the head pod, so `train.py` runs on the
+  head node as in mode B. `deploy/k8s/rayjob.yaml` is the Kubernetes-native alternative:
+  `deploy/driver.sh submit [CONFIG]` creates a `RayJob` whose submitter Job runs `ray job submit`
+  against the head's dashboard, and the entrypoint runs on the head node.
+- The image needs `ray[default]`: KubeRay's readiness and liveness probes are HTTP checks against
+  the dashboard agent (port 52365) and `ray job submit` talks to the dashboard, neither of which
+  exists in Ray's minimal install (the dashboard logs "http server disabled" and the pods never
+  become Ready). `pyproject.toml` pins `ray[data,default,train]` for that reason.
+- Reverse DNS: `torch.distributed` looks up the peer's name on every process-group connection.
+  CoreDNS answers PTR queries locally only for pods behind a headless Service and forwards the
+  rest to the resolver outside the cluster; a slow upstream cost 15 s per lookup and stretched
+  the trainer's start-up to about 40 s, which broke the pacing of S11. `raycluster.yaml` therefore
+  adds a headless `distrainer-workers` Service over the worker pods (the head has one from
+  KubeRay) and sets resolver `timeout: 2`, `attempts: 1` on the pods. Docker's embedded DNS
+  answers those lookups itself in mode B, which is why compose never showed it.
+- Every `kubectl` call of the driver names its context (`DISTRAINER_K8S_CONTEXT`, default
+  `orbstack`) and namespace (`DISTRAINER_K8S_NAMESPACE`, default `distrainer`), so `down` and
+  `nuke` never act on whatever context `kubectl` happens to point at; `render MANIFEST` prints
+  what `up` would apply.
+- `endpoint` prints the dashboard at the head pod's IP (the head Service is headless) and
+  MinIO's ClusterIP; OrbStack routes pod and service IPs from the Mac, elsewhere use
+  `kubectl port-forward svc/distrainer-head-svc 8265`.
 
 ## What is the same everywhere
 
