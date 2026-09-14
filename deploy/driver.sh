@@ -9,7 +9,8 @@
 #   wipe-shared            empty the shared mount (simulates losing the shared volume)
 #   scale N                resize the worker set without recreating running containers
 #   exec-head CMD...       run a command inside the head container (the driver runs here)
-#   kill-worker I          SIGKILL worker I (node death; the container restarts as a new node)
+#   kill-worker I          SIGKILL worker I (node death); the container is started again after
+#                          DISTRAINER_RESTART_DELAY seconds (default 5, 0 = stays dead)
 #   stop-worker I          SIGTERM worker I (graceful drain, like a preemption notice)
 #   cp-from-head SRC DST   copy a file or directory out of the head container
 #   shared                 print the host path of the shared storage

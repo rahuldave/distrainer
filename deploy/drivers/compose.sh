@@ -31,8 +31,16 @@ case "$verb" in
   exec-head)
     "${compose[@]}" exec -T head "$@" ;;
   kill-worker)
+    # SIGKILL = node death. Docker treats kill like a manual stop (restart policies do not fire),
+    # so the replacement node is started here after DISTRAINER_RESTART_DELAY seconds (0 = none).
     i="${1:?worker index (1-based)}"
-    docker kill "distrainer-worker-$i" ;;
+    docker kill "distrainer-worker-$i"
+    delay="${DISTRAINER_RESTART_DELAY:-5}"
+    if [ "$delay" != "0" ]; then
+      (sleep "$delay" && docker start "distrainer-worker-$i" >/dev/null) &
+      disown
+      echo "worker $i killed; restarting in ${delay}s as a new Ray node"
+    fi ;;
   stop-worker)
     i="${1:?worker index (1-based)}"
     docker stop "distrainer-worker-$i" ;;

@@ -30,3 +30,4 @@ train:
   rows_per_block: 32
   features: 8
   lr: 0.05
+  step_sleep_s: 0.25       # ~12 s per run: long enough to kill or resize mid-way

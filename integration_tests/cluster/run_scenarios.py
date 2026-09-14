@@ -90,8 +90,12 @@ def wait_for_blocks(run_name: str, count: int, timeout_s: float = 300) -> None:
     raise TimeoutError(f"{run_name}: fewer than {count} blocks consumed after {timeout_s}s")
 
 
-def finish(proc: subprocess.Popen, timeout_s: float = 600) -> str:
+def finish(proc: subprocess.Popen, timeout_s: float = 600, name: str = "train") -> str:
     out, _ = proc.communicate(timeout=timeout_s)
+    logs = ROOT / ".harness" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / f"{name}.log").write_text(out)
+    print(f"driver output: .harness/logs/{name}.log")
     if proc.returncode != 0:
         raise RuntimeError(f"training exited {proc.returncode}:\n{out[-2500:]}")
     return out
@@ -124,7 +128,7 @@ def scenario_s2() -> list[str]:
     proc = start_train(HARNESS_CFG, "run_name=s2")
     wait_for_blocks("s2", 12)  # a few steps into segment 0
     driver("kill-worker", "2")
-    finish(proc)
+    finish(proc, name="s2")
     recs = records_for("s2")
     print(summarize(recs))
     return check_recovery(recs, W, every_k=2, expected_world_sizes=[2, 2])
@@ -138,7 +142,7 @@ def scenario_s3() -> list[str]:
     proc = start_train(HARNESS_CFG, "run_name=s3")
     wait_for_blocks("s3", 12)
     driver("scale", "3")
-    finish(proc)
+    finish(proc, name="s3")
     recs = records_for("s3")
     print(summarize(recs))
     return check_recovery(recs, W, every_k=2, expected_world_sizes=[2, 3])
@@ -152,7 +156,7 @@ def scenario_s4() -> list[str]:
     proc = start_train(HARNESS_CFG, "run_name=s4")
     wait_for_blocks("s4", 12)
     driver("scale", "2")
-    finish(proc)
+    finish(proc, name="s4")
     recs = records_for("s4")
     print(summarize(recs))
     return check_recovery(recs, W, every_k=2, expected_world_sizes=[3, 2])
@@ -247,7 +251,7 @@ def scenario_s9() -> list[str]:
         MINIO_CFG,
         env=env,
     )
-    finish(start_train(MINIO_CFG, "run_name=s9", env=env))
+    finish(start_train(MINIO_CFG, "run_name=s9", env=env), name="s9")
     driver("down", env=env)
     driver("wipe-shared", env=env)
     driver("up", "2", "minio", env=env)
