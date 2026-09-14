@@ -56,7 +56,7 @@ then this file for the rules that are specific to Claude Code sessions.
 - Branches: `gest/<task-id>-summary` for development work,
   `session/<task-id>-summary` for session work. Push with an upstream, open or
   update the PR with `gh`, run `gpa`, report, and ask before merging.
-- GitHub: `rahuldave/distrainer` (private for now), `gh` is authenticated as
+- GitHub: `rahuldave/distrainer` (public, MIT), `gh` is authenticated as
   `rahuldave` over SSH. Commit trailers per the session guidance; no Gest IDs
   in commit messages.
 

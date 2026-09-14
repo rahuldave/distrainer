@@ -22,8 +22,9 @@ static:
 test target="tests":
   uv run python -m pytest {{target}}
 
+# exit code 5 = no tests collected; tolerated until the first regression test exists
 regression:
-  uv run python -m pytest regression_tests
+  uv run python -m pytest regression_tests || [ $? -eq 5 ]
 
 smoke:
   uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml

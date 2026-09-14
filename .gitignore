@@ -42,15 +42,16 @@ dist/
 *.egg-info/
 
 # distrainer runtime outputs (local runs, harness volumes, audit logs)
-runs/
-blocks/
-audit/
+/runs/
+/blocks/
+/audit/
 /tmp/
 *.parquet
 !fixtures/**/*.parquet
 
-# Claude desktop app session outputs
+# Claude desktop app session outputs and per-machine Claude Code settings
 Claude outputs/
+.claude/settings.local.json
 
 # Gest project-local database: local state, not versioned (same policy as sibling repos)
 .gest/

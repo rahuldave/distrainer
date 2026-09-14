@@ -18,7 +18,7 @@ request, it must say why in the final response.
 
 - Project name: `distrainer`
 - Main source directory: `distrainer/`
-- Primary docs/specs: `docs/distrainer-spec.md` (v0.1 rev 2, the contract),
+- Primary docs/specs: `docs/distrainer-spec.md` (v0.1 rev 3, the contract),
   `docs/introduction.md`, `docs/distrainer-design.md`,
   `docs/ray-sub-epoch-training-report.md`
 - Detailed workflow playbook: `docs/gest_codex_workflow.md`
@@ -219,8 +219,9 @@ just lint [path]            # ruff check
 just typecheck              # ty check distrainer
 just static                 # compileall distrainer examples tests
 just test [target]          # pytest (default: tests/)
-just regression             # pytest regression_tests/
-just smoke                  # single-node ray.init(), 2 workers, toy example
+just regression             # pytest regression_tests/ (empty dir tolerated)
+just smoke                  # single-node ray.init(), 2 workers, examples/hello_blocks
+just contrastive            # examples/toy_contrastive (spec section 8), not part of verify
 just verify                 # lint typecheck static test regression smoke diff-check
 just up [N] / just down     # multi-node harness (driver-backed; OrbStack compose today)
 just mkbucket / just blocks / just train CFG

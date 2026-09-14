@@ -140,7 +140,7 @@ examples/
 tests/                 # focused unit tests: log commit/discover, dealer determinism, ledger arithmetic, policy, loader
 regression_tests/      # bug / API regression tests (added as bugs are found)
 integration_tests/
-  cluster/             # scenario runner that drives docker compose and checks audit logs (S1–S11)
+  cluster/             # scenario runner that drives the cluster through deploy/driver.sh verbs and checks audit logs (S1–S11)
 deploy/
   driver.sh            # cluster-driver verb interface (up N, down, exec-head, kill-worker I, scale N, cp-from-head, endpoint)
   drivers/compose.sh   # docker compose on OrbStack (the only implemented driver in v0.1)
@@ -471,10 +471,10 @@ Each worker advertises 1 CPU so `resources_per_worker: {CPU: 1}` maps one Train 
 ```
 up N="2":       deploy/driver.sh up {{N}}          # every harness target goes through the driver verbs
 down:           deploy/driver.sh down
-blocks:        docker compose exec head python examples/toy_contrastive/make_blocks.py --out /shared/blocks
-train CFG:     docker compose exec head python examples/toy_contrastive/train.py --config {{CFG}}
-kill-worker I: docker kill $(docker compose ps -q worker | sed -n '{{I}}p')      # node failure
-scale N:       docker compose up -d --no-recreate --scale worker={{N}}           # elastic up/down
+blocks:        deploy/driver.sh exec-head python examples/toy_contrastive/make_blocks.py --out /shared/blocks
+train CFG:     deploy/driver.sh exec-head python examples/toy_contrastive/train.py --config {{CFG}}
+kill-worker I: deploy/driver.sh kill-worker {{I}}                                  # node failure (docker kill in the compose driver)
+scale N:       deploy/driver.sh scale {{N}}                                        # elastic up/down
 audit RUN:     uv run python integration_tests/cluster/check_audit.py /shared/audit/{{RUN}}         # via docker cp or volume mount
 ```
 
@@ -541,13 +541,13 @@ Native recipe dependencies, not recursive `just` calls; harness targets take pos
 ```just
 export UV_CACHE_DIR := ".local/uv-cache"
 
-setup:            uv sync
+setup:            uv sync --all-groups
 fmt path=".":     uv run ruff format {{path}}
 lint path=".":    uv run ruff check {{path}}
-typecheck:        uv run ty check
-static:           uv run python -m compileall distrainer examples
+typecheck:        uv run ty check distrainer
+static:           uv run python -m compileall -q distrainer examples tests
 test target="tests":  uv run python -m pytest {{target}}
-regression:       uv run python -m pytest regression_tests
+regression:       uv run python -m pytest regression_tests   # exit code 5 (no tests yet) is tolerated
 smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 1 segment
 contrastive:      uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml   # the section 8 toy, not part of verify
 diff-check:       git diff --check
@@ -556,13 +556,13 @@ verify: lint typecheck static test regression smoke diff-check
 # harness (section 9); positional args
 up N="2":       deploy/driver.sh up {{N}}          # every harness target goes through the driver verbs
 down:           deploy/driver.sh down
-mkbucket:         docker compose -f deploy/docker-compose.yml exec minio mc mb -p local/distrainer
-blocks:           docker compose -f deploy/docker-compose.yml exec head python examples/toy_contrastive/make_blocks.py
-train CFG:        docker compose -f deploy/docker-compose.yml exec head python examples/toy_contrastive/train.py --config {{CFG}}
-kill-worker I:    docker kill $(docker compose -f deploy/docker-compose.yml ps -q worker | sed -n '{{I}}p')
-scale N:          docker compose -f deploy/docker-compose.yml up -d --no-recreate --scale worker={{N}}
+mkbucket:         deploy/driver.sh exec-head mc mb -p local/distrainer   # M3: all harness targets are driver verbs
+blocks:           deploy/driver.sh exec-head python examples/toy_contrastive/make_blocks.py
+train CFG:        deploy/driver.sh exec-head python examples/toy_contrastive/train.py --config {{CFG}}
+kill-worker I:    deploy/driver.sh kill-worker {{I}}
+scale N:          deploy/driver.sh scale {{N}}
 integration S="all":  uv run python integration_tests/cluster/run_scenarios.py --scenario {{S}}
-docs:             uv run python tools/check_docs.py
+docs:             @ls docs
 
 # agent context targets from templates/just/agent-contract.just (agent-contract, agent-test-plan, agent-review-plan)
 ```
@@ -577,10 +577,10 @@ docs:             uv run python tools/check_docs.py
 - Branches: `gest/<task-id>-summary` for development work, `session/<task-id>-summary` for session work; ordinary git for simple PRs. GitButler (`but`) only for stacked dependent PRs (e.g. M1 store → planner → ledger as a stack); physical git worktrees for independent parallel slices (e.g. M3 harness vs. M4 hooks). Never parallel write agents in one GitButler workspace.
 - Commit at verified durable checkpoints with `gcm` (each milestone slice, every harness/config/persistence change, every publishable doc change); push with an upstream; open/update the PR and run `gpa`; report findings and ask before merging. No Gest IDs in commit messages.
 - `gpr` decision is mandatory for every depth-1 parent and iteration: promote to a GitHub issue in `rahuldave/distrainer` (store `github.issue`/`github.url`) or record why not.
-- At every durable checkpoint regenerate the Gest graphs with `tools/gest_mermaid_graph.py` (overall + latest iteration) and report graph paths, commit hash, push status, review status, and the issue decision.
+- At every durable checkpoint show the built-in Gest graph (`gest iteration graph <iteration>`) and report commit hash, push status, review status, and the issue decision. No Mermaid graph files are generated (the `tools/gest_mermaid_graph.py` step from the skills bundle does not apply here).
 - Agentic Just targets, `AGENT_TASK v1` / `AGENT_RESULT v1` / `AGENT_TASK_DRAFT v1` packets follow the bundle's protocol rules; `gor` runs phased iterations and decides per phase between sequential work and parallel worktrees/subagents.
 
-Acceptance for M0: `just verify` green on an empty skeleton, `AGENTS.md` filled, Gest DB (`.gest/gest.db`) containing the spec artifact, outline parent, and M1 leaf tasks, and the first `gpr` decision recorded.
+Acceptance for M0: `just lint`, `just typecheck`, `just static`, `just test`, `just regression` (empty, exit tolerated) and `git diff --check` green on the skeleton (`just smoke`, and therefore `just verify`, becomes green with M2's `hello_blocks`), `AGENTS.md` and `CLAUDE.md` filled, the local Gest DB containing the spec artifact, the outline root, milestone parents M0–M5 with their GitHub issues, and iterations with leaf tasks.
 
 ## 15. Decisions recorded at M0 (rev 3, September 13, 2026)
 
