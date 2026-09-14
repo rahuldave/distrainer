@@ -45,6 +45,10 @@ if [ -z "${DISTRAINER_UNCLOUD_WORKER_MACHINES:-}" ]; then   # every machine but 
 fi
 export DISTRAINER_UNCLOUD_WORKER_MACHINES
 ssh_template="${DISTRAINER_UNCLOUD_SSH:-%s@orb}"
+case "$ssh_template" in
+  *%s*) ;;
+  *) echo "DISTRAINER_UNCLOUD_SSH must contain %s for the machine name (got '$ssh_template')" >&2; exit 2 ;;
+esac
 if [ -z "${DISTRAINER_UNCLOUD_HOST_PREFIX:-}" ]; then
   # published ports (dashboard, MinIO) bind only to the head machine's addresses inside this
   # prefix: OrbStack's machine network here (OrbStack forwards machine ports to the LAN
@@ -105,7 +109,7 @@ remove_duplicates() {   # a name registered twice breaks deploy and scale: remov
   for dup in $names; do
     echo "up: service '$dup' is registered more than once; removing every copy before deploying" >&2
     while read -r id name; do
-      [ "$name" = "$dup" ] && uc rm "$id"
+      if [ "$name" = "$dup" ]; then uc rm "$id"; fi   # not `&&`: the loop's status is its last test
     done <<< "$present"
   done
 }

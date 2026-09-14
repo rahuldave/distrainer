@@ -127,7 +127,7 @@ of the log commit protocol, and head loss. It is the exit gate for v0.1.
 uncloud is the same shape at machine scale: a set of Docker hosts joined by a WireGuard mesh with
 cluster DNS, driven by a Compose-compatible file (`uc deploy`, `uc scale`, `uc exec`).
 `deploy/drivers/uncloud.sh` implements the driver verbs on the `uc` CLI, so every harness target
-and every cluster scenario runs with `DISTRAINER_DRIVER=uncloud`; `deploy/uncloud/compose.yml` is
+and every bucket scenario runs with `DISTRAINER_DRIVER=uncloud`; `deploy/uncloud/compose.yml` is
 the cluster (the same node image, scripts and Ray environment as mode B's compose file, pinned
 against it by `tests/test_deploy_manifests.py`), and `deploy/uncloud/machines.sh` builds the
 machines on the Mac. The one hard difference from every other mode: no volume spans machines, so

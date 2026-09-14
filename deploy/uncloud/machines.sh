@@ -158,7 +158,7 @@ case "$verb" in
     for m in "${machines[@]}"; do
       if ! orb_has "$m"; then continue; fi
       if owned_has "$m"; then
-        orb delete -f "$m" && sed -i.bak "/^$m\$/d" "$owned" && rm -f "$owned.bak"
+        orb delete -f "$m" && { grep -vx "$m" "$owned" > "$owned.tmp" || true; } && mv "$owned.tmp" "$owned"
       else
         echo "$m was not created by this script (not in $owned); left in place" >&2
       fi
