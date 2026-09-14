@@ -33,7 +33,7 @@ def test_mine_rows_positive_same_cluster_negatives_from_near_clusters():
     for i in range(96):
         assert cluster[pos[i]] == cluster[i]
         for j in range(3):
-            assert cluster[negs[i, j]] in near[cluster[i]] or cluster[negs[i, j]] != cluster[i]
+            assert cluster[negs[i, j]] == near[cluster[i]][j]
 
 
 def test_info_nce_prefers_the_positive():

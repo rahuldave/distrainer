@@ -80,6 +80,13 @@ def make_blocks(cfg: DistrainerConfig) -> list[BlockRef]:
     batch_id[order] = np.arange(N) // B  # B random anchors per block
 
     fs, root = cfg.store_fs()
+    existing = BlockLog(fs, root)
+    if existing.exists():
+        seen: dict[str, BlockRef] = {}
+        for seg in existing.segments():
+            for b in seg.blocks:
+                seen.setdefault(b.block_id, b)
+        return [seen[k] for k in sorted(seen)]
     log = BlockLog.create(fs, root, W=cfg.log.W, seed=cfg.seed)
     rows = {
         "item_id": np.arange(N),
@@ -94,12 +101,18 @@ def make_blocks(cfg: DistrainerConfig) -> list[BlockRef]:
     def write_group(group: pa.Table) -> pa.Table:
         bid = int(group.column("batch_id")[0].as_py())
         ref = write_block(fs, root, f"b{bid:05d}", group, meta={"anchors": group.num_rows})
-        return pa.table({"block_id": [ref.block_id], "num_rows": [ref.num_rows]})
+        return pa.table(
+            {"block_id": [ref.block_id], "locator": [ref.locator], "num_rows": [ref.num_rows]}
+        )
 
-    written = ds.groupby("batch_id").map_groups(write_group, batch_format="pyarrow").to_arrow_refs()
-    tables = [ray.get(r) for r in written]
-    ids = sorted(bid for tbl in tables for bid in tbl.column("block_id").to_pylist())
-    refs = [BlockRef(bid, f"blocks/{bid}.parquet", B, {"anchors": B}) for bid in ids]
+    rows_out = ds.groupby("batch_id").map_groups(write_group, batch_format="pyarrow").take_all()
+    refs = sorted(
+        (
+            BlockRef(r["block_id"], r["locator"], int(r["num_rows"]), {"anchors": B})
+            for r in rows_out
+        ),
+        key=lambda ref: ref.block_id,
+    )
     BatchWriter(log, refs, passes=cfg.log.passes, tail="error").run()
     return refs
 
@@ -111,9 +124,8 @@ def main() -> None:
     init_ray(cfg)
     refs = make_blocks(cfg)
     fs, root = cfg.store_fs()
-    print(
-        f"wrote {len(refs)} blocks, {BlockLog.open(fs, root).last_seq() + 1} segments under {root}"
-    )
+    n_seg = len(BlockLog.open(fs, root).committed_seqs())
+    print(f"{len(refs)} blocks, {n_seg} segments under {root}")
 
 
 if __name__ == "__main__":

@@ -30,7 +30,10 @@ def info_nce(
 ) -> torch.Tensor:
     """``anchor [B, e]``, ``positive [B, e]``, ``negatives [B, k, e]``: cross-entropy of the
     positive against the k hard negatives plus the other anchors' positives in the batch."""
-    if all_gather and torch.distributed.is_available() and torch.distributed.is_initialized():
+    gathered_pool = (
+        all_gather and torch.distributed.is_available() and torch.distributed.is_initialized()
+    )
+    if gathered_pool:
         world = torch.distributed.get_world_size()
         gathered = [torch.zeros_like(positive) for _ in range(world)]
         torch.distributed.all_gather(gathered, positive.detach())
@@ -46,7 +49,7 @@ def info_nce(
     # the positive column is index 0; own positive also appears in pool_sim, mask it out
     own = torch.arange(anchor.shape[0], device=anchor.device)
     offset = 1 + negatives.shape[1]
-    if all_gather and torch.distributed.is_initialized():
+    if gathered_pool:
         own = own + torch.distributed.get_rank() * anchor.shape[0]
     logits[torch.arange(anchor.shape[0]), offset + own] = float("-inf")
     target = torch.zeros(anchor.shape[0], dtype=torch.long, device=anchor.device)

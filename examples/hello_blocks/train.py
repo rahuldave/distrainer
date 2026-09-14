@@ -12,6 +12,7 @@ import shutil
 import sys
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import torch
 
@@ -22,7 +23,12 @@ from distrainer.config import DistrainerConfig, load_config  # noqa: E402
 from distrainer.log import BlockLog  # noqa: E402
 from distrainer.trainer import CheckpointIO, DistTrainer, TrainInfo, init_ray  # noqa: E402
 from examples.hello_blocks.make_blocks import feature_columns, make_blocks  # noqa: E402
-from integration_tests.cluster.check_audit import check_s1, summarize  # noqa: E402
+from integration_tests.cluster.check_audit import (  # noqa: E402
+    check_report_count,
+    check_s1,
+    expected_reports,
+    summarize,
+)
 
 
 def build_model(info: TrainInfo) -> tuple[torch.nn.Module, torch.optim.Optimizer]:
@@ -36,7 +42,9 @@ def train_step(
     model: torch.nn.Module, optimizer: torch.optim.Optimizer, table: pa.Table, info: TrainInfo
 ) -> dict[str, float]:
     d = int(info.train.get("features", 8))
-    x = torch.from_numpy(table.select(feature_columns(d)).to_pandas().to_numpy(dtype="float32"))
+    x = torch.from_numpy(
+        np.column_stack([table.column(c).to_numpy() for c in feature_columns(d)]).astype("float32")
+    )
     y = torch.from_numpy(table.column("y").to_numpy().astype("float32")).unsqueeze(1)
     optimizer.zero_grad()
     loss = torch.nn.functional.mse_loss(model(x), y)
@@ -57,7 +65,9 @@ def ensure_blocks(cfg: DistrainerConfig) -> None:
 
 
 def reset_run(cfg: DistrainerConfig) -> None:
-    """A fresh run: previous run dir and audit trail of this run_name are removed."""
+    """A fresh run: previous run dir and audit trail of this run_name are removed (local only)."""
+    if cfg.storage.kind != "local":
+        return
     _, runs_root = cfg.runs_fs()
     _, store_root = cfg.store_fs()
     shutil.rmtree(Path(runs_root) / cfg.run_name, ignore_errors=True)
@@ -95,6 +105,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     W = BlockLog.open(fs, store_root).W
     problems = check_s1(records, W)
+    n_reports = len(result.metrics_dataframe) if result.metrics_dataframe is not None else 0
+    expected = expected_reports(len(records) // W, W, cfg.scaling.max_workers, cfg.checkpoint)
+    problems += check_report_count(n_reports, expected)
+    print(f"reports per rank: {n_reports} (expected {expected})")
     for p in problems:
         print("S1 FAIL:", p)
     print("S1 PASS" if not problems else f"S1: {len(problems)} problem(s)")

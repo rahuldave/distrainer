@@ -12,7 +12,7 @@ def test_checkpoint_roundtrip_and_metadata(tmp_path):
     ledger = Ledger(segment=2, cursor=3, world_size=3, pass_idx=1, run_attempt=1)
     io = CheckpointIO(scratch_dir=str(tmp_path / "scratch"), run_name="t")
     ckpt = io.save(model, opt, ledger, extra={"note": "x"})
-    assert checkpoint_dir_name(ledger) == "checkpoint_g000002_s0003"
+    assert checkpoint_dir_name(ledger) == "checkpoint_g000002_p000009_n03_a01"
     assert CheckpointIO.read_ledger(ckpt) == ledger
     assert ckpt.get_metadata()["note"] == "x"
     fresh = torch.nn.Linear(3, 1)

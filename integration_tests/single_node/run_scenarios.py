@@ -73,11 +73,14 @@ def scenario_s5() -> list[str]:
 
 
 def scenario_s7() -> list[str]:
-    cfg = load_config(str(CONFIG), ["run_name=s7a"])
+    """Two stores built from the same seed, two runs: identical per-rank audit sequences."""
+    cfg_a = load_config(str(CONFIG), ["run_name=s7a"])
+    cfg_b = load_config(str(CONFIG), ["run_name=s7b", "store_root=blocks/hello_s7b"])
     run_hello("s7a")
-    run_hello("s7b")
-    fs, root = cfg.store_fs()
-    return check_s7(read_audit(fs, root, "s7a"), read_audit(fs, root, "s7b"))
+    run_hello("s7b", "store_root=blocks/hello_s7b")
+    fs_a, root_a = cfg_a.store_fs()
+    fs_b, root_b = cfg_b.store_fs()
+    return check_s7(read_audit(fs_a, root_a, "s7a"), read_audit(fs_b, root_b, "s7b"))
 
 
 SCENARIOS = {"S1": scenario_s1, "S5": scenario_s5, "S7": scenario_s7}

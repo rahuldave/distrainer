@@ -14,25 +14,19 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import os
 import sys
 from collections.abc import Sequence
 from typing import Any
 
 from distrainer.config import load_config
 from distrainer.log import BlockLog
-from distrainer.storage import resolve
-
-
-def _s3_options() -> dict[str, Any]:
-    endpoint = os.environ.get("S3_ENDPOINT")
-    return {"endpoint": endpoint, "region": os.environ.get("S3_REGION", "auto")} if endpoint else {}
+from distrainer.storage import resolve, s3_options_from_env
 
 
 def _checkpoint(uri: str) -> Any:
     from ray.train import Checkpoint
 
-    fs, path = resolve(uri, create=False, **_s3_options())
+    fs, path = resolve(uri, create=False, **s3_options_from_env())
     return Checkpoint(path=path, filesystem=fs)
 
 
@@ -62,8 +56,8 @@ def cmd_resume(args: argparse.Namespace) -> int:
     from distrainer.trainer import DistTrainer, init_ray
 
     cfg = load_config(args.config)
-    if args.run_name:
-        cfg.run_name = args.run_name
+    # a *new* run: reusing the old name would make Train v2 restore that run's own state
+    cfg.run_name = args.run_name or f"{cfg.run_name}_resume"
     if args.seed is not None:
         cfg.seed = args.seed
     mod_name, _, fn_name = args.entry.partition(":")
@@ -79,7 +73,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
 
 
 def cmd_log_ls(args: argparse.Namespace) -> int:
-    fs, root = resolve(args.store, create=False, **_s3_options())
+    fs, root = resolve(args.store, create=False, **s3_options_from_env())
     log = BlockLog(fs, root)
     if not log.exists():
         print(f"no block log under {args.store}")
@@ -102,7 +96,7 @@ def cmd_log_ls(args: argparse.Namespace) -> int:
 
 
 def cmd_gc(args: argparse.Namespace) -> int:
-    fs, root = resolve(args.store, create=False, **_s3_options())
+    fs, root = resolve(args.store, create=False, **s3_options_from_env())
     log = BlockLog.open(fs, root)
     deleted = log.gc(args.keep_from, delete_blocks=not args.keep_blocks)
     print(f"deleted segments: {deleted}")

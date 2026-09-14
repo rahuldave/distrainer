@@ -29,6 +29,13 @@ def make_blocks(cfg: DistrainerConfig) -> list[BlockRef]:
     rows = int(t.get("rows_per_block", 32))
     d = int(t.get("features", 8))
     fs, root = cfg.store_fs()
+    existing = BlockLog(fs, root)
+    if existing.exists():
+        seen: dict[str, BlockRef] = {}
+        for seg in existing.segments():
+            for b in seg.blocks:
+                seen.setdefault(b.block_id, b)
+        return [seen[k] for k in sorted(seen)]
     log = BlockLog.create(fs, root, W=cfg.log.W, seed=cfg.seed)
     rng = np.random.default_rng(cfg.seed)
     w_true = rng.normal(size=d)
@@ -50,7 +57,7 @@ def main() -> None:
     refs = make_blocks(cfg)
     fs, root = cfg.store_fs()
     log = BlockLog.open(fs, root)
-    print(f"wrote {len(refs)} blocks and {log.last_seq() + 1} segments under {root}")
+    print(f"{len(refs)} blocks and {len(log.committed_seqs())} segments under {root}")
 
 
 if __name__ == "__main__":

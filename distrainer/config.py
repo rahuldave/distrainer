@@ -141,6 +141,7 @@ class DistrainerConfig:
             # Ray Train workers do not share the driver's working directory
             self.storage_path = os.path.abspath(os.path.expanduser(self.storage_path))
             self.store_root = os.path.abspath(os.path.expanduser(self.store_root))
+        self.storage = replace(self.storage, path=self.storage_path)
 
     def asdict(self) -> dict[str, Any]:
         """Plain dict (YAML-safe: ``num_workers`` becomes a list, ``storage.path`` is dropped)."""

@@ -9,9 +9,10 @@ import argparse
 import json
 from collections import defaultdict
 from collections.abc import Sequence
+from typing import Any
 
 from distrainer.audit import AuditRecord, read_audit
-from distrainer.storage import join, list_names, read_bytes, resolve
+from distrainer.storage import join, list_names, read_bytes, resolve, s3_options_from_env
 
 
 def by_attempt(records: Sequence[AuditRecord]) -> dict[int, list[AuditRecord]]:
@@ -105,7 +106,7 @@ def check_s7(a: Sequence[AuditRecord], b: Sequence[AuditRecord]) -> list[str]:
 
 def checkpoint_ledgers(run_uri: str) -> dict[str, dict]:
     """``{checkpoint dir name: ledger dict}`` from each checkpoint's ``.metadata.json``."""
-    fs, run_dir = resolve(run_uri, create=False)
+    fs, run_dir = resolve(run_uri, create=False, **s3_options_from_env())
     out: dict[str, dict] = {}
     selector_names = list_names(fs, run_dir)
     # checkpoints are directories, so list the run dir with a selector instead
@@ -138,7 +139,11 @@ def check_s5(run_uri: str, W: int, every_k: int | None, expected_count: int | No
         ok = at_end or (every_k is not None and cursor % every_k == 0)
         if not ok:
             problems.append(f"{name}: cursor {cursor} is neither a multiple of {every_k} nor W/n")
-        if name != f"checkpoint_g{int(led['segment']):06d}_s{cursor:04d}":
+        expected_name = (
+            f"checkpoint_g{int(led['segment']):06d}_p{cursor * n:06d}"
+            f"_n{n:02d}_a{int(led.get('run_attempt', 0)):02d}"
+        )
+        if name != expected_name:
             problems.append(f"{name}: directory name does not match ledger {led}")
     if expected_count is not None and len(ledgers) != expected_count:
         problems.append(f"expected {expected_count} checkpoints, found {len(ledgers)}")
@@ -159,6 +164,23 @@ def expected_checkpoints(
     return n_segments * per_segment
 
 
+def expected_reports(n_segments: int, W: int, n: int, checkpoint_cfg: Any) -> int:
+    """``ray.train.report`` calls per rank for a completed run with the default cadence: one per
+    checkpoint plus a final metrics-only report when the last step is not a checkpoint."""
+    every_k = checkpoint_cfg.every_k if checkpoint_cfg.policy in ("any", "every_k") else None
+    segment_end = checkpoint_cfg.policy in ("any", "segment_end", "pass_end")
+    if checkpoint_cfg.report_every_step:
+        return n_segments * (W // n)
+    count = expected_checkpoints(n_segments, W, n, every_k, segment_end)
+    steps = W // n
+    last_is_checkpoint = segment_end or (every_k is not None and steps % every_k == 0)
+    return count + (0 if last_is_checkpoint else 1)
+
+
+def check_report_count(n_reports: int, expected: int) -> list[str]:
+    return [] if n_reports == expected else [f"expected {expected} reports, Result has {n_reports}"]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--store-root", required=True)
@@ -170,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--expected-checkpoints", type=int, default=None)
     ap.add_argument("--other-run-name", default=None, help="S7: run to compare against")
     args = ap.parse_args(argv)
-    fs, root = resolve(args.store_root, create=False)
+    fs, root = resolve(args.store_root, create=False, **s3_options_from_env())
     records = read_audit(fs, root, args.run_name)
     print(summarize(records))
     if args.scenario == "S1":

@@ -105,7 +105,7 @@ flowchart TB
 
 **Resume rule** — read segment `segment` from the log, skip `cursor * world_size_old` positions, re-deal the rest (and all later segments) over the current `n` with the assignment rule. Positions between the last checkpoint and the failure are replayed; the window is bounded by the checkpoint cadence. Requires retention: a segment and its blocks may only be deleted once a checkpoint with a later `segment` exists (plus a configurable margin of segments).
 
-**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<store_root>/audit/<run_name>/<attempt>-<rank>.jsonl` (on object stores the file is split into `<attempt>-<rank>.<part>.jsonl` parts). Records are ordered by file order within a rank, never by `ts`. This is what the verification harness reads.
+**Audit trail** — every consumed block is appended as `{"attempt", "rank", "world_size", "segment", "step", "position", "block_id", "ts"}` to `<store_root>/audit/<run_name>/<attempt>-<rank>.jsonl`; `attempt` is one more than the highest attempt already on disk (rank 0 decides, broadcast), so every restart, even from the same checkpoint, has its own files (on object stores the file is split into `<attempt>-<rank>.<part>.jsonl` parts). Records are ordered by file order within a rank, never by `ts`. This is what the verification harness reads.
 
 ## 3. Package layout
 
@@ -341,7 +341,7 @@ Head container role: it hosts the Ray head, the Train controller, the driver (`t
 ```
 <storage_path>/<run_name>/
   checkpoint_manager_snapshot.json         # Train's own bookkeeping (controller restarts)
-  checkpoint_g{segment:06d}_s{cursor:04d}/  # checkpoint_dir_name set by distrainer
+  checkpoint_g{segment:06d}_p{positions:06d}_n{world_size:02d}_a{attempt:02d}/  # checkpoint_dir_name set by distrainer; positions = cursor*world_size, unique across resizes and attempts
     model.pt                               # state_dict (rank 0) or model_rank{r}.pt shards
     optimizer.pt
     ledger.json                            # {"segment","cursor","world_size","pass_idx","run_attempt"}
@@ -376,12 +376,12 @@ Worker-local scratch (`/tmp/distrainer`) is the only non-shared location; nothin
 Three entry points, all built on `ray.train.Checkpoint(path, filesystem)`:
 
 1. **Automatic** — worker failure, preemption, or elastic resize: Train restarts the worker group and `ray.train.get_checkpoint()` returns the latest reported checkpoint; `train_func` loads the ledger and resumes at `cursor * world_size_old` (section 5).
-2. **Explicit, from a run** — `Result.from_path("<storage_path>/<run_name>", storage_filesystem=fs)` restores the `Result` (latest and best checkpoints, metrics); `DistTrainer(..., resume_from_checkpoint=result.checkpoint)` starts a *new* run from it. This is the path for driver/head loss and for "continue training tomorrow".
+2. **Explicit, from a run** — `Result.from_path("<storage_path>/<run_name>", storage_filesystem=fs)` restores the `Result` (latest and best checkpoints, metrics); `DistTrainer(..., resume_from_checkpoint=result.checkpoint)` starts a *new* run (new `run_name`) from it. Ray Train v2 deprecated `TorchTrainer(resume_from_checkpoint=)`, so distrainer carries the checkpoint in the train loop config and loads it when `ray.train.get_checkpoint()` is empty. This is the path for driver/head loss and for "continue training tomorrow".
 3. **Explicit, from a URI** — `Checkpoint("s3://bucket/distrainer/runs/toy/checkpoint_e0_c3_s16", filesystem=fs)` (or a local path) → `resume_from_checkpoint=`. Works across runs, clusters, and world sizes because the ledger carries `world_size`.
 
 CLI: `distrainer inspect <uri>` prints the ledger from `.metadata.json` without downloading weights; `distrainer resume <uri> --config cfg.yaml --entry pkg.module:function [--run-name] [--seed]` starts a new run from it (the entry function returns the user's `(train_step, build_model)` for the config); `distrainer export <uri> <local_dir>` = `to_directory`; `distrainer log-ls <store> [-v]` and `distrainer gc <store> --keep-from N` inspect and prune a block log. Example scripts accept `--set key.path=value` overrides so scenarios reuse one YAML. Reconstitution of the data position needs only the ledger plus the log (segment files are immutable, so `segment` + `cursor` + `world_size` identify the exact position), so no per-rank state is ever required.
 
-Verification scenario **S9 — cold restore**: run S1 to completion against MinIO, `down -v` the cluster (destroying the shared volume), `up`, then `distrainer resume s3://…/checkpoint_g000003_s0016` for one more segment and assert the audit positions continue from `cursor * world_size`. **S10 — head loss**: `docker kill head` mid-run, `up` again, `Result.from_path` + resume; same assertion. (S11, streaming producer, is defined in section 10.)
+Verification scenario **S9 — cold restore**: run S1 to completion against MinIO, `down -v` the cluster (destroying the shared volume), `up`, then `distrainer resume s3://…/checkpoint_g000003_p000016_n02_a00` for one more segment and assert the audit positions continue from `cursor * world_size`. **S10 — head loss**: `docker kill head` mid-run, `up` again, `Result.from_path` + resume; same assertion. (S11, streaming producer, is defined in section 10.)
 
 ## 7. Configuration
 

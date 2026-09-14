@@ -71,7 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config, overrides=args.set)
     _, runs_root = cfg.runs_fs()
     fs, store_root = cfg.store_fs()
-    if not args.keep:
+    if not args.keep and cfg.storage.kind == "local":
         shutil.rmtree(Path(runs_root) / cfg.run_name, ignore_errors=True)
         shutil.rmtree(Path(store_root) / "audit" / cfg.run_name, ignore_errors=True)
     init_ray(cfg)

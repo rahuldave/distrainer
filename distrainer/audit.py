@@ -66,6 +66,20 @@ def audit_filename(attempt: int, rank: int, part: int | None = None) -> str:
     return f"{attempt}-{rank}.jsonl" if part is None else f"{attempt}-{rank}.{part}.jsonl"
 
 
+def next_attempt(fs: pafs.FileSystem, root: str, run_name: str) -> int:
+    """One more than the highest attempt id already recorded for ``run_name`` (0 for a new run).
+
+    Rank 0 calls this and broadcasts the result so every restart of the worker group, even from
+    the same checkpoint, gets its own audit files.
+    """
+    attempts = [
+        int(m.group(1))
+        for n in list_names(fs, audit_dir(root, run_name))
+        if (m := _FILE_RE.match(n))
+    ]
+    return max(attempts) + 1 if attempts else 0
+
+
 class AuditWriter:
     def __init__(
         self,

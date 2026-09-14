@@ -12,6 +12,7 @@ fmt path=".":
 
 lint path=".":
   uv run ruff check {{path}}
+  uv run ruff format --check {{path}}
 
 typecheck:
   uv run ty check distrainer

@@ -22,7 +22,7 @@ import pyarrow as pa
 import torch
 
 from distrainer import __version__
-from distrainer.audit import AuditWriter
+from distrainer.audit import AuditWriter, next_attempt
 from distrainer.config import DistrainerConfig
 from distrainer.hooks import SegmentHook
 from distrainer.ledger import Ledger
@@ -36,13 +36,17 @@ from distrainer.policy import CheckpointPolicy, StepContext, build_policy, notif
 
 @dataclass(frozen=True)
 class TrainInfo:
-    """What ``build_model`` and ``train_step`` get to know about the run."""
+    """What ``build_model`` and ``train_step`` get to know about the run.
+
+    ``device`` is Ray Train's device for this worker (CPU here, the GPU with ``use_gpu``). Per-step
+    fields are zero in ``build_model``; ``step_in_segment`` counts the steps completed *before*
+    this one (``StepContext.step_in_segment`` seen by policies counts this one as done).
+    """
 
     rank: int
     world_size: int
     config: DistrainerConfig
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
-    # per step (zero in build_model):
     position: int = 0
     segment: int = 0
     step_in_segment: int = 0
@@ -123,7 +127,12 @@ class MetricAggregator:
 
 
 def checkpoint_dir_name(ledger: Ledger) -> str:
-    return f"checkpoint_g{ledger.segment:06d}_s{ledger.cursor:04d}"
+    """Unique per data position, world size and attempt: ``cursor`` alone is ambiguous across
+    resizes (cursor 2 at n=4 is 8 positions, at n=2 it is 4) and Ray trims checkpoints by path."""
+    return (
+        f"checkpoint_g{ledger.segment:06d}_p{ledger.done_positions():06d}"
+        f"_n{ledger.world_size:02d}_a{ledger.run_attempt:02d}"
+    )
 
 
 class CheckpointIO:
@@ -191,6 +200,18 @@ class CheckpointIO:
     def cleanup(self) -> None:
         shutil.rmtree(self.scratch_dir, ignore_errors=True)
 
+    def cleanup_uploaded(self) -> None:
+        """Remove the directories Ray already emptied after upload; leave in-flight ones."""
+        try:
+            for name in os.listdir(self.scratch_dir):
+                path = os.path.join(self.scratch_dir, name)
+                if os.path.isdir(path) and not os.listdir(path):
+                    os.rmdir(path)
+            if not os.listdir(self.scratch_dir):
+                os.rmdir(self.scratch_dir)
+        except OSError:
+            pass
+
 
 # ---- the per-rank loop ----
 
@@ -214,7 +235,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     import ray.train
     import ray.train.torch
     from ray.train import CheckpointUploadMode
-    from ray.train.collective import barrier
+    from ray.train.collective import barrier, broadcast_from_rank_zero
 
     cfg = DistrainerConfig.from_dict(loop_config["config"])
     build_model: BuildModel = loop_config["build_model"]
@@ -235,17 +256,22 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     log = BlockLog.open(fs, store_root)
     W = log.W
     steps = steps_per_segment(W, n)  # raises if W % n != 0
+    device = ray.train.torch.get_device()
 
-    info = TrainInfo(rank=rank, world_size=n, config=cfg)
+    info = TrainInfo(rank=rank, world_size=n, config=cfg, device=device)
     model, optimizer = build_model(info)
     model = ray.train.torch.prepare_model(model)
 
+    # every restart of the worker group gets its own attempt id, even from the same checkpoint
+    attempt = int(
+        broadcast_from_rank_zero(next_attempt(fs, store_root, cfg.run_name) if rank == 0 else None)
+    )
     ledger = Ledger(world_size=n)
-    checkpoint = ray.train.get_checkpoint()
+    # Ray hands back the latest reported checkpoint after a failure or resize; a brand-new run
+    # may start from an explicit checkpoint instead (Train v2 deprecated resume_from_checkpoint)
+    checkpoint = ray.train.get_checkpoint() or loop_config.get("initial_checkpoint")
     if checkpoint is not None:
         ledger = CheckpointIO.load(checkpoint, model, optimizer)
-        ledger.run_attempt += 1
-    attempt = ledger.run_attempt
     seq, start_step = resume_start(ledger, n, W=W)
     ledger = Ledger(
         segment=seq, cursor=start_step, world_size=n, pass_idx=ledger.pass_idx, run_attempt=attempt
@@ -272,6 +298,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
                 rank=rank,
                 world_size=n,
                 config=cfg,
+                device=device,
                 position=position,
                 segment=segment.seq,
                 step_in_segment=ledger.cursor,
@@ -317,6 +344,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
                     checkpoint_upload_mode=upload_mode,
                     delete_local_checkpoint_after_upload=True,
                 )
+                audit.flush()  # object-store audit buffers survive a SIGKILL up to here
                 reported_last = True
             elif cfg.checkpoint.report_every_step:
                 ray.train.report(agg.flush(metrics))
@@ -333,6 +361,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     finally:
         loader.close()
         audit.close()
+        io.cleanup_uploaded()
 
 
 # ---- the driver-side wrapper ----
@@ -398,6 +427,7 @@ class DistTrainer:
             "train_step": self.train_step,
             "policy": self.policy,
             "hooks": self.hooks,
+            "initial_checkpoint": self.resume_from_checkpoint,
         }
 
     def trainer(self) -> Any:
@@ -408,7 +438,6 @@ class DistTrainer:
             train_loop_config=self.loop_config(),
             scaling_config=self.scaling_config(),
             run_config=self.run_config(),
-            resume_from_checkpoint=self.resume_from_checkpoint,
         )
 
     def fit(self) -> Any:
