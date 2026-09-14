@@ -133,11 +133,13 @@ head container against MinIO).
 | `just up [N]`, `just up-minio [N]`, `just down`, `just nuke` | head + N worker containers (+ MinIO); stop; stop and remove volumes and the shared mount |
 | `just mkbucket` | create the `distrainer` bucket on MinIO |
 | `just blocks [CFG]`, `just train [CFG]` | `make_blocks.py` / `train.py` of hello_blocks inside the head container |
-| `just kill-worker I`, `just scale N` | SIGKILL worker `I` (restarted after `DISTRAINER_RESTART_DELAY` s); resize the worker set |
+| `just kill-worker I`, `just scale N` | kill worker `I` (compose: restarted after `DISTRAINER_RESTART_DELAY` s; kuberay: replaced by the operator at once); resize the worker set |
 | `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just kuberay-operator` | install the KubeRay operator into the current Kubernetes context (once; `DISTRAINER_DRIVER=kuberay` for the targets above) |
 | `just docs` | list the docs |
 
 `DISTRAINER_DRIVER` selects the harness driver (`compose`, the default, or `kuberay` for pods on
-OrbStack's Kubernetes), `DISTRAINER_MINIO=1` adds MinIO, `DISTRAINER_SHARED` moves the shared mount. The driver verbs behind these targets
+OrbStack's Kubernetes), `DISTRAINER_MINIO=1` adds MinIO, `DISTRAINER_SHARED` moves the shared mount,
+`DISTRAINER_IMAGE` names the image tag (both drivers), `DISTRAINER_K8S_CONTEXT` and
+`DISTRAINER_K8S_NAMESPACE` pin where the KubeRay driver acts (`orbstack`, `distrainer`). The driver verbs behind these targets
 are documented at the top of `deploy/driver.sh`.

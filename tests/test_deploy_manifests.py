@@ -123,3 +123,25 @@ def test_worker_pods_get_reverse_dns_records_from_a_headless_service():
         "ray.io/cluster": cluster["metadata"]["name"],
         "ray.io/node-type": "worker",
     }
+
+
+def test_compose_and_kuberay_describe_the_same_cluster():
+    """The two drivers must not drift apart: the S3 defaults, the image tag and the shape of a
+    Ray node (CPUs, object store) are declared twice, once per driver."""
+    compose = (ROOT / "deploy" / "docker-compose.yml").read_text()
+    defaults: dict[str, str] = {}
+    for key, value in re.findall(r"\$\{(S3_[A-Z_]+):-([^}]*)\}", compose):
+        assert defaults.setdefault(key, value) == value, f"{key} has two defaults in compose"
+    assert {k: defaults[k] for k in S3_DEFAULTS} == S3_DEFAULTS
+    (image,) = set(re.findall(r"\$\{DISTRAINER_IMAGE:-([^}]*)\}", compose))
+    assert f"DISTRAINER_IMAGE:-{image}" in DRIVER.read_text()
+    head_sh = (ROOT / "deploy" / "ray-head.sh").read_text()
+    worker_sh = (ROOT / "deploy" / "ray-worker.sh").read_text()
+    cluster = raycluster()
+    head = cluster["spec"]["headGroupSpec"]["rayStartParams"]
+    (group,) = cluster["spec"]["workerGroupSpecs"]
+    assert head["num-cpus"] == re.search(r"HEAD_CPUS:-(\d+)", head_sh).group(1)
+    assert group["rayStartParams"]["num-cpus"] == re.search(r"--num-cpus=(\d+)", worker_sh).group(1)
+    store = re.search(r"OBJECT_STORE_BYTES:-(\d+)", head_sh).group(1)
+    assert head["object-store-memory"] == store
+    assert group["rayStartParams"]["object-store-memory"] == store

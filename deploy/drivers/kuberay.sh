@@ -15,16 +15,20 @@
 #     to the trainer) and the pod is killed after terminationGracePeriodSeconds (10 s, as
 #     `docker stop`); the operator replaces a stopped worker as well.
 #   - `operator` installs the KubeRay operator once (kustomize through kubectl; no Helm needed);
-#     `submit [CONFIG]` applies deploy/k8s/rayjob.yaml.
+#     `submit [CONFIG]` applies deploy/k8s/rayjob.yaml; `render MANIFEST` prints what `up` applies.
+#   - every kubectl call names its context (DISTRAINER_K8S_CONTEXT, default orbstack) and namespace
+#     (DISTRAINER_K8S_NAMESPACE, default distrainer): down and nuke delete things.
 # Worker index I (kill-worker, stop-worker) counts worker pods in creation order, 1-based.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; fi
 ns="${DISTRAINER_K8S_NAMESPACE:-distrainer}"
+ctx="${DISTRAINER_K8S_CONTEXT:-orbstack}"   # never the current context by accident: down/nuke delete things
 cluster="distrainer"
 image="${DISTRAINER_IMAGE:-distrainer:local}"
 kuberay_version="${KUBERAY_VERSION:-v1.7.0}"
-k=(kubectl --namespace "$ns")
+kc=(kubectl --context "$ctx")
+k=("${kc[@]}" --namespace "$ns")
 shared="${DISTRAINER_SHARED:-$root/.harness/shared}"
 case "$shared" in
   /*) ;;
@@ -35,13 +39,15 @@ if [ "$shared" = "/" ] || [ -z "$shared" ]; then
 fi
 marker="$shared/.distrainer-shared"   # nuke / wipe-shared only delete a directory `up` created
 
+esc() { printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'; }   # a value is a literal to sed, not a pattern
 render() {   # render <manifest> [replicas] [config]: substitute the host-specific placeholders;
   # the S3 settings follow .env with the defaults of docker-compose.yml
-  sed -e "s|__SHARED__|$shared|g" -e "s|__ROOT__|$root|g" -e "s|__IMAGE__|$image|g" \
-      -e "s|__REPLICAS__|${2:-2}|g" -e "s|__CONFIG__|${3:-}|g" \
-      -e "s|__S3_ENDPOINT__|${S3_ENDPOINT:-http://minio:9000}|g" -e "s|__S3_REGION__|${S3_REGION:-auto}|g" \
-      -e "s|__S3_ACCESS_KEY__|${S3_ACCESS_KEY:-distrainer}|g" \
-      -e "s|__S3_SECRET_KEY__|${S3_SECRET_KEY:-distrainer123}|g" "$root/deploy/k8s/$1"
+  sed -e "s|__SHARED__|$(esc "$shared")|g" -e "s|__ROOT__|$(esc "$root")|g" \
+      -e "s|__IMAGE__|$(esc "$image")|g" -e "s|__REPLICAS__|${2:-2}|g" -e "s|__CONFIG__|$(esc "${3:-}")|g" \
+      -e "s|__S3_ENDPOINT__|$(esc "${S3_ENDPOINT:-http://minio:9000}")|g" \
+      -e "s|__S3_REGION__|$(esc "${S3_REGION:-auto}")|g" \
+      -e "s|__S3_ACCESS_KEY__|$(esc "${S3_ACCESS_KEY:-distrainer}")|g" \
+      -e "s|__S3_SECRET_KEY__|$(esc "${S3_SECRET_KEY:-distrainer123}")|g" "$root/deploy/k8s/$1"
 }
 head_pod() {   # the newest head pod (after kill-head the operator creates a new one), "" if none;
   # a failing kubectl fails the caller (pipefail) instead of looking like "no pod yet"
@@ -64,10 +70,13 @@ worker_pod() {   # worker_pod I -> pod name (1-based index)
   if [ -z "$pod" ]; then echo "no worker pod with index $1" >&2; worker_pods >&2; exit 1; fi
   echo "$pod"
 }
-pods_present() {   # 0 = pods exist, 1 = none; a failing kubectl aborts (never mistaken for "none")
-  local out
-  out="$("${k[@]}" get pods -o name)" || { echo "kubectl get pods failed in namespace $ns" >&2; exit 1; }
-  [ -n "$out" ]
+pods_present() {   # 0 = our pods (Ray nodes, MinIO) exist, 1 = none; a failing kubectl aborts
+  local out sel
+  for sel in "ray.io/cluster=$cluster" "app=minio"; do
+    out="$("${k[@]}" get pods -l "$sel" -o name)" || { echo "kubectl get pods failed in namespace $ns" >&2; exit 1; }
+    [ -n "$out" ] && return 0
+  done
+  return 1
 }
 wait_head() {   # wait_head SECONDS: until the head pod is Ready
   local deadline=$((SECONDS + $1)) pod
@@ -95,7 +104,7 @@ exec_head() {
   "${k[@]}" exec "$pod" -c ray-head -- "$@"
 }
 need_operator() {
-  if ! kubectl get crd rayclusters.ray.io >/dev/null 2>&1; then
+  if ! "${kc[@]}" get crd rayclusters.ray.io >/dev/null 2>&1; then
     echo "KubeRay CRDs not found: run 'deploy/driver.sh operator' (just kuberay-operator) once" >&2
     exit 2
   fi
@@ -107,10 +116,11 @@ case "$verb" in
     docker build -t "$image" -f "$root/deploy/Dockerfile" "$root" ;;
   operator)
     # the kustomize base installs CRDs, RBAC and the operator Deployment into `default`;
-    # server-side apply copes with the CRD size and makes the verb idempotent
-    kubectl apply --server-side --force-conflicts \
+    # server-side apply copes with the CRD size and makes the verb idempotent (a conflict means
+    # another manager, such as Helm, owns KubeRay here: not overridden)
+    "${kc[@]}" apply --server-side \
       -k "github.com/ray-project/kuberay/ray-operator/config/default?ref=$kuberay_version&timeout=180s"
-    kubectl --namespace default rollout status deployment/kuberay-operator --timeout=300s ;;
+    "${kc[@]}" --namespace default rollout status deployment/kuberay-operator --timeout=300s ;;
   up)
     n="${1:-2}"; shift || true
     minio="${DISTRAINER_MINIO:-0}"
@@ -120,7 +130,7 @@ case "$verb" in
       docker build -t "$image" -f "$root/deploy/Dockerfile" "$root"
     fi
     mkdir -p "$shared" && touch "$marker"
-    kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+    "${kc[@]}" create namespace "$ns" --dry-run=client -o yaml | "${kc[@]}" apply -f - >/dev/null
     if [ "$minio" = "1" ]; then render minio.yaml | "${k[@]}" apply -f -; fi
     render raycluster.yaml "$n" | "${k[@]}" apply -f -
     if [ "$minio" = "1" ]; then "${k[@]}" rollout status deployment/minio --timeout=180s; fi
@@ -176,6 +186,9 @@ case "$verb" in
     cfg="${1:-examples/hello_blocks/harness.yaml}"
     "${k[@]}" delete rayjob distrainer-hello --ignore-not-found >/dev/null
     render rayjob.yaml 2 "$cfg" | "${k[@]}" apply -f - ;;
+  render)
+    # print what `up` would apply (a debugging aid): render raycluster.yaml [REPLICAS] | minio.yaml | rayjob.yaml [_ CONFIG]
+    render "${1:?manifest}" "${2:-2}" "${3:-}" ;;
   shared)
     echo "$shared" ;;
   endpoint)

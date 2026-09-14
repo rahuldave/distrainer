@@ -26,7 +26,7 @@ case "$verb" in
   up)
     n="${1:-2}"; shift || true
     if [ "${1:-}" = "minio" ]; then profiles=(--profile minio); fi
-    if ! docker image inspect distrainer:local >/dev/null 2>&1; then "${compose[@]}" build head; fi
+    if ! docker image inspect "${DISTRAINER_IMAGE:-distrainer:local}" >/dev/null 2>&1; then "${compose[@]}" build head; fi
     mkdir -p "$shared" && touch "$marker"
     "${compose[@]}" ${profiles[@]+"${profiles[@]}"} up -d --scale "worker=$n" --remove-orphans
     "${compose[@]}" ${profiles[@]+"${profiles[@]}"} ps ;;

@@ -235,8 +235,11 @@ orb config set k8s.enable false      # Kubernetes off; the compose harness does 
   `distrainer-workers` Service in the manifest gives CoreDNS local PTR records; check it exists
   (`kubectl -n distrainer get svc`). S11's pacing check is the scenario that notices this.
 - **`just up` says the CRDs are missing.** Run `just kuberay-operator` once per Kubernetes
-  cluster. **Nothing answers on the API at all**: `orb config set k8s.enable true` needs the
-  OrbStack restart, and `kubectl config current-context` must be `orbstack`.
+  cluster. **`context "orbstack" does not exist`**: `orb config set k8s.enable true` needs the
+  OrbStack restart. The driver always talks to the `orbstack` context, whatever your current
+  context is (`DISTRAINER_K8S_CONTEXT` if OrbStack's context has another name on your machine);
+  `deploy/driver.sh render raycluster.yaml` shows what `up` would apply without touching the
+  cluster.
 - **The removed pod trains on after `just scale 2`.** That is the grace period; see section 5.
 - **Out of memory.** The VM has 8 GB: the head takes about 1.4 GB and each worker about 0.6 GB
   (measured in M3, `docs/handoff-m5.md`), plus Kubernetes itself. One cluster at a time, compose

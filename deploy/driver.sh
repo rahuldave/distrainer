@@ -17,9 +17,10 @@
 #   shared                 print the host path of the shared storage
 #   endpoint               print dashboard / S3 URLs
 #   mkbucket [NAME]        create the S3 bucket (MinIO profile)
-#   ps | logs [SERVICE]    inspect
+#   ps | logs [SERVICE]    inspect (SERVICE is a compose service, or a pod under kuberay)
 #   operator               (kuberay only) install the KubeRay operator once
 #   submit [CONFIG]        (kuberay only) run hello_blocks as a RayJob on the running cluster
+#   render MANIFEST        (kuberay only) print a rendered deploy/k8s manifest
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 driver="${DISTRAINER_DRIVER:-compose}"

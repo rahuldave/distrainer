@@ -47,7 +47,9 @@ if a scenario is short of RAM.
   `__REPLICAS__`, `__CONFIG__`, and the `__S3_*__` settings from `.env` with compose's defaults)
   and applies; `scale N` JSON-patches `replicas`; `kill-*` force-delete pods. A failing
   `kubectl` fails the verb (never "no pods" by mistake: `wipe-shared` and `nuke` delete the
-  shared directory only after a successful empty listing).
+  shared directory only after a successful empty listing of our own pods), every call names
+  its context and namespace (`DISTRAINER_K8S_CONTEXT`, `DISTRAINER_K8S_NAMESPACE`), and `render`
+  shows what `up` applies. `DISTRAINER_IMAGE` is honoured by both drivers.
 - `just kuberay-operator`; `tests/test_deploy_manifests.py` pins the manifests' contract.
 - Image: `ray[default]` (dashboard and agent), `procps` (the runner's abort `pkill`), a
   `/etc/profile.d` entry that keeps the virtualenv on `PATH` in login shells.
@@ -102,6 +104,11 @@ The M4 list in `docs/handoff-m5.md` section 5 is unchanged. New in M5:
 - The RayJob path (`submit`) is a manual check, not a scenario.
 - The compose driver's dashboard on `127.0.0.1:8265` only works now that `ray[default]` is in the
   image; the tutorials never mention it.
+- `cp-from-head` is exercised by no scenario under either driver.
+- `tests/test_deploy_manifests.py` pins the two drivers against each other (S3 defaults, image
+  tag, CPUs, object store); the health-check environment and the mounts are still declared twice
+  without a check.
+- The first M5 commit's subject line is 81 characters; GitHub truncates at 72.
 
 ## 6. uncloud (mode C) pointers
 

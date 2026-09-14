@@ -196,6 +196,10 @@ What is where:
   adds a headless `distrainer-workers` Service over the worker pods (the head has one from
   KubeRay) and sets resolver `timeout: 2`, `attempts: 1` on the pods. Docker's embedded DNS
   answers those lookups itself in mode B, which is why compose never showed it.
+- Every `kubectl` call of the driver names its context (`DISTRAINER_K8S_CONTEXT`, default
+  `orbstack`) and namespace (`DISTRAINER_K8S_NAMESPACE`, default `distrainer`), so `down` and
+  `nuke` never act on whatever context `kubectl` happens to point at; `render MANIFEST` prints
+  what `up` would apply.
 - `endpoint` prints the dashboard at the head pod's IP (the head Service is headless) and
   MinIO's ClusterIP; OrbStack routes pod and service IPs from the Mac, elsewhere use
   `kubectl port-forward svc/distrainer-head-svc 8265`.
