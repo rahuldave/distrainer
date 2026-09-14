@@ -1,0 +1,32 @@
+# hello_blocks on a local Ray cluster: 2 workers, 48 blocks of 32 rows, W=12 (4 segments),
+# a checkpoint every 2 steps and at every segment end. Runs in well under a minute.
+run_name: hello
+storage_path: runs/hello        # checkpoints + Ray Train run state (gitignored)
+store_root: blocks/hello        # blocks, log, audit (gitignored)
+seed: 7
+ray_address: null               # local ray.init(); "auto" inside the multi-node harness
+storage:
+  kind: local
+log:
+  W: 12
+  passes: 1
+  wait_poll_s: 0.2
+checkpoint:
+  policy: any
+  every_k: 2
+  num_to_keep: 3
+  upload_mode: async
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: 2
+  resources_per_worker: {CPU: 1}
+  use_gpu: false
+failure:
+  max_failures: 1
+train:
+  n_blocks: 48
+  rows_per_block: 32
+  features: 8
+  lr: 0.05
