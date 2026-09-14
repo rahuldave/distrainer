@@ -66,6 +66,59 @@ def unwrap(model: torch.nn.Module) -> torch.nn.Module:
     return getattr(model, "module", model)
 
 
+def init_ray(cfg: DistrainerConfig, **kwargs: Any) -> None:
+    """``ray.init`` for distrainer drivers.
+
+    Address from the config, quiet driver logging, the ``uv run`` hook off (workers use this
+    interpreter directly), and the Train v2 controller poll interval
+    (``RAY_TRAIN_HEALTH_CHECK_INTERVAL_S``) lowered so ``report`` does not cap throughput.
+    """
+    import logging
+    import os
+
+    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
+    env_vars: dict[str, str] = {}
+    if cfg.ray_health_check_interval_s is not None:
+        env_vars["RAY_TRAIN_HEALTH_CHECK_INTERVAL_S"] = str(cfg.ray_health_check_interval_s)
+    import ray
+
+    if ray.is_initialized():
+        return
+    runtime_env = dict(kwargs.pop("runtime_env", {}) or {})
+    if env_vars:
+        runtime_env["env_vars"] = {**runtime_env.get("env_vars", {}), **env_vars}
+    ray.init(
+        address=cfg.ray_address,
+        logging_level=logging.ERROR,
+        runtime_env=runtime_env or None,
+        **kwargs,
+    )
+
+
+class MetricAggregator:
+    """Mean of numeric metrics since the last ``report`` (so fewer reports lose no signal)."""
+
+    def __init__(self) -> None:
+        self._sums: dict[str, float] = {}
+        self._count = 0
+
+    def add(self, metrics: dict[str, Any]) -> None:
+        for k, v in metrics.items():
+            if isinstance(v, bool) or not isinstance(v, int | float):
+                continue
+            self._sums[k] = self._sums.get(k, 0.0) + float(v)
+        self._count += 1
+
+    def flush(self, last: dict[str, Any]) -> dict[str, Any]:
+        """``last`` step metrics plus ``<key>_mean`` over the window and ``steps_in_report``."""
+        out = dict(last)
+        if self._count:
+            out.update({f"{k}_mean": s / self._count for k, s in self._sums.items()})
+            out["steps_in_report"] = self._count
+        self._sums, self._count = {}, 0
+        return out
+
+
 # ---- checkpoint files ----
 
 
@@ -208,6 +261,9 @@ def train_loop(loop_config: dict[str, Any]) -> None:
         threads=cfg.loader.threads,
     )
     t0 = time.monotonic()
+    agg = MetricAggregator()
+    reported_last = True
+    metrics: dict[str, Any] = {}
     try:
         for segment, (position, ref, table) in loader:
             if segment.seq != ledger.segment:
@@ -223,6 +279,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
                 attempt=attempt,
             )
             metrics = dict(train_step(model, optimizer, table, step_info))
+            agg.add(metrics)
             audit.append(n, segment.seq, ledger.cursor, position, ref.block_id)
             ledger.cursor += 1
             ledger.world_size = n
@@ -247,23 +304,32 @@ def train_loop(loop_config: dict[str, Any]) -> None:
                 world_size=n,
                 attempt=attempt,
             )
+            # report is a barrier and, in Train v2, a one-slot queue drained at the controller's
+            # poll interval; by default it is called only where a checkpoint is taken (the policy
+            # decides identically on every rank) and metrics are averaged in between
             if policy.should_checkpoint(sctx):
                 notify_checkpoint(policy, sctx)
                 ckpt = io.save(model, optimizer, ledger) if rank == 0 else None
                 ray.train.report(
-                    metrics,
+                    agg.flush(metrics),
                     checkpoint=ckpt,
                     checkpoint_dir_name=checkpoint_dir_name(ledger),
                     checkpoint_upload_mode=upload_mode,
                     delete_local_checkpoint_after_upload=True,
                 )
+                reported_last = True
+            elif cfg.checkpoint.report_every_step:
+                ray.train.report(agg.flush(metrics))
+                reported_last = True
             else:
-                ray.train.report(metrics)
+                reported_last = False
             if segment_end:
                 if rank == 0:
                     for hook in hooks:
                         hook.on_segment_end(model, ledger, log, step_info)
                 barrier()
+        if not reported_last and metrics:
+            ray.train.report(agg.flush(metrics))  # every rank took the same number of steps
     finally:
         loader.close()
         audit.close()

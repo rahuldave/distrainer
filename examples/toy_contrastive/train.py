@@ -6,8 +6,6 @@ Run: ``just contrastive`` (= ``train.py --config examples/toy_contrastive/local.
 from __future__ import annotations
 
 import argparse
-import logging
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -21,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from distrainer.audit import read_audit  # noqa: E402
 from distrainer.config import DistrainerConfig, load_config  # noqa: E402
 from distrainer.log import BlockLog  # noqa: E402
-from distrainer.trainer import CheckpointIO, DistTrainer, TrainInfo  # noqa: E402
+from distrainer.trainer import CheckpointIO, DistTrainer, TrainInfo, init_ray  # noqa: E402
 from examples.toy_contrastive.model import Encoder, info_nce  # noqa: E402
 from integration_tests.cluster.check_audit import check_s1, summarize  # noqa: E402
 
@@ -76,10 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     if not args.keep:
         shutil.rmtree(Path(runs_root) / cfg.run_name, ignore_errors=True)
         shutil.rmtree(Path(store_root) / "audit" / cfg.run_name, ignore_errors=True)
-    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
-    import ray
-
-    ray.init(address=cfg.ray_address, ignore_reinit_error=True, logging_level=logging.ERROR)
+    init_ray(cfg)
     if not BlockLog(fs, store_root).exists():
         from examples.toy_contrastive.make_blocks import make_blocks
 

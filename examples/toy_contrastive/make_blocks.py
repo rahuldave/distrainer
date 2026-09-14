@@ -9,7 +9,6 @@ with Ray Data (``groupby("batch_id").map_groups``), then ``BatchWriter`` writes 
 from __future__ import annotations
 
 import argparse
-import logging
 
 import numpy as np
 import pyarrow as pa
@@ -17,6 +16,7 @@ import pyarrow as pa
 from distrainer.block import BlockRef, write_block
 from distrainer.config import DistrainerConfig, load_config
 from distrainer.log import BlockLog
+from distrainer.trainer import init_ray
 from distrainer.writer import BatchWriter
 
 
@@ -108,12 +108,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     cfg = load_config(ap.parse_args().config)
-    import os
-
-    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
-    import ray
-
-    ray.init(address=cfg.ray_address, ignore_reinit_error=True, logging_level=logging.ERROR)
+    init_ray(cfg)
     refs = make_blocks(cfg)
     fs, root = cfg.store_fs()
     print(

@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import importlib
-import logging
 import os
 import sys
 from collections.abc import Sequence
@@ -60,7 +59,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 def cmd_resume(args: argparse.Namespace) -> int:
     """Start a new run from ``uri``. ``--entry pkg.module:function`` must return
     ``(train_step, build_model)`` for the config."""
-    from distrainer.trainer import DistTrainer
+    from distrainer.trainer import DistTrainer, init_ray
 
     cfg = load_config(args.config)
     if args.run_name:
@@ -70,10 +69,7 @@ def cmd_resume(args: argparse.Namespace) -> int:
     mod_name, _, fn_name = args.entry.partition(":")
     factory = getattr(importlib.import_module(mod_name), fn_name)
     train_step, build_model = factory(cfg)
-    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
-    import ray
-
-    ray.init(address=cfg.ray_address, ignore_reinit_error=True, logging_level=logging.ERROR)
+    init_ray(cfg)
     result = DistTrainer(
         train_step, build_model, cfg, resume_from_checkpoint=_checkpoint(args.uri)
     ).fit()

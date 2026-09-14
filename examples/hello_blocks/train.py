@@ -8,8 +8,6 @@ trains, then checks the audit trail with the S1 assertions and prints the final 
 from __future__ import annotations
 
 import argparse
-import logging
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -22,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from distrainer.audit import read_audit  # noqa: E402
 from distrainer.config import DistrainerConfig, load_config  # noqa: E402
 from distrainer.log import BlockLog  # noqa: E402
-from distrainer.trainer import CheckpointIO, DistTrainer, TrainInfo  # noqa: E402
+from distrainer.trainer import CheckpointIO, DistTrainer, TrainInfo, init_ray  # noqa: E402
 from examples.hello_blocks.make_blocks import feature_columns, make_blocks  # noqa: E402
 from integration_tests.cluster.check_audit import check_s1, summarize  # noqa: E402
 
@@ -84,12 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         reset_run(cfg)
     ensure_blocks(cfg)
 
-    # workers use this interpreter directly; Ray's `uv run` hook would re-launch them through uv
-    # from an uploaded copy of the repository
-    os.environ.setdefault("RAY_ENABLE_UV_RUN_RUNTIME_ENV", "0")
-    import ray
-
-    ray.init(address=cfg.ray_address, ignore_reinit_error=True, logging_level=logging.ERROR)
+    init_ray(cfg)
     result = DistTrainer(train_step, build_model, cfg).fit()
     ledger = CheckpointIO.read_ledger(result.checkpoint) if result.checkpoint else None
     print(f"final metrics: {result.metrics}")

@@ -64,3 +64,31 @@ def test_lanes_from_resumes_and_stops(store):
     gen = lanes_from(log, rank=1, world_size=2, seq=0, start_step=1, poll_s=0.01)
     lanes = list(gen(None))
     assert [(seg.seq, [p for p, _ in ln]) for seg, ln in lanes] == [(0, [3]), (1, [5, 7])]
+
+
+def test_metric_aggregator_means_numeric_metrics_only():
+    from distrainer.trainer import MetricAggregator
+
+    agg = MetricAggregator()
+    agg.add({"loss": 1.0, "acc": 0.5, "name": "x", "flag": True})
+    agg.add({"loss": 3.0, "acc": 1.0})
+    out = agg.flush({"loss": 3.0, "position": 7})
+    assert out == {
+        "loss": 3.0,
+        "position": 7,
+        "loss_mean": 2.0,
+        "acc_mean": 0.75,
+        "steps_in_report": 2,
+    }
+    assert agg.flush({"loss": 9.0}) == {"loss": 9.0}  # window reset
+
+
+def test_config_report_and_poll_fields():
+    from distrainer.config import DistrainerConfig
+
+    cfg = DistrainerConfig.from_dict({})
+    assert cfg.checkpoint.report_every_step is False and cfg.ray_health_check_interval_s == 0.5
+    import pytest
+
+    with pytest.raises(ValueError):
+        DistrainerConfig.from_dict({"ray_health_check_interval_s": 0})

@@ -324,7 +324,7 @@ for segment, (position, ref, table) in loader:
 loader.close()
 ```
 
-Notes: `report` is called on every step so all ranks call it the same number of times regardless of policy; the cost of a metrics-only `report` is one small RPC. The checkpoint directory is a non-temporary dir (ASYNC upload requirement). Rank 0 saves the ledger *after* incrementing the cursor, so the ledger describes "steps completed including this one". Elastic resize or failure: Train restarts `train_func`; `resume_start` uses the ledger's old `world_size` and re-deals over the new `n`. In streaming mode `wait_segment` blocks all ranks equally at a segment boundary when the writer is behind (backpressure); the lane loader's prefetch across segments hides producer jitter when the writer is ahead. The hook runs *before* the barrier so the segment it appends is visible to `wait_segment` on every rank immediately after.
+Notes: in Ray Train v2 `report` is not a cheap RPC: each worker has a one-slot result queue that the controller drains only every `RAY_TRAIN_HEALTH_CHECK_INTERVAL_S` (2 s by default), so a `report` per step caps training at about one step per poll interval regardless of model size (measured: 480 tiny steps took 8.5 minutes at 8% CPU). The loop therefore calls `report` only at the steps where the policy takes a checkpoint (every policy decides identically on all ranks: index-based ones by construction, `TimeBudget` through a broadcast), averages the numeric metrics of the steps in between (`<key>_mean`, `steps_in_report`), and issues one final metrics-only `report` if the last step was not a checkpoint; all ranks still call `report` the same number of times. `checkpoint.report_every_step: true` restores a report per step for debugging, and `ray_health_check_interval_s` (default 0.5) lowers the controller poll interval through the job runtime env in `distrainer.trainer.init_ray`. The checkpoint directory is a non-temporary dir (ASYNC upload requirement). Rank 0 saves the ledger *after* incrementing the cursor, so the ledger describes "steps completed including this one". Elastic resize or failure: Train restarts `train_func`; `resume_start` uses the ledger's old `world_size` and re-deals over the new `n`. In streaming mode `wait_segment` blocks all ranks equally at a segment boundary when the writer is behind (backpressure); the lane loader's prefetch across segments hides producer jitter when the writer is ahead. The hook runs *before* the barrier so the segment it appends is visible to `wait_segment` on every rank immediately after.
 
 ## 6. Checkpointing: where it happens, layout, storage, reconstitution
 
@@ -391,6 +391,7 @@ storage_path: /shared/runs     # checkpoints and Ray Train run state
 store_root: /shared/blocks     # blocks, log, audit
 seed: 1234
 ray_address: auto              # null = local ray.init() (examples on a laptop)
+ray_health_check_interval_s: 0.5   # Train v2 controller poll interval (default 2 s caps report rate)
 storage:                       # the filesystem both paths live on (section 6.3)
   kind: local                  # local | s3; s3 adds endpoint, region, access_key_env, secret_key_env
 log:
@@ -405,6 +406,7 @@ checkpoint:
   time_budget_s: null
   num_to_keep: 3
   upload_mode: async        # async | sync (ray.train.report checkpoint_upload_mode)
+  report_every_step: false  # true = report on every step (about 1 step/s in Train v2; debugging only)
 loader:
   prefetch: 2
   threads: 2
@@ -521,7 +523,7 @@ OrbStack ships a built-in Kubernetes; enable it, then `helm install kuberay-oper
 
 ## 13. Open questions (decide at M1/M2)
 
-- Whether `report` on every step is acceptable overhead at very small blocks, or whether to batch metrics and call `report` only at policy points *and* guarantee equal counts by making the policy purely index-based (dropping `TimeBudget`).
+- ~~Whether `report` on every step is acceptable overhead at very small blocks~~ Decided in M2: it is not (Train v2 drains one result per poll interval); `report` happens only at policy points with aggregated metrics, and `TimeBudget` stays because its broadcast keeps the counts equal (section 5).
 - Multiple producers: v0.1 has one writer per log. If several miners must contribute, either serialize through one sequencer process or give each producer its own log and let a merge writer interleave them.
 - Simulating inter-node latency in the harness (`tc netem` on one worker container) so audit wait times become meaningful (see the straggler discussion in `docs/introduction.md`).
 - Audit log location under heavy step rates: per-rank JSONL on the shared volume is fine for tests; production would want it optional.
