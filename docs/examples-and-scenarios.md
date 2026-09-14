@@ -174,6 +174,8 @@ just local-scenarios            # S1, S5, S7 on the laptop, about 3 minutes
 just build && just up 2         # container cluster (once; the image is rebuilt only if uv.lock changes)
 just integration S2             # one scenario; `all` runs S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (about 25 minutes)
 just down                       # containers stop, the MinIO volume stays; `just nuke` removes it
+just kuberay-operator                            # once: the KubeRay operator on OrbStack's Kubernetes
+DISTRAINER_DRIVER=kuberay just integration S2    # the same scenarios with pods as Ray nodes (docs/running-modes.md, D)
 ```
 
 Each cluster scenario brings the cluster to the size it needs, waits until Ray reports that many
@@ -186,7 +188,8 @@ scenarios differ in the store: S6 and S11 wipe their own store (`/shared/blocks_
 producer before the trainer. The driver's output for the run is saved under
 `.harness/logs/<scenario>.log` (`s11-producer.log` for the producer); the audit trail of a
 shared-mount scenario is under `.harness/shared/<store>/audit/<scenario>/`, and the checkpoints
-under `.harness/shared/runs/<scenario>/`.
+under `.harness/shared/runs/<scenario>/`. Under `DISTRAINER_DRIVER=kuberay` the same paths apply:
+the pods mount that directory as a `hostPath` volume, and "the head container" is the head pod.
 
 ### Reading a failure
 
