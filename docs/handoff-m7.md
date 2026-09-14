@@ -41,8 +41,23 @@ the OrbStack VM has 8 GB and the machines share it with Docker and the still-ena
 (k3s and the KubeRay operator): compose containers and KubeRay pods down before `up`, one
 cluster scenario at a time, no Ray-starting subagents while one runs. A stale
 `dagger-engine-v0.15.3` container autostarts with OrbStack and was stopped; stop it again if a
-scenario is short of RAM. `orb stop uc1 uc2 uc3` parks the machines; `orb start` brings the
-cluster back.
+scenario is short of RAM.
+
+The machines are parked at the end of a day and brought back the next; the cluster state (the uc
+context, the installed daemons, the pushed image, the MinIO volume) survives a stop:
+
+```bash
+orb stop uc1 uc2 uc3                 # park them (always name them: a bare `orb stop` stops all of OrbStack, Docker included)
+orb list                             # uc1 uc2 uc3 stopped
+
+orb start uc1 uc2 uc3                # bring them back; Docker and the uncloud daemons start with the machines
+DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-status   # wait until every machine is Up (Suspect for a minute or two is normal)
+DISTRAINER_DRIVER=uncloud deploy/driver.sh ps                # nothing deployed: `just up-minio 2` starts a cluster
+```
+
+The machines were left stopped on 2026-09-14 with nothing deployed. `deploy/driver.sh
+machines-destroy` (or `orb delete -f ucN`) removes them for good; `just uncloud-machines`
+rebuilds them, followed by `just build` to push the image again.
 
 ## 3. What M6 delivered (spec sections 9 and 11, `docs/running-modes.md` C)
 
