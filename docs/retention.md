@@ -97,7 +97,8 @@ requests per segment end on S3 at `W=24`; the listing walks only committed segme
 stream at sequence 100000 does not stat every number below the window. Deletes on an object
 store are per object and not atomic as a group; if gc dies between deleting a segment's blocks
 and its segment file, the next call deletes the segment file, and no reader was going to read a
-segment below the window anyway. Scenario S11s3 exercises gc against MinIO.
+segment below the window anyway. Scenario S11s3 exercises gc against MinIO, under the compose
+driver and under KubeRay with MinIO running in the cluster as a Deployment.
 
 ## What gc does not do
 
@@ -117,4 +118,5 @@ segment below the window anyway. Scenario S11s3 exercises gc against MinIO.
 `tests/test_log.py` (the `gc` rules on blocks shared between segments), `tests/test_train_loop.py`
 (the window behind the checkpoint, `gc_blocks: false`, a policy that never checkpoints, the
 refused resume), `tests/test_streaming_producer.py` (an end-to-end stream with gc),
-`check_retention` in `integration_tests/cluster/check_audit.py`, and scenarios S11 and S11s3.
+`check_retention` in `integration_tests/cluster/check_audit.py`, and scenarios S11 and S11s3 on
+the container cluster and on KubeRay (`docs/examples-and-scenarios.md`).

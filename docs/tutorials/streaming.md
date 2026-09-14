@@ -230,6 +230,7 @@ older than the gc window is refused.
 - `check_s6` (hook: commit precedes consumption, new block ids) and `check_s11` (producer:
   ranks waited, positions contiguous, `_END` ended the run, retention respected), both in
   `integration_tests/cluster/check_audit.py` and run on the container cluster by
-  `just integration S6` and `just integration S11`.
+  `just integration S6` and `just integration S11`, and on KubeRay pods with
+  `DISTRAINER_DRIVER=kuberay` ([Tutorial 3](kuberay.md)); S11s3 puts the log on MinIO.
 - `tests/test_remine.py` and `tests/test_streaming_producer.py` run the same paths on a fake
   Ray Train in the unit suite.

@@ -16,6 +16,9 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   it, read checkpoints and the ledger, resume with a different number of workers, passes.
 - [`docs/tutorials/streaming.md`](docs/tutorials/streaming.md) — tutorial 2: train on a log that
   is still being written (an external producer, the re-mining segment hook), retention `gc`.
+- [`docs/tutorials/kuberay.md`](docs/tutorials/kuberay.md) — tutorial 3: the same run on
+  Kubernetes pods (KubeRay on OrbStack): setup, kill a worker, scale, a RayJob, MinIO, what to
+  check when pods misbehave.
 - [`docs/retention.md`](docs/retention.md) — the `gc` reference: what is deleted when, why the
   window is anchored on the last checkpoint, `num_to_keep` and what stays resumable, S3, non-goals.
 - [`docs/cli.md`](docs/cli.md) — every command and flag: the `distrainer` CLI, the example
@@ -30,9 +33,12 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
   status.
 - [`docs/distrainer-spec.md`](docs/distrainer-spec.md) — the v0.1 specification: interfaces,
-  training loop, checkpoint/storage layout, the docker compose harness, verification scenarios,
+  training loop, checkpoint/storage layout, the container harness and its KubeRay variant, verification scenarios,
   milestones, and the development workflow.
 - [`docs/distrainer-design.md`](docs/distrainer-design.md) — the design sketch that preceded the spec.
+- [`docs/gest_codex_workflow.md`](docs/gest_codex_workflow.md) and
+  [`docs/tag_dependency_workflow.md`](docs/tag_dependency_workflow.md) — the agent workflow behind
+  `AGENTS.md` and `CLAUDE.md`: Gest tasks and iterations, tag classification, dependency impact.
 - [`docs/ray-sub-epoch-training-report.md`](docs/ray-sub-epoch-training-report.md) — research on
   Ray / Anyscale sub-epoch training and shard handling that motivated the design.
 

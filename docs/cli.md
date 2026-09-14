@@ -81,7 +81,7 @@ rules and the interaction with checkpoints.
 ## Example scripts
 
 All of them take `--config <yaml>` (spec section 7). Paths in a local config are made absolute
-when it is loaded, so the scripts can be run from anywhere; inside the harness containers run
+when it is loaded, so the scripts can be run from anywhere; inside the harness containers or pods run
 them from `/app`.
 
 | script | flags | what it does |

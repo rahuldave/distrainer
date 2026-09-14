@@ -222,7 +222,8 @@ The same mechanism handles a worker dying or an elastic resize mid-run: Ray Trai
 worker group from its last registered checkpoint, every restart gets a new `attempt` in the
 audit trail, and the union of the attempts covers the log with a bounded replay. That needs
 more than one machine to demonstrate; `docs/running-modes.md` and `just integration S2` (worker
-kill), `S3`/`S4` (scale up and down) do it with containers.
+kill), `S3`/`S4` (scale up and down) do it with containers, and [Tutorial 3](kuberay.md) does it
+by hand with Kubernetes pods.
 
 ## 7. Passes
 
@@ -239,6 +240,8 @@ pass it is in.
   built with Ray Data, InfoNCE with hard negatives mined into the blocks, two passes.
 - [Tutorial 2](streaming.md): logs that are still being written, an external producer, the
   re-mining hook, and retention.
+- [Tutorial 3](kuberay.md): the same run on Kubernetes pods (KubeRay on OrbStack): kill a
+  worker, scale, submit a RayJob, MinIO, and what to check when pods misbehave.
 - `docs/examples-and-scenarios.md`: every verification scenario and what it asserts.
 - `docs/cli.md`: every command and flag used above.
 - `docs/distrainer-spec.md`: the contract.
