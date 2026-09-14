@@ -27,7 +27,7 @@ class StorageConfig:
     kind: Kind = "local"
     path: str = "runs"
     endpoint: str | None = None
-    region: str | None = "auto"
+    region: str | None = None
     access_key_env: str = "S3_ACCESS_KEY"
     secret_key_env: str = "S3_SECRET_KEY"
     anonymous: bool = False
@@ -47,12 +47,13 @@ class StorageConfig:
         return asdict(self)
 
 
-def build_filesystem(cfg: StorageConfig) -> tuple[pafs.FileSystem, str]:
-    """Return ``(fs, root)``. Local roots are absolute paths and are created if missing."""
+def build_filesystem(cfg: StorageConfig, create: bool = True) -> tuple[pafs.FileSystem, str]:
+    """Return ``(fs, root)``. Local roots are absolute paths, created if ``create`` is set."""
     if cfg.kind == "local":
         root = os.path.abspath(os.path.expanduser(cfg.path))
         fs = pafs.LocalFileSystem()
-        fs.create_dir(root, recursive=True)
+        if create:
+            fs.create_dir(root, recursive=True)
         return fs, root
     if cfg.kind == "s3":
         kwargs: dict[str, Any] = {}
@@ -78,13 +79,20 @@ def build_filesystem(cfg: StorageConfig) -> tuple[pafs.FileSystem, str]:
     raise ValueError(f"unsupported storage kind {cfg.kind!r}")
 
 
-def resolve(uri: str, **s3_options: Any) -> tuple[pafs.FileSystem, str]:
-    """``(fs, root)`` for ``s3://bucket/prefix``, ``file:///dir`` or a plain path."""
+def resolve(uri: str, create: bool = True, **s3_options: Any) -> tuple[pafs.FileSystem, str]:
+    """``(fs, root)`` for ``s3://bucket/prefix``, ``file:///dir`` or a plain path.
+
+    Other URI schemes (``gs://``, ``abfs://`` ...) are rejected rather than treated as local
+    directories; pass an explicit ``pyarrow.fs.FileSystem`` to the callers that accept one.
+    """
     if uri.startswith("s3://"):
-        return build_filesystem(StorageConfig(kind="s3", path=uri[len("s3://") :], **s3_options))
+        cfg = StorageConfig(kind="s3", path=uri[len("s3://") :], **s3_options)
+        return build_filesystem(cfg, create=create)
     if uri.startswith("file://"):
         uri = uri[len("file://") :]
-    return build_filesystem(StorageConfig(kind="local", path=uri))
+    elif "://" in uri:
+        raise ValueError(f"unsupported URI scheme in {uri!r}; use s3://, file:// or a plain path")
+    return build_filesystem(StorageConfig(kind="local", path=uri), create=create)
 
 
 # ---- small filesystem helpers shared by log, block, audit, checkpoint code ----
@@ -112,18 +120,40 @@ def write_bytes(fs: pafs.FileSystem, path: str, data: bytes) -> None:
         f.write(data)
 
 
+OBJECT_STORE_TYPES = frozenset({"s3", "gcs", "abfs", "azure"})
+
+
+def local_path(fs: pafs.FileSystem, path: str) -> str | None:
+    """The OS path behind ``path`` if ``fs`` is a (subtree of a) local filesystem, else None."""
+    while isinstance(fs, pafs.SubTreeFileSystem):
+        path = posixpath.join(fs.base_path, path)
+        fs = fs.base_fs
+    return path if isinstance(fs, pafs.LocalFileSystem) else None
+
+
+def is_local(fs: pafs.FileSystem) -> bool:
+    return local_path(fs, "") is not None
+
+
 def write_atomic(fs: pafs.FileSystem, path: str, data: bytes) -> None:
     """Readers see either nothing or the whole file.
 
-    Local: write ``<path>.tmp-<uuid>`` next to the target, then ``os.replace``. Object stores:
-    a single ``put`` is already atomic. Leftover ``.tmp-*`` files are orphans and are ignored.
+    Local (including subtree views): write ``<path>.tmp-<uuid>`` next to the target, then
+    ``os.replace``. Object stores: a single ``put`` is already atomic. Any other filesystem:
+    temp file plus ``fs.move``. Leftover ``.tmp-*`` files are orphans and are ignored.
     """
-    if isinstance(fs, pafs.LocalFileSystem):
+    target = local_path(fs, path)
+    if target is not None:
+        tmp = f"{target}.tmp-{uuid.uuid4().hex}"
+        with open(tmp, "wb") as f:
+            f.write(data)
+        os.replace(tmp, target)
+    elif fs.type_name in OBJECT_STORE_TYPES:
+        write_bytes(fs, path, data)
+    else:
         tmp = f"{path}.tmp-{uuid.uuid4().hex}"
         write_bytes(fs, tmp, data)
-        os.replace(tmp, path)
-    else:
-        write_bytes(fs, path, data)
+        fs.move(tmp, path)
 
 
 def delete(fs: pafs.FileSystem, path: str, missing_ok: bool = True) -> None:

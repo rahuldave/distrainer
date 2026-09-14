@@ -97,7 +97,7 @@ flowchart TB
 
 **Segments are always complete before they are trained on.** A segment file is written only after all of its `W` block files exist, in one atomic operation, and the trainer reads only committed segment files. So in both modes the segment being trained on is fully known, which is what makes resume well defined: the ledger names a segment and a cursor, the segment file cannot have changed, and the blocks it names are retained until a later checkpoint exists. The writer therefore needs to be exactly one segment ahead of the trainer, never more; `W` is also the streaming latency (the trainer cannot start a segment until `W` blocks have arrived), so streaming logs typically use a smaller `W` than batch logs. If a writer crashes mid-segment, block files not referenced from any committed segment are orphans: ignored by readers and removed by `gc`.
 
-**Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (If a final partial segment is allowed at `_END`, its last `len mod n` positions are dropped, `drop_last` semantics.)
+**Assignment rule** — with `n = world_size`, global position `p` is consumed by rank `p mod n` at step `p // n` within its segment. Since `W` is a multiple of `n`, every rank takes `W/n` steps per segment and nothing is dropped. (v0.1 does not allow partial segments: a segment file always lists exactly `W` blocks, and `BatchWriter`/`StreamingWriter` handle a corpus that is not a multiple of `W` with an explicit tail policy, `error` (default), `drop`, or `wrap`.)
 
 **Step** — one block per rank, all ranks, ending in the all-reduce + optimizer update, followed by `ray.train.report` (a barrier).
 
@@ -169,7 +169,7 @@ pyproject.toml         # uv-managed; ruff, ty, pytest
   log/_meta.json                   # {"W": 256, "seed": 1234, "created_by": ..., "schema_version": 1}
 ```
 
-Commit protocol: block files first, then the segment file. A reader only trusts blocks referenced from a committed segment. Segment numbers are contiguous; the reader's discovery is "does `log/<next>.json` exist?" (one `exists` call, not a listing, once the reader knows where it is). Local: write `log/.tmp-<seq>.json` then `os.replace`. S3: a single `put_object` is atomic and strongly consistent.
+Commit protocol: block files first, then the segment file. A reader only trusts blocks referenced from a committed segment. Segment numbers are contiguous; the reader's discovery is "does `log/<next>.json` exist?" (one `exists` call, not a listing, once the reader knows where it is). Local: write `<file>.tmp-<uuid>` next to the target then `os.replace` (readers ignore `.tmp-*` names). S3: a single `put_object` is atomic and strongly consistent. The within-segment permutation uses `random.Random(hash((seed, seq)))`; `hash` of an int tuple does not depend on `PYTHONHASHSEED` and is stable across CPython 3.11–3.13, and because the permutation is materialised in the immutable segment file, resume never recomputes it.
 
 ## 4. Interfaces
 

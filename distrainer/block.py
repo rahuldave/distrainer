@@ -13,7 +13,7 @@ import pyarrow as pa
 import pyarrow.fs as pafs
 import pyarrow.parquet as pq
 
-from distrainer.storage import ensure_dir, join
+from distrainer.storage import ensure_dir, join, write_atomic
 
 BLOCK_ID_COLUMN = "block_id"
 BLOCKS_DIR = "blocks"
@@ -75,11 +75,25 @@ def write_block(
         )
     locator = block_locator(block_id)
     ensure_dir(fs, join(root, BLOCKS_DIR))
-    pq.write_table(table, join(root, locator), filesystem=fs)
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink)
+    write_atomic(fs, join(root, locator), sink.getvalue().to_pybytes())
     return BlockRef(
         block_id=block_id, locator=locator, num_rows=table.num_rows, meta=dict(meta or {})
     )
 
 
+def validate_locator(locator: str) -> str:
+    parts = locator.split("/")
+    if not locator or locator.startswith("/") or ".." in parts or "" in parts:
+        raise ValueError(f"invalid locator {locator!r}: must be a relative path inside the store")
+    return locator
+
+
 def read_block(fs: pafs.FileSystem, root: str, ref: BlockRef) -> pa.Table:
-    return pq.read_table(join(root, ref.locator), filesystem=fs)
+    return pq.read_table(join(root, validate_locator(ref.locator)), filesystem=fs)
+
+
+def block_num_rows(fs: pafs.FileSystem, root: str, ref: BlockRef) -> int:
+    """Row count from the Parquet footer; raises if the file is missing or truncated."""
+    return pq.read_metadata(join(root, validate_locator(ref.locator)), filesystem=fs).num_rows

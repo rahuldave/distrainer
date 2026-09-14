@@ -17,7 +17,7 @@ from typing import Any
 
 import pyarrow.fs as pafs
 
-from distrainer.block import BlockRef
+from distrainer.block import BlockRef, block_num_rows
 from distrainer.storage import (
     delete,
     ensure_dir,
@@ -128,8 +128,16 @@ class BlockLog:
         self.root = root
         self.log_dir = join(root, LOG_DIR)
         self._meta: LogMeta | None = None
-        self._segments: dict[int, Segment] = {}
+        self._segments: dict[int, Segment] = {}  # bounded cache, see _cache
         self._next_seq: int | None = None
+
+    SEGMENT_CACHE_SIZE = 8
+
+    def _cache(self, seg: Segment) -> Segment:
+        self._segments[seg.seq] = seg
+        while len(self._segments) > self.SEGMENT_CACHE_SIZE:
+            self._segments.pop(next(iter(self._segments)))
+        return seg
 
     # ---- creation / metadata ----
 
@@ -191,10 +199,16 @@ class BlockLog:
         if seg is None:
             if not exists(self.fs, self.segment_path(seq)):
                 raise FileNotFoundError(f"segment {seq} not committed in {self.log_dir}")
-            seg = Segment.from_json(read_bytes(self.fs, self.segment_path(seq)).decode())
+            text = read_bytes(self.fs, self.segment_path(seq)).decode()
+            version = int(json.loads(text).get("schema_version", SCHEMA_VERSION))
+            if version != SCHEMA_VERSION:
+                raise ValueError(
+                    f"segment {seq} has schema_version {version}, expected {SCHEMA_VERSION}"
+                )
+            seg = Segment.from_json(text)
             if seg.seq != seq or seg.W != self.W:
                 raise ValueError(f"segment file {seq} is inconsistent: seq={seg.seq}, W={seg.W}")
-            self._segments[seq] = seg
+            self._cache(seg)
         return seg
 
     def ended(self) -> bool:
@@ -219,6 +233,19 @@ class BlockLog:
                 raise TimeoutError(f"segment {seq} did not appear within {timeout_s}s")
             time.sleep(poll_s)
 
+    def committed_seqs(self) -> list[int]:
+        """All committed segment numbers from one directory listing."""
+        return sorted(
+            int(m.group(1))
+            for n in list_names(self.fs, self.log_dir)
+            if (m := _SEGMENT_RE.match(n))
+        )
+
+    def first_seq(self) -> int | None:
+        """Lowest committed segment number (after ``gc`` this is no longer 0)."""
+        seqs = self.committed_seqs()
+        return seqs[0] if seqs else None
+
     def last_seq(self) -> int | None:
         """Highest committed segment number (one directory listing), or ``None`` if empty."""
         seqs = [
@@ -228,9 +255,11 @@ class BlockLog:
         ]
         return max(seqs) if seqs else None
 
-    def segments(self) -> Iterator[Segment]:
-        """Committed segments in order, stopping at the first gap."""
-        seq = 0
+    def segments(self, start: int | None = None) -> Iterator[Segment]:
+        """Committed segments in order from ``start`` (default: the lowest), up to the first gap."""
+        seq = self.first_seq() if start is None else start
+        if seq is None:
+            return
         while self.has_segment(seq):
             yield self.read_segment(seq)
             seq += 1
@@ -263,14 +292,13 @@ class BlockLog:
         if self.ended():
             raise RuntimeError("cannot append to an ended log")
         if verify_blocks:
-            missing = [
-                b.block_id for b in blocks if not exists(self.fs, join(self.root, b.locator))
-            ]
-            if missing:
-                raise FileNotFoundError(
-                    f"block files missing for {missing[:5]}{'...' if len(missing) > 5 else ''}"
-                )
+            self._verify_blocks(blocks)
         seq = self._allocate_seq()
+        if exists(self.fs, self.segment_path(seq)):
+            raise FileExistsError(
+                f"segment {seq} is already committed in {self.log_dir}: another writer is active "
+                "(one writer per log) or this instance is stale"
+            )
         order = list(blocks)
         random.Random(hash((self.meta().seed, seq))).shuffle(order)
         segment = Segment(
@@ -282,9 +310,25 @@ class BlockLog:
             meta={"created_at": time.time(), **(meta or {})},
         )
         write_atomic(self.fs, self.segment_path(seq), segment.to_json().encode())
-        self._segments[seq] = segment
+        self._cache(segment)
         self._next_seq = seq + 1
         return segment
+
+    def _verify_blocks(self, blocks: list[BlockRef]) -> None:
+        """Every block file must exist and its Parquet footer must agree with the ref."""
+        bad: list[str] = []
+        for b in blocks:
+            try:
+                rows = block_num_rows(self.fs, self.root, b)
+            except Exception:  # missing, truncated, or unreadable
+                bad.append(b.block_id)
+                continue
+            if rows != b.num_rows:
+                bad.append(b.block_id)
+        if bad:
+            raise FileNotFoundError(
+                f"block files missing or corrupt for {bad[:5]}{'...' if len(bad) > 5 else ''}"
+            )
 
     def _allocate_seq(self) -> int:
         if self._next_seq is None:
@@ -299,11 +343,13 @@ class BlockLog:
 
     # ---- retention ----
 
-    def gc(self, keep_from_seq: int) -> list[int]:
-        """Delete segments ``< keep_from_seq`` and the block files only they reference.
+    def gc(self, keep_from_seq: int, delete_blocks: bool = True) -> list[int]:
+        """Delete segments ``< keep_from_seq`` and, if ``delete_blocks``, the block files only
+        they reference.
 
-        Blocks referenced by any kept segment (later passes re-reference the corpus) are left
-        alone. Returns the deleted segment numbers.
+        Blocks referenced by any *committed* later segment are left alone. A producer that will
+        re-reference old blocks in segments it has not written yet (a multi-pass hook) must call
+        with ``delete_blocks=False``. Returns the deleted segment numbers.
         """
         last = self.last_seq()
         if last is None or keep_from_seq <= 0:
@@ -319,11 +365,13 @@ class BlockLog:
         for seq in range(keep_from_seq):
             if not self.has_segment(seq):
                 continue
-            for b in self.read_segment(seq).blocks:
-                if b.locator not in kept_locators:
-                    delete(self.fs, join(self.root, b.locator))
-                    kept_locators.add(b.locator)  # deleted once even if repeated below
+            if delete_blocks:
+                for b in self.read_segment(seq).blocks:
+                    if b.locator not in kept_locators:
+                        delete(self.fs, join(self.root, b.locator))
+                        kept_locators.add(b.locator)  # deleted once even if repeated below
             delete(self.fs, self.segment_path(seq))
+            delete(self.fs, join(self.log_dir, f"{seq:08d}.rows.parquet"))
             self._segments.pop(seq, None)
             deleted.append(seq)
         return deleted

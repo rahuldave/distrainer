@@ -5,7 +5,7 @@ import time
 import pytest
 from conftest import make_refs, make_table
 
-from distrainer.block import write_block
+from distrainer.block import BlockRef, write_block
 from distrainer.log import BlockLog, LogMeta, Segment, segment_filename
 from distrainer.storage import exists, join, list_names, read_bytes, write_bytes
 
@@ -148,3 +148,93 @@ def test_gc_keeps_blocks_still_referenced_by_kept_segments(store):
         assert not exists(fs, join(root, r.locator)), "blocks only seg 1 referenced are gone"
     assert log.gc(99) == [2]  # keep_from beyond the end is clamped
     assert BlockLog.open(fs, root).last_seq() is None
+
+
+# ---- review follow-ups (phase 1-2 adversarial review) ----
+
+
+def test_golden_permutation_pins_the_shuffle_formula(store):
+    """Random(hash((seed, seq))) with seed=7: a tripwire against accidental formula changes."""
+    fs, root = store
+    log = BlockLog.create(fs, root, W=8, seed=7)
+    refs = [write_block(fs, root, f"g{i}", make_table(1, i)) for i in range(8)]
+    s0, s1 = log.append(refs), log.append(refs)
+    assert [int(b.block_id[1:]) for b in s0.blocks] == [4, 1, 5, 7, 6, 2, 0, 3]
+    assert [int(b.block_id[1:]) for b in s1.blocks] == [7, 6, 4, 0, 5, 1, 3, 2]
+
+
+def test_append_refuses_to_overwrite_a_committed_segment(store):
+    fs, root = store
+    log, refs = new_log(store, W=4)
+    log.append(refs)  # seq 0; this instance now believes the next seq is 1
+    other = BlockLog.open(fs, root)
+    other.append(refs)  # discovers seq 0 from the listing and commits seq 1
+    with pytest.raises(FileExistsError):
+        log.append(refs)  # stale instance must not overwrite seq 1
+    assert BlockLog.open(fs, root).read_segment(1) == other.read_segment(1)
+
+
+def test_segments_and_first_seq_after_gc(store):
+    log, refs = new_log(store, W=4)
+    for _ in range(3):
+        log.append(refs)
+    assert log.gc(2, delete_blocks=False) == [0, 1]
+    assert log.first_seq() == 2 and log.committed_seqs() == [2]
+    assert [s.seq for s in log.segments()] == [2]
+    assert [s.seq for s in log.segments(start=0)] == []
+    assert log.gc(2) == []  # idempotent
+    for r in refs:
+        assert exists(log.fs, join(log.root, r.locator))  # delete_blocks=False kept them
+
+
+def test_verify_blocks_rejects_truncated_block_file(store):
+    fs, root = store
+    log, refs = new_log(store, W=4)
+    path = join(root, refs[1].locator)
+    data = read_bytes(fs, path)
+    write_bytes(fs, path, data[: len(data) // 2])
+    with pytest.raises(FileNotFoundError, match="corrupt"):
+        log.append(refs)
+    # a wrong row count in the ref is caught too
+    bad = [BlockRef(r.block_id, r.locator, r.num_rows + 1) for r in refs]
+    write_bytes(fs, path, data)
+    with pytest.raises(FileNotFoundError):
+        log.append(bad)
+
+
+def test_end_race_between_the_two_probes_still_returns_the_segment(store, monkeypatch):
+    log, refs = new_log(store, W=4)
+    reader = BlockLog.open(log.fs, log.root)
+    calls = {"n": 0}
+    real_has = reader.has_segment
+
+    def has_segment(seq):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # writer commits the segment and _END right after the first negative probe
+            log.append(refs)
+            log.end()
+            return False
+        return real_has(seq)
+
+    monkeypatch.setattr(reader, "has_segment", has_segment)
+    seg = reader.wait_segment(0, poll_s=0.01, timeout_s=1)
+    assert seg is not None and seg.seq == 0
+
+
+def test_read_segment_rejects_unknown_schema_version(store):
+    log, refs = new_log(store, W=4)
+    seg = log.append(refs)
+    d = json.loads(seg.to_json())
+    d["schema_version"] = 99
+    write_bytes(log.fs, log.segment_path(1), json.dumps(d).encode())
+    with pytest.raises(ValueError, match="schema_version"):
+        BlockLog.open(log.fs, log.root).read_segment(1)
+
+
+def test_segment_cache_is_bounded(store):
+    log, refs = new_log(store, W=4)
+    for _ in range(BlockLog.SEGMENT_CACHE_SIZE + 3):
+        log.append(refs)
+    assert len(log._segments) == BlockLog.SEGMENT_CACHE_SIZE
+    assert log.read_segment(0).seq == 0  # evicted entries are re-read from disk

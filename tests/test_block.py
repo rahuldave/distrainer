@@ -34,3 +34,19 @@ def test_blockref_dict_roundtrip():
     ref = BlockRef("b", "blocks/b.parquet", 3, {"m": 1})
     assert BlockRef.from_dict(ref.to_dict()) == ref
     assert BlockRef.from_dict({"block_id": "b", "locator": "l", "num_rows": "3"}).meta == {}
+
+
+@pytest.mark.parametrize("locator", ["../x.parquet", "/abs/x.parquet", "blocks//x.parquet", ""])
+def test_read_block_rejects_locators_escaping_the_store(store, locator):
+    fs, root = store
+    with pytest.raises(ValueError):
+        read_block(fs, root, BlockRef("x", locator, 1))
+
+
+def test_block_num_rows_reads_the_footer(store):
+    from distrainer.block import block_num_rows
+
+    fs, root = store
+    ref = write_block(fs, root, "n", make_table(7))
+    assert block_num_rows(fs, root, ref) == 7
+    assert [n for n in __import__("os").listdir(f"{root}/blocks") if ".tmp-" in n] == []

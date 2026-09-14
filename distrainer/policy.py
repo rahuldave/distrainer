@@ -34,6 +34,17 @@ class CheckpointPolicy(Protocol):
     def should_checkpoint(self, ctx: StepContext) -> bool: ...
 
 
+def notify_checkpoint(policy: _Any, ctx: StepContext) -> None:
+    """Tell a policy that a checkpoint was taken at ``ctx`` (whoever decided it).
+
+    The trainer calls this after every checkpoint so time-based members reset their budget even
+    when a sibling inside ``Any`` made the decision. Policies without ``on_checkpoint`` ignore it.
+    """
+    hook = getattr(policy, "on_checkpoint", None)
+    if hook is not None:
+        hook(ctx)
+
+
 class Never:
     def should_checkpoint(self, ctx: StepContext) -> bool:
         return False
@@ -97,6 +108,9 @@ class TimeBudget:
             self._last_checkpoint_s = ctx.elapsed_s
         return decision
 
+    def on_checkpoint(self, ctx: StepContext) -> None:
+        self._last_checkpoint_s = ctx.elapsed_s
+
 
 class Any:
     """OR of several policies; every member is evaluated on every step."""
@@ -108,7 +122,14 @@ class Any:
 
     def should_checkpoint(self, ctx: StepContext) -> bool:
         results = [p.should_checkpoint(ctx) for p in self.policies]
-        return any(results)
+        decision = any(results)
+        if decision:
+            self.on_checkpoint(ctx)
+        return decision
+
+    def on_checkpoint(self, ctx: StepContext) -> None:
+        for p in self.policies:
+            notify_checkpoint(p, ctx)
 
 
 def build_policy(cfg: dict[str, _Any], broadcast: Broadcast | None = None) -> CheckpointPolicy:

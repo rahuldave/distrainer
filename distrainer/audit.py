@@ -15,7 +15,15 @@ from typing import Any
 
 import pyarrow.fs as pafs
 
-from distrainer.storage import ensure_dir, exists, join, list_names, read_bytes, write_bytes
+from distrainer.storage import (
+    ensure_dir,
+    exists,
+    join,
+    list_names,
+    local_path,
+    read_bytes,
+    write_bytes,
+)
 
 AUDIT_DIR = "audit"
 _FILE_RE = re.compile(r"^(\d+)-(\d+)\.jsonl$")
@@ -66,11 +74,12 @@ class AuditWriter:
         self.dir = audit_dir(root, run_name)
         self.path = join(self.dir, audit_filename(attempt, rank))
         ensure_dir(fs, self.dir)
-        self._local = isinstance(fs, pafs.LocalFileSystem)
+        os_path = local_path(fs, self.path)
+        self._local = os_path is not None
         self._lines: list[str] = []
         if not self._local and exists(fs, self.path):
             self._lines = read_bytes(fs, self.path).decode().splitlines()
-        self._handle: Any = open(self.path, "a", encoding="utf-8") if self._local else None
+        self._handle: Any = open(os_path, "a", encoding="utf-8") if os_path is not None else None
 
     def append(
         self,

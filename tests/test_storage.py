@@ -85,3 +85,48 @@ def test_helpers_roundtrip_and_atomic_write(store):
     storage.delete(fs, p)  # missing_ok
     assert storage.list_names(fs, d) == []
     assert storage.list_names(fs, storage.join(root, "nope")) == []
+
+
+def test_region_defaults_to_none_and_is_omitted(monkeypatch):
+    captured = {}
+
+    class FakeS3(pafs.LocalFileSystem):
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            super().__init__()
+
+    monkeypatch.setattr(storage.pafs, "S3FileSystem", FakeS3)
+    build_filesystem(StorageConfig(kind="s3", path="b", anonymous=True))
+    assert captured == {"anonymous": True}
+
+
+def test_resolve_rejects_unknown_schemes_and_can_skip_creation(tmp_path):
+    with pytest.raises(ValueError):
+        resolve("gs://bucket/x")
+    assert not (tmp_path / "gs:").exists()
+    _, root = resolve(str(tmp_path / "later"), create=False)
+    assert root == str(tmp_path / "later") and not (tmp_path / "later").exists()
+
+
+def test_write_atomic_through_a_subtree_view(tmp_path):
+    base = pafs.LocalFileSystem()
+    sub = pafs.SubTreeFileSystem(str(tmp_path), base)
+    assert storage.is_local(sub) and not storage.is_local(
+        pafs.SubTreeFileSystem("x", FakeNonLocal())
+    )
+    storage.write_atomic(sub, "seg.json", b"{}")
+    assert (tmp_path / "seg.json").read_bytes() == b"{}"
+    assert [p.name for p in tmp_path.iterdir()] == ["seg.json"]  # no temp file left
+
+
+class FakeNonLocal(pafs.PyFileSystem):
+    def __init__(self):
+        super().__init__(pafs.FSSpecHandler(__import__("fsspec").filesystem("memory")))
+
+
+def test_write_atomic_on_a_generic_filesystem_uses_temp_and_move():
+    fs = FakeNonLocal()
+    fs.create_dir("d")
+    storage.write_atomic(fs, "d/f.json", b"1")
+    assert storage.read_bytes(fs, "d/f.json") == b"1"
+    assert storage.list_names(fs, "d") == ["f.json"]

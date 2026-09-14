@@ -96,3 +96,16 @@ def test_build_policy_from_config():
         build_policy({"policy": "time"})
     with pytest.raises(ValueError):
         build_policy({"policy": "weekly"})
+
+
+def test_any_resets_time_budget_when_a_sibling_fires():
+    tb = TimeBudget(seconds=5, broadcast=lambda v: v)
+    policy = Any([SegmentEnd(), tb])
+    assert policy.should_checkpoint(ctx(4, elapsed_s=4.0, segment_end=True))  # SegmentEnd fired
+    assert not tb.should_checkpoint(ctx(5, elapsed_s=6.0))  # budget restarted at 4.0
+    assert tb.should_checkpoint(ctx(6, elapsed_s=9.0))
+    from distrainer.policy import notify_checkpoint
+
+    notify_checkpoint(EveryKSteps(1), ctx(1))  # policies without the hook are fine
+    notify_checkpoint(tb, ctx(7, elapsed_s=20.0))
+    assert not tb.should_checkpoint(ctx(8, elapsed_s=24.0))
