@@ -12,7 +12,7 @@ fmt path=".":
 lint path=".":
   uv run ruff check {{path}}
   uv run ruff format --check {{path}}
-  bash -n deploy/driver.sh deploy/drivers/*.sh deploy/ray-head.sh deploy/ray-worker.sh
+  for f in deploy/driver.sh deploy/drivers/*.sh deploy/uncloud/*.sh deploy/ray-head.sh deploy/ray-worker.sh; do bash -n "$f" || exit 1; done
 
 typecheck:
   uv run ty check distrainer examples integration_tests
@@ -41,7 +41,7 @@ diff-check:
 verify: lint typecheck static test regression smoke diff-check
 
 # --- local multi-node harness: every target is a deploy/driver.sh verb (spec section 9);
-# DISTRAINER_DRIVER selects the driver (compose or kuberay), DISTRAINER_MINIO=1 adds MinIO ---
+# DISTRAINER_DRIVER selects the driver (compose, kuberay or uncloud), DISTRAINER_MINIO=1 adds MinIO ---
 
 build:
   deploy/driver.sh build
@@ -61,6 +61,11 @@ nuke:
 # KubeRay driver (DISTRAINER_DRIVER=kuberay on OrbStack's Kubernetes): install the operator once
 kuberay-operator:
   DISTRAINER_DRIVER=kuberay deploy/driver.sh operator
+
+# uncloud driver (DISTRAINER_DRIVER=uncloud): create the OrbStack machines and the uncloud cluster once
+# (deploy/uncloud/machines.sh; `machines-destroy` removes them), then `just build` pushes the image
+uncloud-machines:
+  DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-up
 
 mkbucket:
   DISTRAINER_MINIO=1 deploy/driver.sh mkbucket distrainer

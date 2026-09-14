@@ -506,6 +506,7 @@ OrbStack's built-in Kubernetes (k3s-based, `orb config set k8s.enable true`, app
 3. **M3 — harness**: driver interface (`deploy/driver.sh`, compose driver, uncloud stub), Dockerfile, compose, Justfile targets, `run_scenarios.py` + `check_audit.py`; S2, S3, S4 on local shared storage, then S9, S10 against MinIO. Test strategy: characterization-first (record the audit logs of a green run, then assert).
 4. **M4 — segment hooks and streaming mode**: `remine.py` as a streaming writer, S6, S11; time-budget policy, S8; `gc`.
 5. **M5 — KubeRay variant** (phase 2): `deploy/k8s` manifests (RayCluster, MinIO, RayJob), `deploy/drivers/kuberay.sh` with the same verbs, `ray[default]` in the image; S1 to S4 and then every cluster scenario green under `DISTRAINER_DRIVER=kuberay` with the runner and the checker unchanged (section 11). Test strategy: characterization-first against the existing checks.
+6. **M6 — uncloud variant** (mode C): `deploy/uncloud/` bootstraps 2 to 3 small OrbStack Linux machines into an uncloud cluster (Docker hosts joined by uncloud's WireGuard mesh, which rides on OrbStack's own machine network), `deploy/drivers/uncloud.sh` implements the same verbs on S3-only storage (no volume spans machines: `shared` prints nothing), and the scenario runner works without a shared mount; S2, S3, S4 (on MinIO), S9, S10 green under `DISTRAINER_DRIVER=uncloud` with `check_audit.py` unchanged (section 11). Test strategy: characterization-first against the existing checks.
 
 ## 13. Open questions (decide at M1/M2)
 
