@@ -387,7 +387,7 @@ storage_path: /shared/runs
 store_root: /shared/blocks
 seed: 1234
 log:
-  W: 16                     # blocks per segment; multiple of every allowed world size
+  W: 24                     # blocks per segment; multiple of every allowed world size (2, 3 and 4 here: lcm 12)
   passes: 2                 # batch mode: BatchWriter passes over the corpus (epochs); ignored in streaming
   wait_poll_s: 1.0          # streaming: how often ranks poll for the next segment
   retention_segments: 4     # gc keeps this many segments behind the last checkpointed one
@@ -413,7 +413,7 @@ hooks:
 
 ## 8. Toy workload (examples/toy_contrastive)
 
-Synthetic data: `N=8192` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=16`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 256 blocks should train in well under a minute on an M1 with 4 worker containers.
+Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, and appends the next segment to the log (so with the hook enabled the log is produced in streaming mode and `_END` is written by the hook after the configured number of segments). CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 
