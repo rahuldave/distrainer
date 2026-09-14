@@ -11,13 +11,15 @@ Every mode uses the same YAML shape (spec section 7); the fields that differ are
 | Driver (`train.py`) | the same process (`ray_address: null`) | inside the `head` container (`ray_address: auto`) | inside the head container via `uc exec` | a `RayJob` |
 | Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines) | a PVC (`hostPath` / `local-path`) or S3 |
 | Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `uc rm` / `uc scale` | `kubectl delete pod`, `kubectl scale` |
-| Scenarios (spec section 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | the section 10 set, once machines exist | S1 to S4 |
+| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | the same set, once machines exist | S1 to S4 |
 | Milestone | M2 (done) | M3 | after M3, when machines are available | M5 |
 | Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (stub) | `deploy/drivers/kuberay.sh` |
 
-The verbs in `deploy/driver.sh` (`up N`, `down`, `exec-head`, `kill-worker I`, `scale N`,
-`cp-from-head`, `endpoint`) are the whole contract between the Justfile or the scenario runner and
-a mode; nothing under `distrainer/`, `tests/`, or `integration_tests/` knows which driver is active.
+Modes B to D are the M3 and M5 plan (spec section 9); as of M2 only mode A runs, and `deploy/` is
+empty. The design rule already holds: the verbs of `deploy/driver.sh` (`up N`, `down`, `exec-head`,
+`kill-worker I`, `scale N`, `cp-from-head`, `endpoint`) will be the whole contract between the
+Justfile or the scenario runner and a mode; nothing under `distrainer/`, `tests/`, or
+`integration_tests/` may know which driver is active.
 
 ## A. Laptop, single node (what `just smoke` does)
 
@@ -51,19 +53,22 @@ loaded, because Ray Train workers do not share the driver's working directory. A
 integration is switched off by `distrainer.trainer.init_ray` so workers use the same interpreter
 instead of re-launching through `uv` from an uploaded copy of the repository.
 
-## B. OrbStack containers as Ray nodes (the local multi-node harness, M3)
+## B. OrbStack containers as Ray nodes (the local multi-node harness, M3, planned)
 
 OrbStack runs Linux containers in a lightweight VM on the Mac; Docker Compose gives them a private
 network and DNS, so a `head` container and `N` `worker` containers behave like `N + 1` machines.
-Each worker container starts `ray start --address=head:6379 --num-cpus=1 --resources='{"trainer":1}'`
-and is therefore exactly one training worker; the head advertises no `trainer` resource, so it
-hosts the Ray head, the Train controller, the driver, and the dashboard but never trains.
+The plan: each worker container starts
+`ray start --address=head:6379 --num-cpus=1 --resources='{"trainer":1}'` and is therefore exactly
+one training worker; the head advertises no `trainer` resource, so it hosts the Ray head, the Train
+controller, the driver, and the dashboard but never trains. (The `trainer` key is already legal in
+`resources_per_worker`; nothing starts containers yet.)
 
 ```yaml
 ray_address: auto            # the driver runs inside the head container
 storage: {kind: local}       # the shared volume ...
 storage_path: /shared/runs
 store_root: /shared/blocks
+log: {W: 24}                 # a multiple of every allowed world size: 2 and 3
 scaling: {num_workers: [2, 3], resources_per_worker: {CPU: 1, trainer: 1}}
 failure: {max_failures: 3}
 ```
@@ -81,6 +86,7 @@ store_root: distrainer/blocks
 ```
 
 ```bash
+# M3 targets; the Justfile entries exist, the driver and compose files do not yet
 just up 2            # head + 2 workers (+ MinIO with the minio profile)
 just blocks          # build the corpus inside the head container
 just train CFG       # driver inside the head container
@@ -130,5 +136,6 @@ nothing in v0.1 assumed compose networking; the scenario checker is unchanged.
   it was written with, so the resume re-deals over whatever world exists now.
 - The audit trail under `<store_root>/audit/<run_name>/`. The scenario checks read only this and
   the checkpoint metadata, never the cluster.
-- `just verify` (lint, typecheck, unit tests, smoke) needs only mode A; the harness scenarios
-  (`just integration`) need mode B and are not part of `verify`.
+- `just verify` (lint, typecheck, compileall, unit and regression tests, smoke, diff check) needs
+  only mode A; the harness scenarios (`just integration`, M3) need mode B and are not part of
+  `verify`.

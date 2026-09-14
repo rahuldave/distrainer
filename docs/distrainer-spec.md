@@ -377,7 +377,7 @@ Three entry points, all built on `ray.train.Checkpoint(path, filesystem)`:
 
 1. **Automatic** — worker failure, preemption, or elastic resize: Train restarts the worker group and `ray.train.get_checkpoint()` returns the latest reported checkpoint; `train_func` loads the ledger and resumes at `cursor * world_size_old` (section 5).
 2. **Explicit, from a run** — `Result.from_path("<storage_path>/<run_name>", storage_filesystem=fs)` restores the `Result` (latest and best checkpoints, metrics); `DistTrainer(..., resume_from_checkpoint=result.checkpoint)` starts a *new* run (new `run_name`) from it. Ray Train v2 deprecated `TorchTrainer(resume_from_checkpoint=)`, so distrainer carries the checkpoint in the train loop config and loads it when `ray.train.get_checkpoint()` is empty. This is the path for driver/head loss and for "continue training tomorrow".
-3. **Explicit, from a URI** — `Checkpoint("s3://bucket/distrainer/runs/toy/checkpoint_e0_c3_s16", filesystem=fs)` (or a local path) → `resume_from_checkpoint=`. Works across runs, clusters, and world sizes because the ledger carries `world_size`.
+3. **Explicit, from a URI** — `Checkpoint("s3://bucket/distrainer/runs/toy/checkpoint_g000003_p000016_n02_a00", filesystem=fs)` (or a local path) → `resume_from_checkpoint=`. Works across runs, clusters, and world sizes because the ledger carries `world_size`.
 
 CLI: `distrainer inspect <uri>` prints the ledger from `.metadata.json` without downloading weights; `distrainer resume <uri> --config cfg.yaml --entry pkg.module:function [--run-name] [--seed]` starts a new run from it (the entry function returns the user's `(train_step, build_model)` for the config); `distrainer export <uri> <local_dir>` = `to_directory`; `distrainer log-ls <store> [-v]` and `distrainer gc <store> --keep-from N` inspect and prune a block log. Example scripts accept `--set key.path=value` overrides so scenarios reuse one YAML. Reconstitution of the data position needs only the ledger plus the log (segment files are immutable, so `segment` + `cursor` + `world_size` identify the exact position), so no per-rank state is ever required.
 
@@ -560,7 +560,7 @@ typecheck:        uv run ty check distrainer
 static:           uv run python -m compileall -q distrainer examples tests
 test target="tests":  uv run python -m pytest {{target}}
 regression:       uv run python -m pytest regression_tests   # exit code 5 (no tests yet) is tolerated
-smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 1 segment
+smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 4 segments of 12 blocks
 contrastive:      uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml   # the section 8 toy, not part of verify
 local-scenarios S="all":  uv run python integration_tests/single_node/run_scenarios.py --scenario {{S}}   # S1, S5, S7 on a local Ray cluster
 diff-check:       git diff --check

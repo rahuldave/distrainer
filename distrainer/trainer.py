@@ -435,6 +435,13 @@ class DistTrainer:
         }
 
     def trainer(self) -> Any:
+        from ray.train.v2._internal.constants import is_v2_enabled
+
+        if not is_v2_enabled():
+            raise RuntimeError(
+                "distrainer needs Ray Train v2 (the default since Ray 2.58); "
+                "unset RAY_TRAIN_V2_ENABLED=0"
+            )
         from ray.train.v2.torch.torch_trainer import TorchTrainer
 
         return TorchTrainer(

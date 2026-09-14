@@ -115,6 +115,7 @@ class AuditWriter:
             ]
             self._part = max(parts) + 1 if parts else 0
             self.path = join(self.dir, audit_filename(attempt, rank, self._part))
+            write_bytes(fs, self.path, b"")  # claim the attempt now, not at the first flush
         self._handle: Any = open(os_path, "a", encoding="utf-8") if os_path is not None else None
 
     def append(

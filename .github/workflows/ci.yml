@@ -21,8 +21,8 @@ jobs:
         run: uv sync --all-groups --python ${{ matrix.python }}
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: uv run ty check distrainer
-      - run: uv run python -m compileall -q distrainer examples tests
+      - run: uv run ty check distrainer examples integration_tests
+      - run: uv run python -m compileall -q distrainer examples tests integration_tests
       - run: uv run python -m pytest tests -q
       - run: uv run python -m pytest regression_tests -q || [ $? -eq 5 ]
       - run: git diff --check

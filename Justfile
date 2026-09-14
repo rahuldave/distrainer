@@ -15,10 +15,10 @@ lint path=".":
   uv run ruff format --check {{path}}
 
 typecheck:
-  uv run ty check distrainer
+  uv run ty check distrainer examples integration_tests
 
 static:
-  uv run python -m compileall -q distrainer examples tests
+  uv run python -m compileall -q distrainer examples tests integration_tests
 
 test target="tests":
   uv run python -m pytest {{target}}

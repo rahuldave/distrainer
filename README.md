@@ -37,8 +37,9 @@ just setup                 # uv sync (Python 3.13, CPU torch, Ray 2.58)
 just smoke                 # hello_blocks: 48 linear-regression blocks, 2 local workers, S1 check
 just contrastive           # toy_contrastive: 240 mined blocks, InfoNCE encoder, 2 passes
 just local-scenarios       # S1 happy path, S5 checkpoint cadence, S7 determinism
+# multi-container harness (M3, not built yet): just up 2 / just integration S2
 uv run distrainer log-ls blocks/hello -v
-uv run distrainer inspect runs/hello/hello/checkpoint_g000003_s0006
+uv run distrainer inspect runs/hello/hello/checkpoint_g000003_p000012_n02_a00
 ```
 
 Your training code provides two functions, ``build_model(info) -> (model, optimizer)`` and

@@ -216,8 +216,8 @@ these placeholders with the project-specific mappings and arguments:
 just setup                  # uv sync --all-groups
 just fmt [path]             # ruff format
 just lint [path]            # ruff check
-just typecheck              # ty check distrainer
-just static                 # compileall distrainer examples tests
+just typecheck              # ty check distrainer examples integration_tests
+just static                 # compileall distrainer examples tests integration_tests
 just test [target]          # pytest (default: tests/)
 just regression             # pytest regression_tests/ (empty dir tolerated)
 just smoke                  # single-node ray.init(), 2 workers, examples/hello_blocks
