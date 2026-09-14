@@ -1,6 +1,6 @@
 # distrainer — specification v0.1
 
-*September 9, 2026 (rev 2: block log replaces the namespace/plan store). Supersedes the sketch in `research/distrainer-design.md` where they differ. Target: Ray 2.58 (Train v2 default-on), PyTorch CPU build for local testing, Python 3.11.*
+*September 9, 2026 (rev 2: block log replaces the namespace/plan store); rev 3, September 13, 2026: decisions recorded before implementation started, see section 15. Supersedes the sketch in `docs/distrainer-design.md` where they differ. Target: Ray 2.58 (Train v2 default-on), PyTorch CPU build for local testing, Python 3.13 with `requires-python >= 3.11`.*
 
 ## 1. Scope
 
@@ -122,10 +122,17 @@ distrainer/
   writer.py       # BatchWriter (corpus -> segments at t=0), helper base for streaming writers
   trainer.py      # DistTrainer: wraps TorchTrainer, owns train_func
   audit.py        # audit-log writer/reader
+  storage.py      # build (pyarrow fs, root) from config.storage: local folder (default) or S3-compatible (MinIO, R2)
   config.py       # DistrainerConfig (dataclasses), YAML loading
   cli.py          # inspect / resume / export / log-ls / gc
 examples/
-  toy_contrastive/
+  hello_blocks/        # smallest possible use of the API: linear-regression blocks, DDP, checkpoint + resume; `just smoke`
+    make_blocks.py
+    train.py
+    local.yaml
+  streaming_producer/  # a writer process that appends segments with sleeps, for S11 (M4)
+    produce.py
+  toy_contrastive/     # the full toy workload of section 8; `just contrastive`
     make_blocks.py     # synthetic clustered data -> blocks with hard negatives -> BatchWriter (uses Ray Data)
     model.py           # tiny MLP encoder + InfoNCE with optional all_gather
     train.py           # DistTrainer entrypoint
@@ -133,12 +140,15 @@ examples/
 tests/                 # focused unit tests: log commit/discover, dealer determinism, ledger arithmetic, policy, loader
 regression_tests/      # bug / API regression tests (added as bugs are found)
 integration_tests/
-  cluster/             # scenario runner that drives docker compose and checks audit logs (S1–S11)
+  cluster/             # scenario runner that drives the cluster through deploy/driver.sh verbs and checks audit logs (S1–S11)
 deploy/
+  driver.sh            # cluster-driver verb interface (up N, down, exec-head, kill-worker I, scale N, cp-from-head, endpoint)
+  drivers/compose.sh   # docker compose on OrbStack (the only implemented driver in v0.1)
+  drivers/uncloud.sh   # stub with the same verbs for uncloud (`uc deploy`, `uc scale`, `uc exec`), filled in when machines exist
   Dockerfile
   docker-compose.yml
   ray-head.sh, ray-worker.sh
-  k8s/                 # phase 2: KubeRay manifests
+  k8s/                 # phase 2: KubeRay manifests (driver kuberay)
 docs/                  # introduction, this spec, design, research report, gest_codex_workflow.md
 AGENTS.md              # from agent_gest_git_skills AGENTS.template.md, project section filled in
 CLAUDE.md              # adapter pointing at AGENTS.md / .agents/skills
@@ -407,12 +417,14 @@ Synthetic data: `N=8192` items, `d=32` features drawn from `C=64` Gaussian clust
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 
+**Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `up N`, `down`, `exec-head CMD...`, `kill-worker I`, `scale N`, `cp-from-head SRC DST`, `endpoint` (dashboard/S3 URLs). The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available, and on KubeRay in phase 2. The uncloud driver ships as a documented stub in v0.1.
+
 Containers are Ray nodes: one `head` and `N` `worker` services on a user-defined bridge network, sharing a named volume mounted at `/shared` (block store, checkpoints, audit logs). Ray Train needs shared storage across nodes; the volume provides it.
 
 `deploy/Dockerfile` (arm64-native under OrbStack):
 
 ```dockerfile
-FROM python:3.11-slim
+FROM python:3.13-slim
 RUN pip install --no-cache-dir "ray[data,train]==2.58.0" pyarrow pandas \
     && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 COPY . /app
@@ -450,23 +462,23 @@ volumes:
   minio: {}
 ```
 
-Workers and head get `S3_ENDPOINT=http://minio:9000`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` via `.env`; `just mkbucket` creates the `distrainer` bucket with `mc`. Runs default to `storage.kind: s3` in the harness so that S9/S10 exercise the S3 path; `storage.kind: local` (the `shared:` volume) remains supported.
+Workers and head get `S3_ENDPOINT=http://minio:9000`, `S3_ACCESS_KEY`, `S3_SECRET_KEY` via `.env`; `just mkbucket` creates the `distrainer` bucket with `mc`. Runs default to `storage.kind: local` (the `shared:` volume) in the harness; the segment log's atomic commit does not need an object store. `storage.kind: s3` is a config switch backed by `storage.py` from M1 on, and MinIO is only started (compose profile `minio`) for the scenarios that exercise the S3 path (S9, S10).
 
 Each worker advertises 1 CPU so `resources_per_worker: {CPU: 1}` maps one Train worker per container — i.e. one container = one "node". The head advertises 2 CPUs for the Train controller and driver but is excluded from training by `ScalingConfig` resource shaping or by giving it a custom resource and `label_selector` if needed.
 
 `justfile` targets:
 
 ```
-up N=2:        docker compose -f deploy/docker-compose.yml up -d --build --scale worker={{N}}
-down:          docker compose -f deploy/docker-compose.yml down -v
-blocks:        docker compose exec head python examples/toy_contrastive/make_blocks.py --out /shared/blocks
-train CFG:     docker compose exec head python examples/toy_contrastive/train.py --config {{CFG}}
-kill-worker I: docker kill $(docker compose ps -q worker | sed -n '{{I}}p')      # node failure
-scale N:       docker compose up -d --no-recreate --scale worker={{N}}           # elastic up/down
+up N="2":       deploy/driver.sh up {{N}}          # every harness target goes through the driver verbs
+down:           deploy/driver.sh down
+blocks:        deploy/driver.sh exec-head python examples/toy_contrastive/make_blocks.py --out /shared/blocks
+train CFG:     deploy/driver.sh exec-head python examples/toy_contrastive/train.py --config {{CFG}}
+kill-worker I: deploy/driver.sh kill-worker {{I}}                                  # node failure (docker kill in the compose driver)
+scale N:       deploy/driver.sh scale {{N}}                                        # elastic up/down
 audit RUN:     uv run python integration_tests/cluster/check_audit.py /shared/audit/{{RUN}}         # via docker cp or volume mount
 ```
 
-OrbStack notes: images build arm64-native (no emulation); give the OrbStack VM at least 6 GB memory in its settings for 4 workers; the Ray dashboard is at `http://localhost:8265`; `docker kill` (SIGKILL) is the right primitive for "node died" (Ray sees the raylet disappear), while `docker stop` gives a graceful drain that looks more like a preemption notice. The shared volume can be inspected from the host with `docker compose cp head:/shared/audit ./audit` or by bind-mounting a host directory instead of a named volume (slower on macOS but convenient).
+OrbStack notes: images build arm64-native (no emulation); the development Mac has 16 GB with the OrbStack VM at 8 GB, so scenarios are written for 2–3 worker containers (head + 2 workers is the default `up`, 3 for scale-up tests); 4 workers needs the VM raised to about 12 GB; the Ray dashboard is at `http://localhost:8265`; `docker kill` (SIGKILL) is the right primitive for "node died" (Ray sees the raylet disappear), while `docker stop` gives a graceful drain that looks more like a preemption notice. The shared volume can be inspected from the host with `docker compose cp head:/shared/audit ./audit` or by bind-mounting a host directory instead of a named volume (slower on macOS but convenient).
 
 ## 10. Verification scenarios
 
@@ -484,7 +496,7 @@ Each scenario runs the toy workload with a distinct `run_name` and then asserts 
 | S7 | Determinism | Two runs with the same seed, no failures | Identical audit sequences per rank. |
 | S8 | Time-budget policy | `time_budget_s=5` | All ranks report the same number of checkpoints (consensus via broadcast). |
 
-Exit criteria for v0.1: S1–S7, S9–S11 green on a 2–4 container cluster under OrbStack, against MinIO.
+Exit criteria for v0.1: S1–S7, S11 green on a 2–3 container cluster under OrbStack with local shared storage; S9–S10 green against MinIO.
 
 ## 11. Phase 2: k3s / KubeRay on OrbStack
 
@@ -492,10 +504,10 @@ OrbStack ships a built-in Kubernetes; enable it, then `helm install kuberay-oper
 
 ## 12. Milestones (each is one Gest development iteration, see section 14)
 
-0. **M0 — repository bootstrap**: install `agent_gest_git_skills`, run `gest_git_installer` and `gsu` (python-uv profile), fill `AGENTS.md`, create the `Justfile` command contract, register this spec as the Gest spec artifact, `gpl` the plan below.
+0. **M0 — repository bootstrap**: install `agent_gest_git_skills` (npx, codex + claude-code adapters), run `gest_git_installer`, `gest init --local`, fill `AGENTS.md` and `CLAUDE.md`, create the GitHub repo, keep the `Justfile` command contract, register this spec as the Gest spec artifact, `gpl` the plan below with one GitHub issue per milestone.
 1. **M1 — core library + unit tests**: block/log/planner/ledger/policy/loader/writer; `lane` and `resume_start` property-tested (e.g. Hypothesis) including world-size changes and the round-down rule; log commit atomicity on local fs and MinIO. Test strategy: test-first.
-2. **M2 — DistTrainer + toy workload single-node** (`ray.init()` local, `num_workers=2`): S1, S5, S7. Test strategy: test-after with `just smoke` as the gate.
-3. **M3 — compose harness**: Dockerfile, compose, Justfile targets, `check_audit.py`; S2, S3, S4, S9, S10. Test strategy: characterization-first (record the audit logs of a green run, then assert).
+2. **M2 — DistTrainer + examples single-node** (`ray.init()` local, `num_workers=2`): `hello_blocks` (the `just smoke` gate), `toy_contrastive` (`just contrastive`), CLI; S1, S5, S7. Test strategy: test-after with `just smoke` as the gate.
+3. **M3 — harness**: driver interface (`deploy/driver.sh`, compose driver, uncloud stub), Dockerfile, compose, Justfile targets, `run_scenarios.py` + `check_audit.py`; S2, S3, S4 on local shared storage, then S9, S10 against MinIO. Test strategy: characterization-first (record the audit logs of a green run, then assert).
 4. **M4 — segment hooks and streaming mode**: `remine.py` as a streaming writer, S6, S11; time-budget policy, S8; `gc`.
 5. **M5 — KubeRay variant** (phase 2).
 
@@ -529,27 +541,28 @@ Native recipe dependencies, not recursive `just` calls; harness targets take pos
 ```just
 export UV_CACHE_DIR := ".local/uv-cache"
 
-setup:            uv sync
+setup:            uv sync --all-groups
 fmt path=".":     uv run ruff format {{path}}
 lint path=".":    uv run ruff check {{path}}
-typecheck:        uv run ty check
-static:           uv run python -m compileall distrainer examples
+typecheck:        uv run ty check distrainer
+static:           uv run python -m compileall -q distrainer examples tests
 test target="tests":  uv run python -m pytest {{target}}
-regression:       uv run python -m pytest regression_tests
-smoke:            uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml   # single-node ray.init(), 2 workers, 1 segment
+regression:       uv run python -m pytest regression_tests   # exit code 5 (no tests yet) is tolerated
+smoke:            uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml   # single-node ray.init(), 2 workers, 1 segment
+contrastive:      uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml   # the section 8 toy, not part of verify
 diff-check:       git diff --check
 verify: lint typecheck static test regression smoke diff-check
 
 # harness (section 9); positional args
-up N="2":         docker compose -f deploy/docker-compose.yml up -d --build --scale worker={{N}}
-down:             docker compose -f deploy/docker-compose.yml down -v
-mkbucket:         docker compose -f deploy/docker-compose.yml exec minio mc mb -p local/distrainer
-blocks:           docker compose -f deploy/docker-compose.yml exec head python examples/toy_contrastive/make_blocks.py
-train CFG:        docker compose -f deploy/docker-compose.yml exec head python examples/toy_contrastive/train.py --config {{CFG}}
-kill-worker I:    docker kill $(docker compose -f deploy/docker-compose.yml ps -q worker | sed -n '{{I}}p')
-scale N:          docker compose -f deploy/docker-compose.yml up -d --no-recreate --scale worker={{N}}
+up N="2":       deploy/driver.sh up {{N}}          # every harness target goes through the driver verbs
+down:           deploy/driver.sh down
+mkbucket:         deploy/driver.sh exec-head mc mb -p local/distrainer   # M3: all harness targets are driver verbs
+blocks:           deploy/driver.sh exec-head python examples/toy_contrastive/make_blocks.py
+train CFG:        deploy/driver.sh exec-head python examples/toy_contrastive/train.py --config {{CFG}}
+kill-worker I:    deploy/driver.sh kill-worker {{I}}
+scale N:          deploy/driver.sh scale {{N}}
 integration S="all":  uv run python integration_tests/cluster/run_scenarios.py --scenario {{S}}
-docs:             uv run python tools/check_docs.py
+docs:             @ls docs
 
 # agent context targets from templates/just/agent-contract.just (agent-contract, agent-test-plan, agent-review-plan)
 ```
@@ -564,7 +577,19 @@ docs:             uv run python tools/check_docs.py
 - Branches: `gest/<task-id>-summary` for development work, `session/<task-id>-summary` for session work; ordinary git for simple PRs. GitButler (`but`) only for stacked dependent PRs (e.g. M1 store → planner → ledger as a stack); physical git worktrees for independent parallel slices (e.g. M3 harness vs. M4 hooks). Never parallel write agents in one GitButler workspace.
 - Commit at verified durable checkpoints with `gcm` (each milestone slice, every harness/config/persistence change, every publishable doc change); push with an upstream; open/update the PR and run `gpa`; report findings and ask before merging. No Gest IDs in commit messages.
 - `gpr` decision is mandatory for every depth-1 parent and iteration: promote to a GitHub issue in `rahuldave/distrainer` (store `github.issue`/`github.url`) or record why not.
-- At every durable checkpoint regenerate the Gest graphs with `tools/gest_mermaid_graph.py` (overall + latest iteration) and report graph paths, commit hash, push status, review status, and the issue decision.
+- At every durable checkpoint show the built-in Gest graph (`gest iteration graph <iteration>`) and report commit hash, push status, review status, and the issue decision. No Mermaid graph files are generated (the `tools/gest_mermaid_graph.py` step from the skills bundle does not apply here).
 - Agentic Just targets, `AGENT_TASK v1` / `AGENT_RESULT v1` / `AGENT_TASK_DRAFT v1` packets follow the bundle's protocol rules; `gor` runs phased iterations and decides per phase between sequential work and parallel worktrees/subagents.
 
-Acceptance for M0: `just verify` green on an empty skeleton, `AGENTS.md` filled, Gest DB (`.gest/gest.db`) containing the spec artifact, outline parent, and M1 leaf tasks, and the first `gpr` decision recorded.
+Acceptance for M0: `just lint`, `just typecheck`, `just static`, `just test`, `just regression` (empty, exit tolerated) and `git diff --check` green on the skeleton (`just smoke`, and therefore `just verify`, becomes green with M2's `hello_blocks`), `AGENTS.md` and `CLAUDE.md` filled, the local Gest DB containing the spec artifact, the outline root, milestone parents M0–M5 with their GitHub issues, and iterations with leaf tasks.
+
+## 15. Decisions recorded at M0 (rev 3, September 13, 2026)
+
+Answers given before implementation started; they override earlier sections where they differ.
+
+- **Repository**: `github.com/rahuldave/distrainer`, public, MIT. Every milestone M0–M5 is a "major task" with its own GitHub issue; leaf tasks are Gest-only and carry `parent_task` pointing at the milestone task that is paired with the issue.
+- **Harness driver**: compose on OrbStack is the only implemented driver in v0.1; uncloud is a stub with the same verb interface until machines are available. Nothing in `distrainer/`, `tests/`, or `integration_tests/` may depend on the driver.
+- **Cluster size**: scenarios target 2–3 worker containers on the 8 GB OrbStack VM (16 GB Mac).
+- **Examples**: `hello_blocks` is the `just smoke` gate; `toy_contrastive` gets its own `just contrastive` target and is used by the integration scenarios; `streaming_producer` is added in M4 for S11.
+- **Storage**: local shared storage is the default everywhere; MinIO/S3 is a config option (`storage.kind: s3`) supported by the API from M1 and exercised only by S9/S10.
+- **Python**: 3.13 in `.python-version` and the Docker image; `requires-python >= 3.11` and ruff `target-version = py311` keep the code 3.11-compatible. Ray 2.58 and CPU torch 2.14 ship wheels for 3.10–3.14.
+- **Agents**: the top-level session controls and writes code; tests, verification, exploration, and harness runs are delegated to Opus subagents (see `CLAUDE.md`). Gest graphs come from `gest iteration graph`; no Mermaid graph files are generated.

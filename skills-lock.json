@@ -1,0 +1,101 @@
+{
+  "version": 1,
+  "skills": {
+    "gbs": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gbs/SKILL.md",
+      "computedHash": "75a82cf5c10df206031328137be912bea08b177b1c505daf53bfdd357a256876"
+    },
+    "gcm": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gcm/SKILL.md",
+      "computedHash": "60710ec8c50c9cc30c8cd2686892d019f0d34a8c8fbe2839733ad721b770c087"
+    },
+    "gdo": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gdo/SKILL.md",
+      "computedHash": "5ce85823a0e64e08c614b18203724cbdc3345b80a156ce5876adc2b48abc24d8"
+    },
+    "gest_git_installer": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gest_git_installer/SKILL.md",
+      "computedHash": "bed088643cc57392a21b5b3417c1da88163839eec386fbdb8ce25104d93134c6"
+    },
+    "gfm": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gfm/SKILL.md",
+      "computedHash": "94cf206ff7bde7f3d1a553eadadc6008ee09e2b7f5a5ba87ffee10f7a51279dc"
+    },
+    "gim": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gim/SKILL.md",
+      "computedHash": "13548cbb5e0ab9d46a3b9df96ee885091cd985edd30d3d2938837392711d2283"
+    },
+    "gis": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gis/SKILL.md",
+      "computedHash": "d81ec80c7decacb7ec417cfd406101b83c464daf357ecfba5810bf754f377ff6"
+    },
+    "gor": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gor/SKILL.md",
+      "computedHash": "11cba44f9a755875778778ef194a30f9b797809fba7a974d7e8ca554a0cbb00e"
+    },
+    "gpa": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gpa/SKILL.md",
+      "computedHash": "40a8d5c164a549a2fbf8b7ea2f1d92cea104648ad0858bfa810a7b6da5ce1292"
+    },
+    "gpl": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gpl/SKILL.md",
+      "computedHash": "3ae25a785371720c70cee968f14e4fb2c9764bd4dd2824fedb18cb512d1e0476"
+    },
+    "gpr": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gpr/SKILL.md",
+      "computedHash": "dce5a85f2695d28041a927e7536bc0f9890e9227a8683d67ffadcc13e301f9b9"
+    },
+    "grv": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/grv/SKILL.md",
+      "computedHash": "ed5db4d3c5e93ca23a72f427486e9c7821c351075e5a70c33712b453db989b19"
+    },
+    "gsp": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gsp/SKILL.md",
+      "computedHash": "6d4a099a612b5ffd717e799b90b7aba515bdc1654f947861374a18917c28db02"
+    },
+    "gsu": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gsu/SKILL.md",
+      "computedHash": "2ba46e4769b20ffa540e2faf3b970be54f6c781d6616ff97386c788d03c54b10"
+    },
+    "gte": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gte/SKILL.md",
+      "computedHash": "1d4f258e1a3b727f561057cccac1f1a24ff123d8aaa6ebf88d266b86629a9948"
+    },
+    "gtw": {
+      "source": "rahuldave/agent_gest_git_skills",
+      "sourceType": "github",
+      "skillPath": ".agents/skills/gtw/SKILL.md",
+      "computedHash": "051c0ec7ba2f7fb9debb89ff5a4ebbff32badcff0d3280d69508cad5d411392d"
+    }
+  }
+}

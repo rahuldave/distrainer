@@ -22,10 +22,15 @@ static:
 test target="tests":
   uv run python -m pytest {{target}}
 
+# exit code 5 = no tests collected; tolerated until the first regression test exists
 regression:
-  uv run python -m pytest regression_tests
+  uv run python -m pytest regression_tests || [ $? -eq 5 ]
 
 smoke:
+  uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml
+
+# the section 8 toy contrastive workload; not part of verify
+contrastive:
   uv run python examples/toy_contrastive/train.py --config examples/toy_contrastive/local.yaml
 
 diff-check:
