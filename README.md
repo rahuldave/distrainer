@@ -36,9 +36,9 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   (`docs/handoff-m6.md` and `docs/handoff-m5.md` are the same for M5 -> M6 and M4 -> M5).
 - [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
-  status.
+  status; what each driver verb does under KubeRay and under uncloud.
 - [`docs/distrainer-spec.md`](docs/distrainer-spec.md) — the v0.1 specification: interfaces,
-  training loop, checkpoint/storage layout, the container harness and its KubeRay variant, verification scenarios,
+  training loop, checkpoint/storage layout, the container harness and its KubeRay and uncloud variants, verification scenarios,
   milestones, and the development workflow.
 - [`docs/distrainer-design.md`](docs/distrainer-design.md) — the design sketch that preceded the spec.
 - [`docs/gest_codex_workflow.md`](docs/gest_codex_workflow.md) and

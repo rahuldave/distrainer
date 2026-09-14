@@ -7,16 +7,17 @@ Written 2026-09-14 at the end of the M6 session for the thread that picks up the
 
 ## 1. Where things stand
 
-- M0 to M5 are merged to `main` (PRs #8 to #13). M6, the uncloud variant (mode C), is PR #15 for
-  issue #14 on branch `gest/wzmmpops-m6-uncloud`: Gest parent `wzmmpops`, iteration `yqpnypqm`,
-  leaves `kptymlzx` (bootstrap and spike), `vrsqosrp` (compose file, driver, contract tests),
-  `tzloklqq` (the runner without a shared mount, the scenario runs), `utxlkkmx` (docs).
+- M0 to M6 are merged to `main` (PRs #8 to #15). M6, the uncloud variant (mode C), is the squash
+  commit `ffdc9ad` (PR #15, issue #14 closed; Gest parent `wzmmpops`, iteration `yqpnypqm`, leaves
+  `kptymlzx` bootstrap and spike, `vrsqosrp` compose file, driver and contract tests, `tzloklqq`
+  the runner without a shared mount and the scenario runs, `utxlkkmx` docs, all done); its branch
+  is deleted.
 - Under `DISTRAINER_DRIVER=uncloud` the bucket scenarios run against three OrbStack machines
   with `run_scenarios.py` reading the bucket and `check_audit.py` unchanged (section 3 has the
   numbers). S6 and S11 need a shared mount and skip.
 - Nothing is scheduled for the cloud stage yet (real VMs, S3 or R2): section 6 is the plan. It is
-  a Gest task under the M6 parent, not in an iteration; create the iteration with `gpl` when it
-  starts, as `docs/handoff-m6.md` did for M6.
+  Gest task `rpmyqnzs` under the v0.1 root (`qvuukpsm`), not in an iteration; create the
+  iteration with `gpl` when it starts, as `docs/handoff-m6.md` did for M6.
 
 ## 2. Environment checklist
 
