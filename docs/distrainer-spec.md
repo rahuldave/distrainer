@@ -427,6 +427,8 @@ Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clust
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 
+`docs/running-modes.md` compares this harness with the laptop single-node mode (M2), uncloud, and KubeRay: where the driver runs, which storage each can use, how failures are injected, and which scenarios each mode validates.
+
 **Driver abstraction.** Nothing outside `deploy/` knows how containers are started. `deploy/driver.sh <verb> [args]` dispatches to `deploy/drivers/<DISTRAINER_DRIVER>.sh` (default `compose`) and the verbs are the whole contract: `up N`, `down`, `exec-head CMD...`, `kill-worker I`, `scale N`, `cp-from-head SRC DST`, `endpoint` (dashboard/S3 URLs). The Justfile harness targets and `integration_tests/cluster/run_scenarios.py` call only verbs, so the same scenarios run on OrbStack today, on an uncloud cluster (`uc deploy`/`uc scale`/`uc exec`, WireGuard mesh of Docker hosts) when machines are available, and on KubeRay in phase 2. The uncloud driver ships as a documented stub in v0.1.
 
 Containers are Ray nodes: one `head` and `N` `worker` services on a user-defined bridge network, sharing a named volume mounted at `/shared` (block store, checkpoints, audit logs). Ray Train needs shared storage across nodes; the volume provides it.
