@@ -373,7 +373,7 @@ def scenario_s8() -> list[str]:
     print(summarize(recs))
     n_reports = int(final_metrics(out).get("reports", 0))
     ledgers = checkpoint_ledgers(str(shared() / "runs" / "s8"))
-    print(f"S8: {len(ledgers)} time-budget checkpoints, {n_reports} reports per rank")
+    print(f"S8: {len(ledgers)} time-budget checkpoints, {n_reports} reports by rank 0")
     return check_s8(recs, W, n_reports, ledgers, poll_every=2)
 
 
@@ -397,7 +397,7 @@ def streaming_scenario(
     s3 = cfg.storage.kind == "s3"
     if s3:
         up(2, "minio", env=env)
-        driver("mkbucket", "distrainer", env=env)
+        driver("mkbucket", cfg.store_root.split("/", 1)[0], env=env)
         store_uri = f"s3://{cfg.store_root}"  # the whole streamed store belongs to this run
         run_uri = f"s3://{cfg.storage_path}/{run_name}"
         s3_rm([store_uri, run_uri], env or {})
@@ -414,7 +414,7 @@ def streaming_scenario(
         env=env,
         name=f"{run_name}-producer",
     )
-    deadline = time.monotonic() + 60
+    deadline = time.monotonic() + (180 if s3 else 60)  # a bucket probe is a docker exec
     while not log_exists(store_uri, env):  # the trainer must find the log, not build a batch one
         _check_alive(producer)
         if time.monotonic() > deadline:
@@ -453,25 +453,30 @@ def streaming_scenario(
         problems, info = check_streaming_run(fs, root, *args)
     print(info["summary"])
     print(f"{run_name.upper()} segment start gaps: {info['gaps']}")
-    print(
-        f"{run_name.upper()}: log keeps segments {info['kept']}, "
-        f"last checkpoint segment {info['last_ckpt']}"
-    )
+    if info["last_ckpt"] is not None:
+        print(
+            f"{run_name.upper()}: log keeps segments {info['kept']}, "
+            f"last checkpoint segment {info['last_ckpt']}"
+        )
     return problems
 
 
 def log_exists(store_uri: str, env: dict[str, str] | None = None) -> bool:
-    """Whether a block log exists under ``store_uri`` (a bucket is probed inside the head)."""
+    """Whether a block log exists under ``store_uri`` (a bucket is probed inside the head; a
+    failing probe counts as "not yet")."""
     if store_uri.startswith("s3://"):
-        out = head_python(
-            "from distrainer.log import BlockLog\n"
-            "from distrainer.storage import resolve, s3_options_from_env\n"
-            f"fs, root = resolve({store_uri!r}, create=False, **s3_options_from_env())\n"
-            "print(BlockLog(fs, root).exists())\n",
-            env=env,
-        )
-        return out.strip().splitlines()[-1:] == ["True"]
-    return (Path(store_uri) / "log" / "_meta.json").exists()
+        try:
+            out = head_python(
+                "from distrainer.log import BlockLog\n"
+                "from distrainer.storage import resolve, s3_options_from_env\n"
+                f"fs, root = resolve({store_uri!r}, create=False, **s3_options_from_env())\n"
+                "print('LOG_EXISTS' if BlockLog(fs, root).exists() else 'NO_LOG')\n",
+                env=env,
+            )
+        except RuntimeError:
+            return False
+        return "LOG_EXISTS" in out.split()
+    return BlockLog(*resolve(store_uri, create=False)).exists()
 
 
 def s3_rm(prefixes: list[str], env: dict[str, str]) -> None:

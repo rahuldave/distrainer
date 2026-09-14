@@ -302,12 +302,15 @@ def check_s8(
         problems.append(f"expected at least 2 time-budget checkpoints, found {len(ledgers)}")
     if n_reports not in (len(ledgers), len(ledgers) + 1):
         problems.append(f"rank 0 reported {n_reports} times for {len(ledgers)} checkpoints")
+    sizes = {int(led["world_size"]) for led in ledgers.values()}
+    if len(sizes) > 1:
+        problems.append(f"checkpoints from several world sizes {sorted(sizes)}: not one attempt")
+    n = min(sizes) if sizes else 1
     positions = sorted(
         int(led["segment"]) * W + int(led["cursor"]) * int(led["world_size"])
         for led in ledgers.values()
     )
     for a, b in zip(positions, positions[1:], strict=False):
-        n = next(int(led["world_size"]) for led in ledgers.values())
         if b - a < poll_every * n:
             problems.append(
                 f"checkpoints at positions {a} and {b} are closer than {poll_every} poll steps"

@@ -31,3 +31,12 @@ def test_finish_returns_the_process_output_and_final_metrics_parses_it(tmp_path)
         assert "final metrics" in str(exc)
     else:
         raise AssertionError("final_metrics must fail without the line")
+
+
+def test_log_exists_probes_a_local_store(tmp_path):
+    from distrainer.log import BlockLog
+    from distrainer.storage import resolve
+
+    assert not rs.log_exists(str(tmp_path))
+    BlockLog.create(*resolve(str(tmp_path)), W=4, seed=1)
+    assert rs.log_exists(str(tmp_path))

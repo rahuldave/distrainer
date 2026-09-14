@@ -441,7 +441,7 @@ class DistTrainer:
         for name, entry, _args in hook_specs(config.hooks):
             try:
                 load_entry(entry)  # fail on the driver, not inside rank 0 with the others waiting
-            except (ImportError, AttributeError) as exc:
+            except Exception as exc:  # ImportError, AttributeError, or the module's own error
                 raise ValueError(f"hooks.{name}: cannot import {entry!r}: {exc}") from exc
         self.resume_from_checkpoint = resume_from_checkpoint
         self._scaling_config = scaling_config

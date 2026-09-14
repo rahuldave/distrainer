@@ -80,6 +80,16 @@ def main(argv: list[str] | None = None) -> int:
         if "remine" in cfg.hooks:
             # a streamed log belongs to one run: an ended log from an earlier run would make the
             # hook a no-op, a half-written one would continue from another model's mining
+            others = [
+                d.name
+                for d in (Path(store_root) / "audit").glob("*")
+                if d.is_dir() and d.name != cfg.run_name
+            ]
+            if others:
+                raise SystemExit(
+                    f"{store_root} holds the audit trail of other runs {others}; a streamed "
+                    "store belongs to one run: use a fresh store_root or --keep"
+                )
             shutil.rmtree(store_root, ignore_errors=True)
     init_ray(cfg)
     if not BlockLog(fs, store_root).exists():

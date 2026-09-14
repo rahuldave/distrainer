@@ -50,6 +50,7 @@ def produce(
     rows: int = 32,
     features: int = 8,
     progress: Callable[[str], None] | None = None,
+    on_created: Callable[[], None] | None = None,
 ) -> list[Segment]:
     """Stream ``segments * W`` blocks into a new log under ``root`` and end it.
 
@@ -58,6 +59,8 @@ def produce(
     producer sleeps ``sleep_s`` after each segment committed while pushing (the ``shuffle_buffer
     - 1`` segments flushed at the end commit back to back). Block ids are ``p<arrival index>``;
     every commit is reported through ``progress`` as ``segment N committed at <time>``.
+    ``on_created`` runs once the log exists and before the first block (a test uses it to let
+    the trainer open the log first).
     """
     if segments <= 0 or W <= 0:
         raise ValueError("segments and W must be positive")
@@ -65,6 +68,8 @@ def produce(
     if BlockLog(fs, root).exists():
         raise FileExistsError(f"a log already exists under {root}; a stream cannot be resumed")
     log = BlockLog.create(fs, root, W=W, seed=seed, created_by="streaming_producer")
+    if on_created is not None:
+        on_created()
     writer = StreamingWriter(log, shuffle_buffer_segments=shuffle_buffer)
     rng = np.random.default_rng(seed)
     w_true = rng.normal(size=features)

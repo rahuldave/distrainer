@@ -1,5 +1,7 @@
 """The streaming producer example (S11): blocks streamed into a log with sleeps and _END."""
 
+from pathlib import Path
+
 import pytest
 from test_train_loop import fake_ray  # noqa: F401 (fixture)
 
@@ -97,6 +99,16 @@ def test_trainer_waits_for_a_live_producer_and_gc_keeps_the_window(tmp_path, fak
     fs, root = cfg.store_fs()
     produced: list = []
     messages: list[str] = []
+    import time
+
+    def trainer_is_waiting() -> None:
+        # the trainer opens its audit file before it waits for segment 0: only push blocks once
+        # it is there, so the rank really waits at every boundary whatever the machine's load
+        deadline = time.monotonic() + 30
+        while not (Path(root) / "audit" / "stream" / "0-0.jsonl").exists():
+            assert time.monotonic() < deadline, "trainer did not start"
+            time.sleep(0.01)
+
     thread = threading.Thread(
         target=lambda: produced.extend(
             produce(
@@ -109,13 +121,12 @@ def test_trainer_waits_for_a_live_producer_and_gc_keeps_the_window(tmp_path, fak
                 shuffle_buffer=2,
                 rows=4,
                 progress=messages.append,
+                on_created=trainer_is_waiting,
             )
         ),
         daemon=True,
     )
     thread.start()
-    import time
-
     deadline = time.monotonic() + 10
     while not BlockLog(fs, root).exists():  # as the scenario runner does before train.py
         assert time.monotonic() < deadline, "producer did not create the log"
