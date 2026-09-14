@@ -1,6 +1,6 @@
 # distrainer — specification v0.1
 
-*September 9, 2026 (rev 2: block log replaces the namespace/plan store); rev 3, September 13, 2026: decisions recorded before implementation started, see section 15. Supersedes the sketch in `docs/distrainer-design.md` where they differ. Target: Ray 2.58 (Train v2 default-on), PyTorch CPU build for local testing, Python 3.11.*
+*September 9, 2026 (rev 2: block log replaces the namespace/plan store); rev 3, September 13, 2026: decisions recorded before implementation started, see section 15. Supersedes the sketch in `docs/distrainer-design.md` where they differ. Target: Ray 2.58 (Train v2 default-on), PyTorch CPU build for local testing, Python 3.13 with `requires-python >= 3.11`.*
 
 ## 1. Scope
 
@@ -424,7 +424,7 @@ Containers are Ray nodes: one `head` and `N` `worker` services on a user-defined
 `deploy/Dockerfile` (arm64-native under OrbStack):
 
 ```dockerfile
-FROM python:3.11-slim
+FROM python:3.13-slim
 RUN pip install --no-cache-dir "ray[data,train]==2.58.0" pyarrow pandas \
     && pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
 COPY . /app
@@ -591,4 +591,5 @@ Answers given before implementation started; they override earlier sections wher
 - **Cluster size**: scenarios target 2–3 worker containers on the 8 GB OrbStack VM (16 GB Mac).
 - **Examples**: `hello_blocks` is the `just smoke` gate; `toy_contrastive` gets its own `just contrastive` target and is used by the integration scenarios; `streaming_producer` is added in M4 for S11.
 - **Storage**: local shared storage is the default everywhere; MinIO/S3 is a config option (`storage.kind: s3`) supported by the API from M1 and exercised only by S9/S10.
+- **Python**: 3.13 in `.python-version` and the Docker image; `requires-python >= 3.11` and ruff `target-version = py311` keep the code 3.11-compatible. Ray 2.58 and CPU torch 2.14 ship wheels for 3.10–3.14.
 - **Agents**: the top-level session controls and writes code; tests, verification, exploration, and harness runs are delegated to Opus subagents (see `CLAUDE.md`). Gest graphs come from `gest iteration graph`; no Mermaid graph files are generated.

@@ -27,7 +27,7 @@ request, it must say why in the final response.
 
 Project invariants (from the spec):
 
-- Block-native training on Ray Train v2 (Ray 2.58, CPU torch, Python 3.11).
+- Block-native training on Ray Train v2 (Ray 2.58, CPU torch, Python 3.13 with a 3.11 floor).
   Unit hierarchy: row < block (one Parquet file) < step (`world_size` blocks)
   < segment (`W` blocks, one immutable `log/<seq>.json`) < log.
 - `W` is fixed per log and must be a multiple of every allowed world size.

@@ -68,7 +68,8 @@ then this file for the rules that are specific to Claude Code sessions.
   `cx --in A --out B -- cmd` runs only when inputs/outputs/command changed;
   state in `.cx/state.json` (gitignored); `cx lint` validates. Wrap only
   file-producing stages such as `make_blocks.py`, never tests or lint.
-- Python: uv-managed, Python 3.11 (`.python-version`), `just setup` runs
+- Python: uv-managed, Python 3.13 (`.python-version`; the floor in
+  `pyproject.toml` is 3.11, so keep code 3.11-compatible), `just setup` runs
   `uv sync --all-groups`. Ray 2.58 with Train v2 on by default, CPU torch
   wheels. `ty` is the type checker.
 - Local multi-node harness: OrbStack (docker context `orbstack`, VM 8 CPUs /

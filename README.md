@@ -26,7 +26,7 @@ Pre-M0 skeleton. Milestones are in the spec (section 12); development follows th
 
 ## Development
 
-Requires `uv`, `just`, and Python 3.11+. For the multi-node harness: Docker via OrbStack.
+Requires `uv`, `just`, and Python 3.13 (`.python-version`; 3.11+ supported). For the multi-node harness: Docker via OrbStack.
 
 ```bash
 just setup      # uv sync
