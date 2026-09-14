@@ -11,6 +11,8 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     RAY_ENABLE_UV_RUN_RUNTIME_ENV=0 \
     RAY_DISABLE_DOCKER_CPU_WARNING=1
 WORKDIR /app
+# procps: the scenario runner's abort path runs `pkill` inside the head (the slim image has none)
+RUN apt-get update && apt-get install -y --no-install-recommends procps && rm -rf /var/lib/apt/lists/*
 # dependency layer (cached until the lock changes), then the project itself
 COPY pyproject.toml uv.lock README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --no-install-project
@@ -18,3 +20,6 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev
 ENV PATH="/app/.venv/bin:$PATH"
 RUN chmod +x deploy/ray-head.sh deploy/ray-worker.sh
+# Debian's /etc/profile resets PATH in login shells (`bash -lc`, which some KubeRay code paths and
+# tools use): put the virtualenv back there so `ray` and `python` are found either way
+RUN printf 'export PATH=/app/.venv/bin:$PATH\n' > /etc/profile.d/distrainer-venv.sh
