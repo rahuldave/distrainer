@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Cluster-driver verb interface (spec section 9). Dispatches to deploy/drivers/<DISTRAINER_DRIVER>.sh
-# (default: compose). The verbs are the whole contract between the Justfile / scenario runner and
-# a way of running containers:
+# (default: compose; kuberay for OrbStack's Kubernetes). The verbs are the whole contract between
+# the Justfile / scenario runner and a way of running containers:
 #   build                  build the node image
 #   up N [minio]           head + N workers (+ MinIO with the minio profile)
 #   down                   stop the containers (the MinIO volume survives for cold-restore tests)
@@ -18,6 +18,8 @@
 #   endpoint               print dashboard / S3 URLs
 #   mkbucket [NAME]        create the S3 bucket (MinIO profile)
 #   ps | logs [SERVICE]    inspect
+#   operator               (kuberay only) install the KubeRay operator once
+#   submit [CONFIG]        (kuberay only) run hello_blocks as a RayJob on the running cluster
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 driver="${DISTRAINER_DRIVER:-compose}"

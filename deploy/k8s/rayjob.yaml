@@ -1,0 +1,24 @@
+# A RayJob that runs hello_blocks on the RayCluster from raycluster.yaml (the Kubernetes-native way
+# to submit a run; the scenario runner instead execs train.py in the head pod, as it does under
+# compose). KubeRay creates a submitter Job that runs `ray job submit` against the head, so the
+# driver process runs on the head node and reads /shared like everything else.
+#   render + apply: deploy/drivers/kuberay.sh submit [CONFIG]      (DISTRAINER_DRIVER=kuberay)
+#   follow:         kubectl -n distrainer logs -f job/distrainer-hello
+apiVersion: ray.io/v1
+kind: RayJob
+metadata:
+  name: distrainer-hello
+spec:
+  entrypoint: python examples/hello_blocks/train.py --config __CONFIG__
+  submissionMode: K8sJobMode
+  clusterSelector:
+    ray.io/cluster: distrainer
+  submitterPodTemplate:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: ray-job-submitter
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+          resources:
+            requests: { cpu: "100m", memory: "128Mi" }

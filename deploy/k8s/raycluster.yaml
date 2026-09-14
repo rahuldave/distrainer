@@ -1,0 +1,111 @@
+# distrainer on KubeRay (spec section 11): pods are Ray nodes. The head pod advertises no
+# `trainer` resource, so it never runs a training worker; every pod of the `workers` group offers
+# `trainer: 1`, exactly like the compose harness. deploy/drivers/kuberay.sh renders this file
+# (__SHARED__, __ROOT__, __IMAGE__, __REPLICAS__) and applies it; `scale N` patches replicas.
+#
+# Shared storage is a hostPath volume: under OrbStack, Kubernetes runs in the VM that already sees
+# the Mac filesystem, so /shared in every pod is the same directory the compose driver bind-mounts
+# and the scenario checker reads. The source tree is mounted over the image copy (dev loop).
+# minReplicas / maxReplicas bound what `scale` may ask for; the trainer's own elastic bounds are
+# `scaling.num_workers` in the training config.
+apiVersion: ray.io/v1
+kind: RayCluster
+metadata:
+  name: distrainer
+spec:
+  rayVersion: "2.58.0"
+  headGroupSpec:
+    rayStartParams:
+      dashboard-host: "0.0.0.0"
+      num-cpus: "2"
+      object-store-memory: "200000000"
+    template:
+      spec:
+        # a deleted pod gets SIGTERM (KubeRay's preStop runs `ray stop`, which Ray reports to the
+        # trainer as a preemption notice) and is killed after this many seconds, like the 10 s of
+        # `docker stop`: `scale` down and `stop-worker` then end in a node death the run restarts from
+        terminationGracePeriodSeconds: 10
+        dnsConfig: &dns   # bound what a forwarded lookup can cost (see the workers Service below)
+          options:
+            - { name: timeout, value: "2" }
+            - { name: attempts, value: "1" }
+        containers:
+          - name: ray-head
+            image: __IMAGE__
+            imagePullPolicy: IfNotPresent   # OrbStack's Kubernetes shares the Docker image store
+            env: &env
+              - { name: RAY_TRAIN_V2_ENABLED, value: "1" }
+              # declare a dead node dead in ~3 s instead of ~30 s so a restart does not land on it
+              - { name: RAY_health_check_period_ms, value: "1000" }
+              - { name: RAY_health_check_timeout_ms, value: "1000" }
+              - { name: RAY_health_check_failure_threshold, value: "3" }
+              - { name: RAY_ENABLE_UV_RUN_RUNTIME_ENV, value: "0" }
+              - { name: RAY_USAGE_STATS_ENABLED, value: "0" }
+              # the S3 settings come from .env like docker-compose.yml (defaults: MinIO from minio.yaml)
+              - { name: S3_ENDPOINT, value: "__S3_ENDPOINT__" }
+              - { name: S3_ACCESS_KEY, value: "__S3_ACCESS_KEY__" }
+              - { name: S3_SECRET_KEY, value: "__S3_SECRET_KEY__" }
+              - { name: S3_REGION, value: "__S3_REGION__" }
+            ports:
+              - { name: gcs, containerPort: 6379 }
+              - { name: dashboard, containerPort: 8265 }
+              - { name: client, containerPort: 10001 }
+            resources:   # memory limits also size the /dev/shm volume KubeRay adds
+              requests: { cpu: "1", memory: "1Gi" }
+              limits: { memory: "3Gi" }
+            volumeMounts: &mounts
+              - { name: shared, mountPath: /shared }
+              - { name: src-distrainer, mountPath: /app/distrainer, readOnly: true }
+              - { name: src-examples, mountPath: /app/examples, readOnly: true }
+              - { name: src-integration, mountPath: /app/integration_tests, readOnly: true }
+        volumes: &volumes
+          - name: shared
+            hostPath: { path: __SHARED__, type: DirectoryOrCreate }
+          - name: src-distrainer
+            hostPath: { path: __ROOT__/distrainer, type: Directory }
+          - name: src-examples
+            hostPath: { path: __ROOT__/examples, type: Directory }
+          - name: src-integration
+            hostPath: { path: __ROOT__/integration_tests, type: Directory }
+  workerGroupSpecs:
+    - groupName: workers
+      replicas: __REPLICAS__
+      minReplicas: 1
+      maxReplicas: 8
+      rayStartParams:
+        num-cpus: "1"
+        object-store-memory: "200000000"
+        resources: '"{\"trainer\": 1}"'
+      template:
+        spec:
+          terminationGracePeriodSeconds: 10
+          dnsConfig: *dns
+          containers:
+            - name: ray-worker
+              image: __IMAGE__
+              imagePullPolicy: IfNotPresent
+              env: *env
+              resources:
+                requests: { cpu: "500m", memory: "512Mi" }
+                limits: { memory: "2Gi" }
+              volumeMounts: *mounts
+          volumes: *volumes
+---
+# Reverse DNS for the worker pods. torch.distributed looks up the peer's name on every process
+# group connection; CoreDNS has PTR records only for pods behind a headless Service, and forwards
+# the rest to the resolver outside the cluster, where a slow upstream cost 15 s per lookup and
+# stretched a trainer's start-up to ~40 s (the head already has such records from KubeRay's own
+# headless head Service). publishNotReadyAddresses: a worker's record must exist before its
+# readiness probe passes, because the trainer may start as soon as Ray reports the resource.
+apiVersion: v1
+kind: Service
+metadata:
+  name: distrainer-workers
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    ray.io/cluster: distrainer
+    ray.io/node-type: worker
+  ports:
+    - { name: raylet, port: 8076 }
