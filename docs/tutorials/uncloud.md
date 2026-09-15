@@ -211,38 +211,100 @@ bucket before a run (`check_audit.py` does not change). S6 and S11 store under `
 config and are skipped with a message. On 2026-09-14 every cluster scenario passed under this
 driver: S2 149 s, S3 146 s, S4 210 s, S8 125 s, S9 254 s, S10 205 s, S11s3 161 s.
 
-## 9. Real machines: a cloud, and S3 or R2 instead of MinIO
+## 9. Real machines: AWS, and S3 instead of MinIO
 
 Everything above is OrbStack-specific only in `deploy/uncloud/machines.sh` (how the machines
-come to exist and how ssh reaches them). The driver and the compose file work on any uncloud
-cluster; this is what changes. (Not run yet: an experiment on cloud VMs with S3 is a later stage.)
+come to exist and how ssh reaches them). Its twin for EC2 is `deploy/uncloud/aws.sh`, with the
+same verbs (`up`, `status`, `stop`, `start`, `destroy`) and two more for the store (`bucket`,
+`bucket-rm`); the driver's `machines-*` verbs dispatch to it under
+`DISTRAINER_UNCLOUD_PROVIDER=aws`. The driver and the compose file do not change. What changes
+is where things are and how the Mac reaches them, and all of it is written to one file the
+driver reads.
 
-- **Machines.** Two or three Linux VMs (Ubuntu 22.04 or later, or Debian 11+; arm64 or amd64),
-  reachable over ssh as root or a user with passwordless sudo, with UDP 51820 open between them.
-  Join them yourself: `uc machine init ubuntu@10.0.0.11 -c distrainer -n head --no-caddy
-  --no-dns` and `uc machine add ubuntu@10.0.0.12 -n worker-a`, one more for `worker-b`. Give the
-  head VM more memory than the workers (section 10).
-- **Tell the driver about them.** `DISTRAINER_UNCLOUD_MACHINES="head worker-a worker-b"` (the
-  first is the head machine), `DISTRAINER_UNCLOUD_CONTEXT=distrainer`, and the ssh route the
-  driver uses for `docker kill` on a machine: `DISTRAINER_UNCLOUD_SSH` is a printf template of
-  the ssh destination given the machine name, so either name the machines by their ssh alias
-  in `~/.ssh/config` (`DISTRAINER_UNCLOUD_SSH='%s'`) or by an address the template completes
-  (`'ubuntu@%s'`). `DISTRAINER_UNCLOUD_HOST_PREFIX` is the VMs' private subnet, so the dashboard
-  and MinIO bind to private addresses only. All of it can live in `.env`.
-- **The image.** `DISTRAINER_DRIVER=uncloud just build` pushes it over ssh to every machine;
-  for an amd64 cluster build on an amd64 host or with `docker buildx --platform linux/amd64`.
-- **Storage.** The simplest is what this tutorial does: MinIO on the head machine (the
-  `minio` service, a volume on that VM's disk). To use S3, R2, Backblaze or another
-  S3-compatible service instead, copy `examples/hello_blocks/harness-minio.yaml`, set
-  `storage.endpoint` (`https://s3.eu-west-1.amazonaws.com`, or an R2 account endpoint),
-  `storage.region`, and `storage_path` / `store_root` to your bucket and prefix; put the
-  credentials in `.env` as `S3_ACCESS_KEY` / `S3_SECRET_KEY` (the containers read them from
-  their environment) and set `S3_ENDPOINT` to the same endpoint; then `just up 2` without
-  MinIO. Azure Blob Storage is not S3-compatible; use MinIO on a VM there, or an S3 gateway.
-- **What to expect.** A real network adds latency to every block read and checkpoint write and
-  to Ray's own traffic; the scenarios' timing-sensitive parts (the S11 pacing check, the 3 s
-  dead-node threshold in the compose environment) are the ones to watch, and
-  `docs/uncloud-gotchas.md` lists the behaviours that already bit once.
+What the script builds, in the region of `DISTRAINER_AWS_REGION` (`us-east-1`):
+
+- three Graviton instances in the default VPC's first default subnet: `aws1` (the head machine,
+  `t4g.large`, 2 vCPUs, 8 GB: the Ray head, the Train controller and the driver need it,
+  section 10) and `aws2`, `aws3` (`t4g.medium`, 4 GB), Ubuntu 24.04 arm64 so the image built on
+  an arm64 Mac is pushed as it is, a 16 GB gp3 disk each, IMDSv2 only, unlimited CPU credits so
+  a busy hour never throttles the step pacing the scenarios measure (the names are not `head`
+  and `worker`: those are service names, and uncloud's DNS resolves them cluster-wide);
+- one key pair, `distrainer`, saved as `~/.ssh/distrainer-aws.pem`, and one security group,
+  `distrainer-uncloud`: ssh and the dashboard (8265) admitted from this Mac's public address only
+  (`DISTRAINER_AWS_ALLOW_CIDR`, asked of checkip.amazonaws.com; the script refuses `0.0.0.0/0`,
+  and a rule for an earlier address is revoked on the next `up` or `start`), and UDP 51820 from
+  the group itself, so WireGuard runs between the members and nobody else;
+- the uncloud cluster, context `distrainer-aws`, initialised on `aws1` and joined by the others
+  over their **private** addresses (`--wg-endpoint 172.31.x.y:51820`: stable across a stop and a
+  start, inside the group's rule), ingress off, the uncloud subnet checked against the VPC's;
+- for the store, an S3 bucket (the one `examples/hello_blocks/harness-s3.yaml` names: edit that
+  file to your own bucket name first, bucket names are global) with public access blocked, and an
+  IAM user `distrainer-harness` whose only policy is that bucket, with one access key.
+
+Everything the driver needs to know lands in `.harness/aws/env`, which `.env` points at:
+
+```bash
+just aws-bucket                       # deploy/uncloud/aws.sh bucket: the bucket, the IAM user, one access key
+just aws-machines                     # deploy/uncloud/aws.sh up: key pair, security group, instances, the cluster; about five minutes
+echo 'DISTRAINER_ENV_FILE=.harness/aws/env' >> .env   # the driver and the runner read it after .env
+export DISTRAINER_DRIVER=uncloud
+deploy/driver.sh ps                   # uc machine ls of context distrainer-aws, then uc ps (nothing yet)
+just build                            # docker build, then uc image push to the three instances over ssh (the 1.4 GB layer once)
+```
+
+`cat .harness/aws/env` shows what was settled: the provider, the context, the machine names,
+the ssh route (`DISTRAINER_UNCLOUD_SSH=%s` with `DISTRAINER_UNCLOUD_SSH_OPTS="-F
+.harness/aws/ssh_config"`, a generated ssh config with a `Host` per machine, the key and its own
+known-hosts file; `ssh -F .harness/aws/ssh_config aws1` gets you a shell), the host prefix
+(the VPC's CIDR, so the dashboard binds to the head's private address, which AWS maps to its
+public one), `DISTRAINER_UNCLOUD_HEAD_ADDRESS` (the head's public address, what `endpoint`
+prints), and the store: `S3_ENDPOINT=https://s3.us-east-1.amazonaws.com`, `S3_REGION`, and the
+access key. That last part is the one difference for the rest of the tutorial: with
+`S3_ENDPOINT` naming a store outside the cluster, `deploy/driver.sh endpoint` prints
+`s3=https://...` instead of `minio=...`, the scenario runner deploys no MinIO and creates no
+bucket, and the configs to use are `harness-s3.yaml` and `harness-stream-s3.yaml` (the MinIO
+ones with the bucket, the endpoint and the region changed; the tests pin them together). The
+containers carry the config in the image, so a change to the bucket name needs `just build`.
+Precedence, for every driver: what your shell exports wins over both files, and the env file
+wins over `.env`, so `just uncloud-machines` (which sets the provider explicitly) still means the
+OrbStack bed while `.env` points at AWS, and `S3_ENDPOINT=http://minio:9000 just up-minio 2`
+brings MinIO back for one command.
+
+```bash
+just up 2                                              # head + two workers, no MinIO: the store is the bucket
+just blocks examples/hello_blocks/harness-s3.yaml      # log and blocks on s3://<bucket>/blocks
+just train  examples/hello_blocks/harness-s3.yaml      # hello_s3 on s3://<bucket>/runs; S1 PASS
+deploy/driver.sh endpoint                              # dashboard=http://<public address>:8265, s3=https://s3.us-east-1.amazonaws.com
+just integration S2                                    # S3, S4, S8, S9, S10, S11s3 likewise; S6 and S11 skip
+```
+
+Sections 4 to 6 work as written (`just kill-worker 2` is `docker kill` over the generated ssh
+config; `just scale 3` lands the third worker on a worker instance; `kill-head` and `up 2`
+recreate the head). Park the instances at the end of a day and bring them back the next:
+
+```bash
+deploy/driver.sh machines-stop        # aws.sh stop: only the disks are billed; the public addresses are released
+deploy/driver.sh machines-start       # aws.sh start: new addresses; ssh config, known hosts and the uc context's connections rewritten
+deploy/driver.sh machines-status      # the instances as AWS and uncloud see them, and the address ssh is admitted from
+deploy/driver.sh machines-destroy     # aws.sh destroy: terminate, delete the group and the key pair, drop the context
+deploy/uncloud/aws.sh bucket-rm       # empty and delete the bucket, delete the IAM user and its key
+```
+
+Cost, on-demand in us-east-1: about 0.15 USD per hour for the three instances with their
+public addresses while they run, 0.13 USD per day for the disks while stopped, cents for the
+bucket; `up` prints it. What the run measured is in the next section.
+
+Elsewhere than AWS: any S3-compatible service (R2, Backblaze, MinIO on a machine of yours) is
+the same `.env` lines (`S3_ENDPOINT`, `S3_REGION`, the credentials) and a copy of
+`harness-s3.yaml` with its endpoint and bucket; the machines come from wherever, joined with
+`uc machine init` and `uc machine add` as `aws.sh` does, with `DISTRAINER_UNCLOUD_MACHINES`,
+`DISTRAINER_UNCLOUD_CONTEXT`, the ssh route and `DISTRAINER_UNCLOUD_HOST_PREFIX` set by hand.
+Azure Blob Storage is not S3-compatible; use MinIO on a VM there, or an S3 gateway. An amd64
+cluster needs the image built for it (`docker buildx --platform linux/amd64`).
+
+### 9.1 What the AWS run measured
+
+<!-- filled in by the cloud run of the M7 session -->
 
 ## 10. When something is off
 

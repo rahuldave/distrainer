@@ -22,6 +22,7 @@ that a run measures the framework, not the model.
 | `local.yaml` | laptop, local Ray, 2 workers | 48 blocks of 32 rows, `W=12` (4 segments), `every_k=2`, about 30 s |
 | `harness.yaml` | container cluster, 2 to 3 workers, shared mount | 240 blocks, `W=24` (10 segments), `step_sleep_s: 0.25` so a run lasts about 30 s |
 | `harness-minio.yaml` | container cluster, everything on MinIO | same shape, `storage.kind: s3` |
+| `harness-s3.yaml` | cloud machines, everything on an S3 bucket outside the cluster (tutorial 4 section 9) | `harness-minio.yaml` with the bucket, the endpoint and the region changed (`tests/test_deploy_manifests.py` pins the pair); edit the bucket name, then `just build` |
 
 Knobs in the `train:` section: `n_blocks`, `rows_per_block`, `features`, `lr`, and `step_sleep_s`
 (a sleep per step so failure injection lands mid-run; 0 on the laptop). Any config value can be
@@ -95,6 +96,7 @@ producer).
 | `hello_blocks/local-stream.yaml` | laptop, local Ray, 2 workers | `W=12`, `gc: true` with `retention_segments: 2`; producer started by hand (Tutorial 2) |
 | `hello_blocks/harness-stream.yaml` | container cluster, 2 workers, shared mount `/shared/blocks_stream` | `W=24`, `step_sleep_s: 0.25`, `gc: true` with `retention_segments: 2`; producer started by the S11 runner in the head container |
 | `hello_blocks/harness-stream-minio.yaml` | container cluster, log, blocks, audit and checkpoints all on MinIO | same shape, `storage.kind: s3`: the segment file's single S3 put is the commit the ranks poll for (S11s3) |
+| `hello_blocks/harness-stream-s3.yaml` | the same on the bucket outside the cluster (S11s3 on the AWS bed) | `harness-stream-minio.yaml` with the bucket, the endpoint and the region of `harness-s3.yaml` |
 
 Start the producer first (it creates the log at once, so `train.py` finds it instead of building
 a batch log), then the trainer:
@@ -189,8 +191,10 @@ Each cluster scenario brings the cluster to the size it needs, waits until Ray r
 run state and audit trail of an earlier run with the same name (on the shared mount, or on the
 bucket for S9/S10), starts `train.py` inside the head, waits for the audit trail to show a few
 blocks, injects the failure, waits for the run to finish, and applies the check. Under a driver
-without a shared mount (`shared` prints nothing: uncloud), the runner's store is the bucket of
-`harness-minio.yaml`, reached from the Mac through the MinIO URL of the driver's `endpoint`: S2,
+without a shared mount (`shared` prints nothing: uncloud), the runner's store is a bucket reached
+from the Mac at the URL of the driver's `endpoint`: `harness-minio.yaml`'s on MinIO (`minio=`), or
+`harness-s3.yaml`'s outside the cluster (`s3=`, from `S3_ENDPOINT` in `.env`: then no MinIO is
+deployed and no bucket made, and S11s3 runs `harness-stream-s3.yaml`); S2,
 S3, S4 and S8 then run with that config, cleaning and reading on the bucket, while S6 and S11
 (configs storing under `/shared`) print `SKIP` and do not count as failures. The streaming
 scenarios differ in the store: S6 and S11 wipe their own store (`/shared/blocks_toy`,
@@ -239,7 +243,7 @@ bucket (above). "The head container" is the container on the head machine.
 | `kill-head` | `docker kill` of the head | `docker kill` over ssh on the head machine; the next `up` finds it stopped and `uc deploy` recreates it, the workers reconnect | S10 |
 | `down`, `wipe-shared`, `up` | containers go, the MinIO volume stays | the services go (every copy, by id), the MinIO volume on the head machine stays; `wipe-shared` is a no-op | S9 |
 | `exec-head`, `cp-from-head` | `docker compose exec`, `cp` | `uc exec -T head`, a tar stream through it (no `uc cp`) | all |
-| `shared`, `endpoint` | the shared directory; `localhost` URLs | nothing; the head machine's address (ports published inside `DISTRAINER_UNCLOUD_HOST_PREFIX`) | the runner |
+| `shared`, `endpoint` | the shared directory; `localhost` URLs | nothing; the head machine's address (ports published inside `DISTRAINER_UNCLOUD_HOST_PREFIX`; on AWS its public address) and the store, `minio=` (MinIO on the head machine) or `s3=` (a bucket outside the cluster, from `S3_ENDPOINT`: no MinIO is deployed) | the runner |
 
 What differs under the hood is in `docs/running-modes.md` C and, at length, in
 `docs/uncloud-gotchas.md` (duplicate service names, membership flaps, memory caps, the

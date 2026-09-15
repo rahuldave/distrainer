@@ -181,6 +181,16 @@ What is where:
 - Timing: an `up` takes 60 to 90 s (containers start one at a time, monitored and
   health-checked), and a scenario 1.5 to 3 times its mode B wall time; the per-step pacing is
   the same, the difference is deploy time and object-store round trips over the mesh.
+- On real machines (M7, tutorial 4 section 9): `deploy/uncloud/aws.sh` is the EC2 twin of
+  `machines.sh` (`DISTRAINER_UNCLOUD_PROVIDER=aws` routes the `machines-*` verbs to it; `stop`
+  and `start` park and resume either bed): three Graviton instances, one security group (ssh
+  from the Mac's address, WireGuard between the members), the cluster joined over the private
+  addresses, and an S3 bucket with an IAM user scoped to it instead of MinIO. It writes
+  `.harness/aws/env` (context, machines, the generated ssh config as
+  `DISTRAINER_UNCLOUD_SSH_OPTS`, the head's public address, `S3_*`), which the driver and the
+  runner read after `.env` through `DISTRAINER_ENV_FILE`. With `S3_ENDPOINT` naming a store
+  outside the cluster, `endpoint` prints `s3=<URL>` instead of `minio=...`: the runner deploys
+  no MinIO, makes no bucket, and runs `harness-s3.yaml` / `harness-stream-s3.yaml`.
 
 ## D. KubeRay on OrbStack Kubernetes (M5)
 

@@ -6,8 +6,9 @@ with the log and the run on MinIO, so the segment put is the commit). Each scena
 brings the cluster to the state it needs, runs an example inside the head container, injects
 the failure while training runs, waits for the run to finish, and checks the audit trail on the
 shared mount, or on the bucket when the driver has no shared mount (``shared`` prints nothing:
-S2, S3, S4 and S8 then run on MinIO through the driver's ``endpoint``; S6 and S11 need the mount
-and are skipped). Run: ``just integration S2`` (or ``all``).
+S2, S3, S4 and S8 then run on the bucket the driver's ``endpoint`` names: MinIO in the cluster,
+or a store outside it such as S3 when it prints ``s3=``; S6 and S11 need the mount and are
+skipped). Run: ``just integration S2`` (or ``all``).
 """
 
 from __future__ import annotations
@@ -42,9 +43,12 @@ from integration_tests.cluster.check_audit import (  # noqa: E402
 DRIVER = ROOT / "deploy" / "driver.sh"
 HARNESS_CFG = "examples/hello_blocks/harness.yaml"
 MINIO_CFG = "examples/hello_blocks/harness-minio.yaml"
+S3_CFG = "examples/hello_blocks/harness-s3.yaml"  # the same on a store outside the cluster
 REMINE_CFG = "examples/toy_contrastive/harness-remine.yaml"
 STREAM_CFG = "examples/hello_blocks/harness-stream.yaml"
 STREAM_MINIO_CFG = "examples/hello_blocks/harness-stream-minio.yaml"
+STREAM_S3_CFG = "examples/hello_blocks/harness-stream-s3.yaml"
+DOTENV = ROOT / ".env"
 _cfg = load_config(str(ROOT / HARNESS_CFG))
 _minio_cfg = load_config(str(ROOT / MINIO_CFG))
 W = _cfg.log.W
@@ -106,52 +110,95 @@ def shared() -> Path:
     return Path(out)
 
 
-def minio_endpoint(endpoint_output: str) -> str:
-    """The MinIO URL in the output of the driver's ``endpoint`` verb (``minio=http://h:9000``)."""
+def store_endpoint(endpoint_output: str) -> tuple[str, str]:
+    """``("minio", url)`` or ``("s3", url)`` from the output of the driver's ``endpoint`` verb:
+    MinIO in the cluster (``minio=http://h:9000 ...``), or a store outside it that the containers
+    reach directly (``s3=https://...``, the uncloud driver with S3_ENDPOINT set in .env)."""
+    from urllib.parse import urlparse
+
     for line in endpoint_output.splitlines():
-        if line.startswith("minio="):
-            return line.split()[0][len("minio=") :]
-    raise RuntimeError(f"the driver's endpoint verb names no minio URL:\n{endpoint_output}")
+        for kind in ("minio", "s3"):
+            if line.startswith(f"{kind}="):
+                url = line.split()[0][len(kind) + 1 :]
+                host = urlparse(url).hostname or ""
+                if not host or not all(c.isalnum() or c in ".-_" for c in host):
+                    raise RuntimeError(f"the driver's endpoint verb names no usable store: {line}")
+                return kind, url
+    raise RuntimeError(
+        f"the driver's endpoint verb names no store (minio= or s3=):\n{endpoint_output}"
+    )
+
+
+def read_dotenv(path: Path, values: dict[str, str]) -> dict[str, str]:
+    """Fill ``values`` from the ``KEY=value`` lines of an env file (comments and ``export``
+    tolerated, quotes stripped); keys absent from ``values`` are ignored."""
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :]
+        key, sep, value = line.partition("=")
+        if not sep or key.strip() not in values:
+            continue
+        value = value.strip()
+        if (
+            value[:1] in ("'", '"') and value.count(value[0]) >= 2
+        ):  # quoted: up to the closing quote
+            value = value[1 : value.index(value[0], 1)]
+        else:  # bare: an inline comment ends it, as it would for the shell
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+        values[key.strip()] = value
+    return values
 
 
 def s3_settings_from_dotenv() -> dict[str, str]:
     """The S3 credentials and region the containers use: .env when present (the drivers source
-    it), else the compose defaults. Returned, not exported: the driver subprocesses inherit this
-    process's environment and compose interpolates these names."""
+    it), then the file DISTRAINER_ENV_FILE names (in the environment, or in .env: a bootstrap's
+    env file, read after .env as the drivers do, so its settings win), else the compose
+    defaults. Returned, not exported: the driver subprocesses inherit this process's environment
+    and compose interpolates these names."""
     values = {"S3_ACCESS_KEY": "distrainer", "S3_SECRET_KEY": "distrainer123", "S3_REGION": "auto"}
-    dotenv = ROOT / ".env"
-    if dotenv.exists():
-        for raw in dotenv.read_text().splitlines():
-            line = raw.strip()
-            if line.startswith("#"):
-                continue
-            if line.startswith("export "):
-                line = line[len("export ") :]
-            key, sep, value = line.partition("=")
-            if sep and key.strip() in values:
-                values[key.strip()] = value.strip().strip("'\"")
+    pointer = os.environ.get("DISTRAINER_ENV_FILE", "")
+    if DOTENV.exists():
+        pointer = pointer or read_dotenv(DOTENV, {"DISTRAINER_ENV_FILE": ""})["DISTRAINER_ENV_FILE"]
+        read_dotenv(DOTENV, values)
+    if pointer:
+        extra = Path(pointer) if pointer.startswith("/") else ROOT / pointer
+        if not extra.exists():
+            raise RuntimeError(f"DISTRAINER_ENV_FILE={pointer} does not exist")
+        read_dotenv(extra, values)
     return values
 
 
 @dataclass(frozen=True)
 class Store:
     """Where the runner reads a scenario's audit trail, run state and checkpoints: the shared
-    mount when the driver has one, else the bucket of ``harness-minio.yaml`` reached from the
-    Mac through the MinIO URL of the driver's ``endpoint`` verb. ``check_audit`` does not care."""
+    mount when the driver has one, else a bucket reached from the Mac at the URL of the driver's
+    ``endpoint`` verb: MinIO in the cluster (``harness-minio.yaml``), or a store outside it
+    (``harness-s3.yaml``, ``external``) that the containers reach directly and that exists before
+    the cluster does. ``check_audit`` does not care."""
 
     blocks: str  # URI of the block store; the audit trail is under <blocks>/audit/<run>
     runs: str  # URI of the run state; the checkpoints are under <runs>/<run>
     cfg: str  # the hello_blocks config that writes there
-    env: dict[str, str]  # driver environment (DISTRAINER_MINIO=1 on the bucket)
+    env: dict[str, str]  # driver environment (DISTRAINER_MINIO=1 when MinIO is the store)
     s3: dict[str, Any]  # resolve() options from the Mac (endpoint, region) on the bucket
     segments: int  # segments per pass of that config's workload
     credentials: dict[str, str] | None = (
         None  # S3_ACCESS_KEY / S3_SECRET_KEY for the Mac-side client
     )
+    external: bool = (
+        False  # the bucket is outside the cluster: no MinIO to deploy or bucket to make
+    )
 
     @property
     def on_bucket(self) -> bool:
         return self.blocks.startswith("s3://")
+
+    @property
+    def bucket(self) -> str:
+        return self.blocks[len("s3://") :].split("/", 1)[0]
 
     @property
     def W(self) -> int:  # noqa: N802 (the spec's name)
@@ -221,9 +268,37 @@ class Store:
                     os.environ[k] = v
 
 
+def bucket_store() -> Store:
+    """The store on a bucket, whichever the driver's ``endpoint`` names: MinIO in the cluster
+    (``harness-minio.yaml``; ``up_bucket`` deploys it and makes the bucket), or a store outside
+    it (``harness-s3.yaml``, whose endpoint must be the one the driver prints: the containers
+    read the config, the driver the environment). Works before the cluster is up."""
+    env = {"DISTRAINER_MINIO": "1"}
+    kind, endpoint = store_endpoint(driver("endpoint", env=env))
+    settings = s3_settings_from_dotenv()
+    credentials = {k: settings[k] for k in ("S3_ACCESS_KEY", "S3_SECRET_KEY")}
+    if kind == "s3":
+        cfg = load_config(str(ROOT / S3_CFG))
+        if cfg.storage.endpoint != endpoint:
+            raise RuntimeError(
+                f"{S3_CFG} stores at {cfg.storage.endpoint} but the driver's endpoint "
+                f"(S3_ENDPOINT in .env) is {endpoint}; make them agree"
+            )
+        return Store(
+            blocks=f"s3://{cfg.store_root}", runs=f"s3://{cfg.storage_path}", cfg=S3_CFG, env={},
+            s3={"endpoint": endpoint, "region": cfg.storage.region or settings["S3_REGION"]},
+            segments=int(cfg.train["n_blocks"]) // cfg.log.W, credentials=credentials,
+            external=True,
+        )  # fmt: skip
+    return Store(
+        blocks=S3_BLOCKS, runs=S3_RUNS, cfg=MINIO_CFG, env=env,
+        s3={"endpoint": endpoint, "region": settings["S3_REGION"]},
+        segments=MINIO_SEGMENTS, credentials=credentials,
+    )  # fmt: skip
+
+
 def store_for_driver() -> Store:
-    """The shared mount if the driver prints one, else the bucket (call once the cluster is up:
-    ``endpoint`` may need it)."""
+    """The shared mount if the driver prints one, else the bucket."""
     out = driver("shared").strip()
     if out:  # has_shared(), keeping the path
         base = Path(out)
@@ -231,31 +306,31 @@ def store_for_driver() -> Store:
             blocks=str(base / "blocks"), runs=str(base / "runs"), cfg=HARNESS_CFG, env={}, s3={},
             segments=SEGMENTS,
         )  # fmt: skip
-    env = {"DISTRAINER_MINIO": "1"}
-    endpoint = minio_endpoint(driver("endpoint", env=env))
-    settings = s3_settings_from_dotenv()
-    return Store(
-        blocks=S3_BLOCKS, runs=S3_RUNS, cfg=MINIO_CFG, env=env,
-        s3={"endpoint": endpoint, "region": settings["S3_REGION"]},
-        segments=MINIO_SEGMENTS,
-        credentials={k: settings[k] for k in ("S3_ACCESS_KEY", "S3_SECRET_KEY")},
-    )  # fmt: skip
+    return bucket_store()
 
 
 def has_shared() -> bool:
     return bool(driver("shared").strip())
 
 
+def up_bucket(n: int, st: Store) -> None:
+    """Bring the cluster to ``n`` workers with what a bucket store needs: MinIO and the bucket
+    when MinIO is the store; nothing more when the store is outside the cluster (it exists)."""
+    if st.external:
+        up(n)
+    else:
+        up(n, "minio", env=st.env)
+        driver("mkbucket", st.bucket, env=st.env)
+
+
 def up_store(n: int) -> Store:
-    """Bring the cluster to ``n`` workers with what the store needs (MinIO and the bucket when
-    nothing is shared) and return the store."""
+    """Bring the cluster to ``n`` workers with what the store needs and return the store."""
     if has_shared():
         up(n)
         return store_for_driver()
-    env = {"DISTRAINER_MINIO": "1"}
-    up(n, "minio", env=env)
-    driver("mkbucket", S3_BLOCKS[len("s3://") :].split("/", 1)[0], env=env)
-    return store_for_driver()
+    st = bucket_store()
+    up_bucket(n, st)
+    return st
 
 
 def start_train(
@@ -318,6 +393,7 @@ def wait_for_blocks_s3(
     run_name: str,
     count: int,
     env: dict[str, str],
+    blocks: str,
     timeout_s: float = 300,
     proc: subprocess.Popen | None = None,
 ) -> None:
@@ -329,7 +405,7 @@ def wait_for_blocks_s3(
             head_python(
                 "from distrainer.audit import read_audit\n"
                 "from distrainer.storage import resolve, s3_options_from_env\n"
-                f"fs, root = resolve({S3_BLOCKS!r}, create=False, **s3_options_from_env())\n"
+                f"fs, root = resolve({blocks!r}, create=False, **s3_options_from_env())\n"
                 f"print(len(read_audit(fs, root, {run_name!r})))\n",
                 env=env,
             )
@@ -525,34 +601,35 @@ def scenario_s11() -> list[str]:
 
 
 def scenario_s11s3() -> list[str]:
-    """S11 with the store and the run on MinIO: every segment commit is one S3 put, the ranks
-    poll the bucket, gc deletes objects behind the retention window."""
-    return streaming_scenario(STREAM_MINIO_CFG, "s11s3", env={"DISTRAINER_MINIO": "1"})
+    """S11 with the store and the run on a bucket (MinIO, or the store outside the cluster):
+    every segment commit is one S3 put, the ranks poll the bucket, gc deletes objects behind the
+    retention window."""
+    st = bucket_store()
+    return streaming_scenario(STREAM_S3_CFG if st.external else STREAM_MINIO_CFG, "s11s3", st)
 
 
-def streaming_scenario(
-    cfg_path: str, run_name: str, env: dict[str, str] | None = None
-) -> list[str]:
+def streaming_scenario(cfg_path: str, run_name: str, store: Store | None = None) -> list[str]:
     cfg = load_config(str(ROOT / cfg_path))
     s3 = cfg.storage.kind == "s3"
+    env = store.env if store is not None else None
     # the check needs the trainer to catch up with the producer and wait: over an object store
     # across machines a segment costs the ranks 4 to 6 s (block reads and checkpoint puts over
     # the mesh) against the producer's 6.7 s cadence, and Ray Train takes 20 s to start, so the
     # bucket variant gets more segments for the trainer to close that gap
     segments, sleep_s = (14 if s3 else 10), 6.0
     if s3:
-        up(2, "minio", env=env)
-        driver("mkbucket", cfg.store_root.split("/", 1)[0], env=env)
+        assert store is not None, "a bucket config needs the bucket store"
+        up_bucket(2, store)
         store_uri = f"s3://{cfg.store_root}"  # the whole streamed store belongs to this run
         run_uri = f"s3://{cfg.storage_path}/{run_name}"
         s3_rm([store_uri, run_uri], env or {})
     else:
         shared()  # a shared-mount scenario (the config stores under /shared): skip before `up`
         up(2)
-        store = Path(cfg.store_root).name  # /shared/<store>
-        fresh_store(store)
-        fresh(run_name, store)
-        store_uri = str(shared() / store)
+        store_dir = Path(cfg.store_root).name  # /shared/<store>
+        fresh_store(store_dir)
+        fresh(run_name, store_dir)
+        store_uri = str(shared() / store_dir)
         run_uri = str(shared() / "runs" / run_name)
     producer = start_head(
         "examples/streaming_producer/produce.py",
@@ -674,9 +751,11 @@ def pick_checkpoint(
     return f"{run_uri}/{name}", int(seg), int(positions)
 
 
-def resume_check(run_name: str, segment: int, positions: int, env: dict[str, str]) -> list[str]:
-    """Run check_audit --scenario resume inside the head (the audit is on S3); the start position
-    is derived from the ledger and the world size the resumed run actually had."""
+def resume_check(
+    run_name: str, segment: int, positions: int, env: dict[str, str], st: Store
+) -> list[str]:
+    """Run check_audit --scenario resume inside the head (the audit is on the bucket); the start
+    position is derived from the ledger and the world size the resumed run actually had."""
     proc = subprocess.run(
         [
             str(DRIVER),
@@ -684,19 +763,19 @@ def resume_check(run_name: str, segment: int, positions: int, env: dict[str, str
             "python",
             "integration_tests/cluster/check_audit.py",
             "--store-root",
-            S3_BLOCKS,
+            st.blocks,
             "--run-name",
             run_name,
             "--scenario",
             "resume",
             "--W",
-            str(_minio_cfg.log.W),
+            str(st.W),
             "--ledger-segment",
             str(segment),
             "--ledger-positions",
             str(positions),
             "--expected-segments",
-            str(MINIO_SEGMENTS),
+            str(st.segments),
         ],
         cwd=ROOT,
         capture_output=True,
@@ -710,7 +789,7 @@ def resume_check(run_name: str, segment: int, positions: int, env: dict[str, str
     return [ln for ln in lines if "FAIL" in ln or "Error" in ln][-5:] or ["resume check failed"]
 
 
-def cli_resume(ckpt_uri: str, run_name: str, env: dict[str, str]) -> None:
+def cli_resume(ckpt_uri: str, run_name: str, env: dict[str, str], cfg: str) -> None:
     driver(
         "exec-head",
         "python",
@@ -719,7 +798,7 @@ def cli_resume(ckpt_uri: str, run_name: str, env: dict[str, str]) -> None:
         "resume",
         ckpt_uri,
         "--config",
-        MINIO_CFG,
+        cfg,
         "--entry",
         "examples.hello_blocks.train:entry",
         "--run-name",
@@ -729,75 +808,62 @@ def cli_resume(ckpt_uri: str, run_name: str, env: dict[str, str]) -> None:
 
 
 def scenario_s9() -> list[str]:
-    """Cold restore: a full run on MinIO, the cluster torn down and the shared mount wiped, the
-    cluster brought back, `distrainer resume` from the newest checkpoint URI into a new run."""
-    env = {"DISTRAINER_MINIO": "1"}
-    up(2, "minio", env=env)
-    driver("mkbucket", "distrainer", env=env)
+    """Cold restore: a full run on the bucket (MinIO, or the store outside the cluster), the
+    cluster torn down and the shared mount wiped, the cluster brought back, `distrainer resume`
+    from the newest checkpoint URI into a new run."""
+    st = bucket_store()
+    env = st.env
+    up_bucket(2, st)
     s3_rm(
         [
-            f"{S3_RUNS}/s9",
-            f"{S3_RUNS}/s9_resume",
-            f"{S3_BLOCKS}/audit/s9",
-            f"{S3_BLOCKS}/audit/s9_resume",
+            f"{st.runs}/s9",
+            f"{st.runs}/s9_resume",
+            f"{st.blocks}/audit/s9",
+            f"{st.blocks}/audit/s9_resume",
         ],
         env,
     )
-    driver(
-        "exec-head",
-        "python",
-        "examples/hello_blocks/make_blocks.py",
-        "--config",
-        MINIO_CFG,
-        env=env,
-    )
+    ensure_blocks(st.cfg)
     finish(
-        start_train(MINIO_CFG, "run_name=s9", "checkpoint.num_to_keep=null", env=env, name="s9"),
+        start_train(st.cfg, "run_name=s9", "checkpoint.num_to_keep=null", env=env, name="s9"),
         name="s9",
     )
     driver("down", env=env)
     driver("wipe-shared", env=env)
-    up(2, "minio", env=env)
+    up_bucket(2, st)
     # a completed run's newest checkpoint is the end of the log: resume from the middle one
-    ckpt, seg, positions = pick_checkpoint(f"{S3_RUNS}/s9", env, which="middle")
+    ckpt, seg, positions = pick_checkpoint(f"{st.runs}/s9", env, which="middle")
     print(f"S9 resuming from {ckpt} (segment {seg}, {positions} positions done)")
-    cli_resume(ckpt, "s9_resume", env)
-    return resume_check("s9_resume", seg, positions, env)
+    cli_resume(ckpt, "s9_resume", env, st.cfg)
+    return resume_check("s9_resume", seg, positions, env, st)
 
 
 def scenario_s10() -> list[str]:
     """Head loss mid-run: the head container (Ray head, Train controller, driver) is killed,
-    brought back, and the run continues in a new run from its latest checkpoint on MinIO."""
-    env = {"DISTRAINER_MINIO": "1"}
-    up(2, "minio", env=env)
-    driver("mkbucket", "distrainer", env=env)
+    brought back, and the run continues in a new run from its latest checkpoint on the bucket."""
+    st = bucket_store()
+    env = st.env
+    up_bucket(2, st)
     s3_rm(
         [
-            f"{S3_RUNS}/s10",
-            f"{S3_RUNS}/s10_resume",
-            f"{S3_BLOCKS}/audit/s10",
-            f"{S3_BLOCKS}/audit/s10_resume",
+            f"{st.runs}/s10",
+            f"{st.runs}/s10_resume",
+            f"{st.blocks}/audit/s10",
+            f"{st.blocks}/audit/s10_resume",
         ],
         env,
     )
-    driver(
-        "exec-head",
-        "python",
-        "examples/hello_blocks/make_blocks.py",
-        "--config",
-        MINIO_CFG,
-        env=env,
-    )
-    proc = start_train(MINIO_CFG, "run_name=s10", env=env, name="s10")
-    wait_for_blocks_s3("s10", 24, env, proc=proc)  # a segment in, with checkpoints registered
+    ensure_blocks(st.cfg)
+    proc = start_train(st.cfg, "run_name=s10", env=env, name="s10")
+    wait_for_blocks_s3("s10", 24, env, st.blocks, proc=proc)  # a segment in, checkpoints registered
     driver("kill-head", env=env)
     proc.communicate(timeout=120)  # the exec dies with the head
     _running.remove(proc)
-    up(2, "minio", env=env)  # recreates the head; workers rejoin it
-    ckpt, seg, positions = pick_checkpoint(f"{S3_RUNS}/s10", env)
+    up_bucket(2, st)  # recreates the head; workers rejoin it
+    ckpt, seg, positions = pick_checkpoint(f"{st.runs}/s10", env)
     print(f"S10 resuming from {ckpt} (segment {seg}, {positions} positions done)")
-    cli_resume(ckpt, "s10_resume", env)
-    return resume_check("s10_resume", seg, positions, env)
+    cli_resume(ckpt, "s10_resume", env, st.cfg)
+    return resume_check("s10_resume", seg, positions, env, st)
 
 
 SCENARIOS = {

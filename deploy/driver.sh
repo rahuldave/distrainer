@@ -18,14 +18,17 @@
 #                          copy, or the directory to copy into when it already exists)
 #   shared                 print the host path of the shared storage (nothing when no volume spans
 #                          the nodes: the runner then reads the S3 store instead)
-#   endpoint               print dashboard / S3 URLs
+#   endpoint               print the dashboard URL and the store: minio=<URL> (MinIO in the cluster) or
+#                          s3=<URL> (a store outside it, from S3_ENDPOINT; uncloud only)
 #   mkbucket [NAME]        create the S3 bucket (MinIO profile)
 #   ps | logs [SERVICE]    inspect (SERVICE is a compose service, or a pod under kuberay)
 #   operator               (kuberay only) install the KubeRay operator once
 #   submit [CONFIG]        (kuberay only) run hello_blocks as a RayJob on the running cluster
 #   render MANIFEST        (kuberay only) print a rendered deploy/k8s manifest
-#   machines-up | machines-status | machines-destroy
-#                          (uncloud only) the OrbStack machines that form the uncloud cluster
+#   machines-up | machines-status | machines-stop | machines-start | machines-destroy
+#                          (uncloud only) the machines that form the uncloud cluster: OrbStack
+#                          machines (deploy/uncloud/machines.sh) or EC2 instances
+#                          (deploy/uncloud/aws.sh), by DISTRAINER_UNCLOUD_PROVIDER
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 driver="${DISTRAINER_DRIVER:-compose}"
