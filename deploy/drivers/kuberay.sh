@@ -21,7 +21,17 @@
 # Worker index I (kill-worker, stop-worker) counts worker pods in creation order, 1-based.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; fi
+# .env, then the env file it (or the caller) names as DISTRAINER_ENV_FILE (a bootstrap's,
+# deploy/uncloud/aws.sh), and what the caller's environment sets wins over both files at every
+# step (docker compose's own precedence): the exported variables are restored after each file
+caller_env="$(export -p)"
+if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; eval "$caller_env"; fi
+if [ -n "${DISTRAINER_ENV_FILE:-}" ]; then
+  env_file="$DISTRAINER_ENV_FILE"
+  case "$env_file" in /*) ;; *) env_file="$root/$env_file" ;; esac
+  if [ ! -f "$env_file" ]; then echo "DISTRAINER_ENV_FILE=$DISTRAINER_ENV_FILE does not exist" >&2; exit 2; fi
+  set -a; . "$env_file"; set +a; eval "$caller_env"
+fi
 ns="${DISTRAINER_K8S_NAMESPACE:-distrainer}"
 ctx="${DISTRAINER_K8S_CONTEXT:-orbstack}"   # never the current context by accident: down/nuke delete things
 cluster="distrainer"
