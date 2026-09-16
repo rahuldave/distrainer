@@ -382,9 +382,31 @@ come back: its restart was refused because another renter had taken the host's c
 meantime (the gotchas), and nothing else was rentable at that moment. `S1` fails on such a
 run by design (it expects one attempt); the runner's recovery checks are the ones to apply.
 
-### 6.7 What is left
+### 6.7 The runner's scenarios
 
-The runner's hello_blocks scenarios (S2, S3, S4, S9, S10) need two or three worker pods with a
-`trainer` resource at once; capacity on the cheap types came and went in single units all
-afternoon, and every pull into an EU-RO-1 host took half an hour. They ran, or did not, as the
-run leaf's notes say; the numbers table above is the honest cost of the day.
+With two workers in Romania (an RTX 2000 Ada and an L4, the second Montreal pod having been
+unable to reach the head at all: the gotchas), the scenario runner ran unchanged against the
+pods, hello_blocks on the bucket:
+
+```bash
+uv run python integration_tests/cluster/run_scenarios.py --scenario S2 --keep-up
+```
+
+**S2 passed in 218 s**: the worker killed at position 27 (RunPod's stop), the run resumed at
+world size 2 from position 12 (within the replay bound the runner allows for a store outside
+the cluster) and finished at 239, and the stopped worker came back on its host in time.
+
+**S3 failed for want of a third card in time**: the runner's `scale 3` did rent a worker (an
+A40 in EU-SE-1, the only thing left) but its image pull outlasted the run, which finished at
+world size 2 and never resized; the check expects 2 to 3. Under the other drivers a new node
+joins in seconds; on RunPod it joins after a pull of 4 to 35 minutes, so the resize scenarios
+need the third pod rented and pulled *before* the run (`scale 3`, wait, then `scale 2` and
+the scenario), or a stop and start of a pre-pulled pod, which is what `kill-worker` does.
+S4, S9 and S10 (cold restores through `down` and `up`, new pods again) were left for a
+session with more capacity and time. The run leaf's notes have the exact sequence; every pod
+was terminated at 15:52.
+
+### 6.8 The day's cost
+
+About 2.5 USD for six hours of on-and-off pods, most of it pods pulling the image or waiting
+for a card; the training runs themselves were minutes. The ceiling was 30 USD.
