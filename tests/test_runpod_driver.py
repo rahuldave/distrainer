@@ -161,6 +161,7 @@ class Bed:
             "LOG": str(self.log),
             "RESP": str(self.resp),
             "RUNPOD_KEY": "test-key",
+            "DISTRAINER_RUNPOD_SSH_PROBE": "0",  # the stub's ssh host answers nothing
             "S3_ENDPOINT": "https://s3.us-east-1.amazonaws.com",
             "S3_ACCESS_KEY": "ak",
             "S3_SECRET_KEY": "sk",

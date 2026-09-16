@@ -56,6 +56,13 @@ on RunPod pods (M8, tutorial 6). Dates are when it was seen.
 - **`terminate` through the action endpoint can answer 405** for a pod that `DELETE
   /v2/pods/{id}` then removes with 204; the driver tries the action first and deletes on
   failure.
+- **The API is eventually consistent about a restarted pod** (2026-09-16): after a stop and
+  start it reports the old container's `runtime` for a while (the driver waits for a newer
+  `startedAt`), and the old direct ssh mapping for more than ten minutes (S9 and S10 sat on
+  a dead port until the driver's cache was dropped: the "slow reconnects" were that). The
+  driver now accepts a head's port only once something answers on it, and `exec-head`
+  refreshes its cache once on a refused connection. Read `status` the same way: `RUNNING`
+  from the moment a pod is rented.
 - **RunPod injects its API key into every pod** as `RUNPOD_API_KEY`, next to `RUNPOD_POD_ID`,
   `RUNPOD_DC_ID`, `RUNPOD_PUBLIC_IP`, `RUNPOD_TCP_PORT_22`, `RUNPOD_GPU_NAME`, `RUNPOD_CPU_COUNT`
   and `RUNPOD_MEM_GB`. The login-shell export carries it, as RunPod's own start script does.

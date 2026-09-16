@@ -413,7 +413,7 @@ resumed attempt replayed 49 positions where the AWS bed's allowance of 4 interva
 | S2 | a worker stopped at position 27 (RunPod's stop), the run resumed at world size 2 from position 12, the worker back on its host in time | pass, 218 s |
 | S3 | two workers plus a drained third; the runner's scale-up removed the marker and the third node joined in seconds: world size 2 to position 79, then 3 from position 36 | pass, 194 s |
 | S4 | three workers; the scale-down drained the third: world size 3 to position 29, then 2 from position 24 | pass, 297 s |
-| S9 | a full run, `down` stopping every pod, `up` starting them again, a resume from a middle checkpoint | see below |
+| S9 | a full run, `down` stopping every pod, `up` starting the head and two workers again (the third stays as the reserve), the resume from the checkpoint at segment 5 into a new run at world size 2 | pass, 1624 s (most of it the API reporting a dead ssh port for the restarted head; the gotchas) |
 | S10 | the head stopped mid-run, started again on its host (same id, a new address), the workers reconnected, the run resumed from the checkpoint at segment 2 into a new run at world size 3 | pass, 255 s |
 
 Three attempts at S3 taught what section 5 now does: a stopped pod's card is rented away
@@ -424,5 +424,7 @@ above.
 
 ### 6.8 The day's cost
 
-About 2.5 USD for six hours of on-and-off pods, most of it pods pulling the image or waiting
-for a card; the training runs themselves were minutes. The ceiling was 30 USD.
+About 6 USD of the 30 USD ceiling for roughly ten pod-hours across four clusters, most of
+it pods pulling the image, waiting for a card, or waiting for the API to catch up; the
+training runs themselves were minutes. Every pod was terminated at the end (`down` without
+the stop mode), and nothing of the cluster was left listed by the API.

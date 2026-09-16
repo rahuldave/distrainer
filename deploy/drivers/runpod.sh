@@ -161,13 +161,19 @@ create_pod() {
 # for a while, so the new one is recognised by a newer startedAt. DISTRAINER_RUNPOD_START_TIMEOUT
 # seconds at most
 wait_running() {
-  local id="$1" need_ssh="${2:-0}" after="${3:-}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port up started
+  local id="$1" need_ssh="${2:-0}" after="${3:-}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port up started host
   while :; do
     pod="$(api GET "/pods/$id")" || return 1
     st="$(printf '%s' "$pod" | jq -r '.status')"
     port="$(printf '%s' "$pod" | jq -r '.ssh.direct.port // empty')"
     up="$(printf '%s' "$pod" | jq -r '.runtime.uptime // empty')"
     started="$(printf '%s' "$pod" | jq -r '.startedAt // empty')"
+    # the API keeps a restarted pod's previous ssh mapping for many minutes: a port counts only
+    # once something answers on it
+    if [ "$need_ssh" != "0" ] && [ -n "$port" ] && [ "${DISTRAINER_RUNPOD_SSH_PROBE:-1}" != "0" ]; then
+      host="$(printf '%s' "$pod" | jq -r '.ssh.direct.host // empty')"
+      python3 -c "import socket, sys; socket.create_connection((sys.argv[1], int(sys.argv[2])), 5).close()" "$host" "$port" 2>/dev/null || port=""
+    fi
     if [ "$st" = "RUNNING" ] && [ -n "$up" ] && [ "$(printf '%s' "$pod" | jq -r '.globalNetworking.ip // empty')" != "" ] \
        && { [ -z "$after" ] || [ "$started" \> "$after" ]; } \
        && { [ "$need_ssh" = "0" ] || [ -n "$port" ]; }; then
