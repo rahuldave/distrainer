@@ -20,8 +20,9 @@ fi
 # interface is attached moments after the container starts (seen 2026-09-16: nothing at start,
 # the address there a little later), so look for up to two minutes before giving up
 if [ -z "${RAY_NODE_IP:-}" ]; then
-  ip=""; tries=0
-  while [ -z "$ip" ] && [ "$tries" -lt 60 ]; do
+  ip=""; tries=0; max=1
+  if [ -n "${RUNPOD_POD_ID:-}" ]; then max=60; fi   # only a RunPod pod has an address to wait for
+  while [ -z "$ip" ] && [ "$tries" -lt "$max" ]; do
     if [ -n "${RUNPOD_POD_ID:-}" ]; then ip="$(getent hosts "$RUNPOD_POD_ID.runpod.internal" 2>/dev/null | awk '{print $1; exit}')" || ip=""; fi
     if [ -z "$ip" ]; then ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 '^10\.')" || ip=""; fi
     if [ -z "$ip" ]; then tries=$((tries + 1)); sleep 2; fi
@@ -29,7 +30,7 @@ if [ -z "${RAY_NODE_IP:-}" ]; then
   if [ -n "$ip" ]; then
     export RAY_NODE_IP="$ip"; echo "runpod-entry: RAY_NODE_IP=$ip after $tries retries" >&2
   else
-    echo "runpod-entry: no global-networking address found in two minutes; Ray will advertise the container's own address, which other pods cannot reach" >&2
+    echo "runpod-entry: no global-networking address found; Ray will advertise the container's own address (fine outside RunPod, unreachable for other pods on it)" >&2
   fi
 fi
 # every variable of the container (the S3 settings, RAY_*, DISTRAINER_*) for login shells; the
