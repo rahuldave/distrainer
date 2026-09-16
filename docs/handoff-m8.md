@@ -8,10 +8,11 @@ before relying on them.
 
 ## 1. Where things stand
 
-- M0 to M6 are merged to `main` (PRs #8 to #15). M7, the cloud stage, is branch
+- M0 to M7 are merged to `main` (PRs #8 to #17). M7, the cloud stage, was branch
   `gest/rpmyqnzs-cloud-aws`, PR #17 (issue #16; Gest parent `rpmyqnzs` under the v0.1 root
   `qvuukpsm`, iteration `mtoypxln`, leaves `vvkwopls` bootstrap and driver, `xkpkkqqm` runner,
-  `wuykxnsn` the cloud run, `ktkzopov` docs, `ryxskkpu` cheat sheets). The branch is pushed and PR #17 is open.
+  `wuykxnsn` the cloud run, `ktkzopov` docs, `ryxskkpu` cheat sheets). Merged to `main` as the squash commit `f988a4e` (PR #17,
+  issue #16 closed) on 2026-09-16; the branch is deleted.
 - The same driver, compose file and scenario runner as M6 run on three EC2 instances with an S3
   bucket as the store: `deploy/uncloud/aws.sh` builds the bed, `.harness/aws/env` tells the
   driver about it, `endpoint` prints `s3=` and the runner deploys no MinIO. Section 3 has the

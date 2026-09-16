@@ -64,7 +64,7 @@ cluster scenarios with pods as Ray nodes on OrbStack's Kubernetes through a seco
 `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`), and M6 (PR #15): the bucket scenarios
 on an uncloud cluster of OrbStack machines through a third driver, `deploy/drivers/uncloud.sh`
 (`DISTRAINER_DRIVER=uncloud`), with the scenario runner reading the audit trail from the object
-store when nothing is shared. M7 ran the same cluster on three EC2 instances with an S3 bucket as
+store when nothing is shared. M7 (PR #17) ran the same cluster on three EC2 instances with an S3 bucket as
 the store (`deploy/uncloud/aws.sh`, tutorial 5); `docs/handoff-m8.md` says what it taught and
 what comes next.
 Milestones are in the spec (section 12);
