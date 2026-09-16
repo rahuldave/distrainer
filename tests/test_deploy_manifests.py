@@ -607,3 +607,122 @@ def test_uncloud_build_tells_a_registry_image_by_dockers_rule(tmp_path):
         tmp_path, "distrainer:local", {"DISTRAINER_PLATFORMS": "linux/amd64"}
     )  # recipe C
     assert calls[0].startswith("docker build --platform linux/amd64 -t distrainer:local")
+
+
+# ---- the GPU image: deploy/Dockerfile.gpu, deploy/runpod-entry.sh, workflows/gpu-image.yml ----
+
+GPU_DOCKERFILE = ROOT / "deploy" / "Dockerfile.gpu"
+CPU_DOCKERFILE = ROOT / "deploy" / "Dockerfile"
+RUNPOD_ENTRY = ROOT / "deploy" / "runpod-entry.sh"
+GPU_WORKFLOW = ROOT / ".github" / "workflows" / "gpu-image.yml"
+GPU_IMAGE = "ghcr.io/rahuldave/distrainer-gpu"
+
+
+def locked_version(package: str) -> str:
+    """The version uv.lock pins for ``package`` (the CPU wheel's, without its local tag)."""
+    text = (ROOT / "uv.lock").read_text()
+    versions = {
+        m.group(1).split("+")[0]
+        for m in re.finditer(rf'^name = "{package}"\nversion = "([^"]+)"', text, re.MULTILINE)
+    }
+    assert len(versions) == 1, (package, versions)
+    return versions.pop()
+
+
+def dockerfile_args(path: Path) -> dict[str, str]:
+    return dict(re.findall(r"^ARG ([A-Z_]+)=(\S+)", path.read_text(), re.MULTILINE))
+
+
+def dockerfile_env(path: Path) -> dict[str, str]:
+    """Every ``KEY=value`` of the ``ENV`` instructions (continuation lines included)."""
+    text = path.read_text().replace("\\\n", " ")
+    pairs: dict[str, str] = {}
+    for line in re.findall(r"^ENV (.+)$", text, re.MULTILINE):
+        pairs.update(re.findall(r"([A-Z_]+)=(\S+)", line))
+    return pairs
+
+
+def test_gpu_dockerfile_pins_the_locked_torch_versions_as_cuda_wheels():
+    """The image swaps the CPU wheels for the CUDA ones of the same versions: the ARGs must
+    follow uv.lock, and the install must ask for the local ``+cuXXX`` versions explicitly (a bare
+    ``==2.14.0`` is already satisfied by the CPU wheel and would install nothing)."""
+    args = dockerfile_args(GPU_DOCKERFILE)
+    assert args["TORCH_VERSION"] == locked_version("torch")
+    assert args["TORCHVISION_VERSION"] == locked_version("torchvision")
+    text = GPU_DOCKERFILE.read_text()
+    assert re.search(r"^ARG CUDA_TAG=cu\d+$", text, re.MULTILINE)
+    assert 'download.pytorch.org/whl/${CUDA_TAG}"' in text
+    assert '"torch==${TORCH_VERSION}+${CUDA_TAG}"' in text
+    assert '"torchvision==${TORCHVISION_VERSION}+${CUDA_TAG}"' in text
+    # the CUDA layer comes after the locked sync and before the project copy, and the project is
+    # installed without a second sync (which would restore the CPU wheels)
+    assert "--no-install-package torch --no-install-package torchvision" in text
+    sync, cuda, copy, project = (
+        text.index("uv sync --frozen --no-dev --no-install-project"),
+        text.index("uv pip install --python /app/.venv \\\n    --index"),
+        text.index("COPY . ."),
+        text.index("uv pip install --python /app/.venv --no-deps -e ."),
+    )
+    assert sync < cuda < copy < project
+    assert len(re.findall(r"^RUN .*uv sync ", text, re.MULTILINE)) == 1  # the comment aside
+
+
+def test_gpu_dockerfile_matches_the_cpu_image_where_they_share():
+    cpu, gpu = CPU_DOCKERFILE.read_text(), GPU_DOCKERFILE.read_text()
+    (base_cpu,) = re.findall(r"^FROM (\S+)$", cpu, re.MULTILINE)
+    (base_gpu,) = re.findall(r"^FROM (\S+)$", gpu, re.MULTILINE)
+    assert base_cpu == base_gpu  # the same Python; the CUDA runtime rides in the wheels
+    (uv_cpu,) = re.findall(r"^COPY --from=(ghcr.io/astral-sh/uv:\S+)", cpu, re.MULTILINE)
+    (uv_gpu,) = re.findall(r"^COPY --from=(ghcr.io/astral-sh/uv:\S+)", gpu, re.MULTILINE)
+    assert uv_cpu == uv_gpu
+    env_cpu, env_gpu = dockerfile_env(CPU_DOCKERFILE), dockerfile_env(GPU_DOCKERFILE)
+    assert env_cpu.items() <= env_gpu.items(), env_cpu.items() - env_gpu.items()
+    assert "openssh-server" in gpu and "ssh-keygen -A" in gpu and "procps" in gpu
+    assert 'ENTRYPOINT ["deploy/runpod-entry.sh"]' in gpu and 'CMD ["head"]' in gpu
+    assert "chmod +x deploy/ray-head.sh deploy/ray-worker.sh deploy/runpod-entry.sh" in gpu
+    assert "/etc/profile.d/distrainer-venv.sh" in gpu
+
+
+def test_runpod_entrypoint_starts_sshd_from_the_injected_key_and_runs_the_role():
+    text = RUNPOD_ENTRY.read_text()
+    assert text.startswith("#!/usr/bin/env bash")
+    assert 'if [ -n "${PUBLIC_KEY:-}" ]' in text
+    assert ">> /root/.ssh/authorized_keys" in text and "/usr/sbin/sshd" in text
+    # the key stays out of the exported environment, and so do the shell's own variables (a
+    # login shell starts in /root: an exported PWD=/app would lie to every script trusting it)
+    assert "grep -Ev '^(PUBLIC_KEY|PATH|PWD|OLDPWD|HOME|SHLVL|HOSTNAME|_|TERM)='" in text
+    assert "> /etc/rp_environment" in text and "/etc/profile.d/distrainer-env.sh" in text
+    assert re.search(r"^  head\) exec deploy/ray-head.sh ;;$", text, re.MULTILINE)
+    assert (
+        'NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-$iface}"' in text
+    )  # collectives on the 10.x interface
+    assert re.search(r"^  worker\) exec deploy/ray-worker.sh ;;$", text, re.MULTILINE)
+    assert re.search(r'^  \*\) exec "\$@" ;;$', text, re.MULTILINE)
+    lint = (ROOT / "Justfile").read_text()
+    assert "deploy/runpod-entry.sh; do bash -n" in lint  # `just lint` parses it
+    ci = (ROOT / ".github" / "workflows" / "ci.yml").read_text()
+    assert "deploy/runpod-entry.sh; do bash -n" in ci
+
+
+def test_gpu_image_workflow_builds_the_gpu_dockerfile_for_amd64_into_ghcr():
+    wf = yaml.safe_load(GPU_WORKFLOW.read_text())
+    assert wf["permissions"] == {"contents": "read", "packages": "write"}
+    on = wf[True] if True in wf else wf["on"]  # YAML parses a bare `on` as True
+    assert on["push"]["branches"] == ["main", "gest/**"]
+    assert "workflow_dispatch" in on
+    for path in ("deploy/Dockerfile.gpu", "deploy/runpod-entry.sh", "uv.lock", "distrainer/**"):
+        assert path in on["push"]["paths"], path
+    (job,) = wf["jobs"].values()
+    steps = {s.get("uses", "").split("@")[0]: s for s in job["steps"]}
+    assert steps["docker/login-action"]["with"]["registry"] == "ghcr.io"
+    assert steps["docker/login-action"]["with"]["password"] == "${{ secrets.GITHUB_TOKEN }}"
+    assert steps["docker/metadata-action"]["with"]["images"] == GPU_IMAGE
+    tags = steps["docker/metadata-action"]["with"]["tags"]
+    assert "type=ref,event=branch" in tags and "{{is_default_branch}}" in tags
+    build = steps["docker/build-push-action"]["with"]
+    assert build["file"] == "deploy/Dockerfile.gpu" and build["platforms"] == "linux/amd64"
+    assert build["push"] is True and build["context"] == "."
+    (smoke,) = [s for s in job["steps"] if s.get("name") == "Smoke the head role"]
+    assert "docker exec head ray status" in smoke["run"] and '"$IMAGE" head' in smoke["run"]
+    assert "cd /app &&" in smoke["run"]  # a login shell starts in /root
+    assert GPU_IMAGE in GPU_DOCKERFILE.read_text()  # the header names where it is pushed

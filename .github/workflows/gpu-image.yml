@@ -1,0 +1,69 @@
+# The GPU node image (deploy/Dockerfile.gpu) built here rather than on a laptop: about 3 GB of
+# CUDA wheels. Pushed to ghcr.io/rahuldave/distrainer-gpu with the workflow's own token; the
+# package must be made public once in GitHub's package settings (RunPod pulls it with no
+# credentials). Tags: `latest` on main, the branch name on a gest/ branch (the driver's
+# DISTRAINER_IMAGE names one), and the commit sha.
+name: gpu-image
+
+on:
+  push:
+    branches: [main, "gest/**"]
+    paths:
+      - deploy/Dockerfile.gpu
+      - deploy/runpod-entry.sh
+      - deploy/ray-head.sh
+      - deploy/ray-worker.sh
+      - pyproject.toml
+      - uv.lock
+      - distrainer/**
+      - examples/**
+      - integration_tests/**
+      - .github/workflows/gpu-image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/rahuldave/distrainer-gpu
+          tags: |
+            type=ref,event=branch
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.gpu
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha
+      # the head role on a native amd64 host (no GPU here): Ray must come up and stay up, which
+      # Rosetta on a Mac cannot show (the raylet's agent watchdog misfires under emulation)
+      - name: Smoke the head role
+        env:
+          IMAGE: ${{ fromJSON(steps.meta.outputs.json).tags[0] }}
+        run: |
+          docker run -d --name head "$IMAGE" head
+          sleep 45
+          docker ps --filter name=head --format '{{.Status}}' | grep -q '^Up' || { docker logs head; exit 1; }
+          docker exec head ray status
+          docker exec head python -c "import torch, torchvision; print(torch.__version__, torchvision.__version__, torch.version.cuda)"
+          docker exec head bash -lc 'cd /app && python -c "import distrainer; print(distrainer.__version__)"'
+          docker rm -f head

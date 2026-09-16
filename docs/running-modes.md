@@ -4,16 +4,16 @@ The training code never changes between these modes. What changes is where the R
 where the driver script runs, which storage both can reach, and how you break things on purpose.
 Every mode uses the same YAML shape (spec section 7); the fields that differ are called out below.
 
-| | A. Laptop, single node | B. OrbStack containers | C. uncloud machines | D. KubeRay |
-|---|---|---|---|---|
-| Ray nodes | one: this Python process starts a local cluster | one container per node on a compose network | one container per node across a WireGuard mesh | one pod per node in a `RayCluster` |
-| Training workers | Ray actors on the laptop | one worker container each (`trainer: 1` resource) | same | one worker pod each |
-| Driver (`train.py`) | the same process (`ray_address: null`) | inside the `head` container (`ray_address: auto`) | inside the head container via `uc exec` | inside the head pod via `kubectl exec`, or a `RayJob` |
-| Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines): MinIO on the head machine, or S3/R2 | a `hostPath` volume at `/shared` (or a PVC), or MinIO in the cluster |
-| Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `docker kill` over ssh on the machine (node death), `docker stop` (preemption), `uc scale` | `kubectl delete pod --force` (node death; the operator replaces the pod), a `replicas` patch |
-| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | S2, S3, S4, S8, S9, S10, S11s3 on the bucket (S6 and S11 need the mount and skip) | the same set as B (S2, S3, S4 are the acceptance) |
-| Milestone | M2 (done) | M3 (done) | M6 (done) | M5 (done) |
-| Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (`DISTRAINER_DRIVER=uncloud`) | `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`) |
+| | A. Laptop, single node | B. OrbStack containers | C. uncloud machines | D. KubeRay | E. RunPod pods |
+|---|---|---|---|---|---|
+| Ray nodes | one: this Python process starts a local cluster | one container per node on a compose network | one container per node across a WireGuard mesh | one pod per node in a `RayCluster` | one GPU pod per node on RunPod's secure cloud, joined by global networking (`<pod id>.runpod.internal`) |
+| Training workers | Ray actors on the laptop | one worker container each (`trainer: 1` resource) | same | one worker pod each | one worker pod each (`trainer: 1`, one GPU) |
+| Driver (`train.py`) | the same process (`ray_address: null`) | inside the `head` container (`ray_address: auto`) | inside the head container via `uc exec` | inside the head pod via `kubectl exec`, or a `RayJob` | inside the head pod over ssh (`exec-head`), `ray_address: auto` |
+| Storage for blocks, log, audit, checkpoints | a local directory | a shared volume mounted at `/shared`, or MinIO | S3-compatible only (no volume spans machines): MinIO on the head machine, or S3/R2 | a `hostPath` volume at `/shared` (or a PVC), or MinIO in the cluster | S3 only (nothing spans pods): the AWS bucket |
+| Break things | not applicable | `docker kill` (node death), `docker stop` (preemption), `scale` | `docker kill` over ssh on the machine (node death), `docker stop` (preemption), `uc scale` | `kubectl delete pod --force` (node death; the operator replaces the pod), a `replicas` patch | terminate the pod (node death; a new pod of the same name follows), RunPod's stop (preemption), `scale` |
+| Scenarios (spec sections 6.4 and 10) | S1, S5, S7 | S2, S3, S4, S6, S8, S9, S10, S11 (+ S1, S5, S7) | S2, S3, S4, S8, S9, S10, S11s3 on the bucket (S6 and S11 need the mount and skip) | the same set as B (S2, S3, S4 are the acceptance) | S2, S3, S4, S9, S10 on the bucket with the GPU example (S6 and S11 need a mount and skip) |
+| Milestone | M2 (done) | M3 (done) | M6 (done) | M5 (done) | M8 (in progress) |
+| Driver script | none, plain `uv run` | `deploy/drivers/compose.sh` | `deploy/drivers/uncloud.sh` (`DISTRAINER_DRIVER=uncloud`) | `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`) | `deploy/drivers/runpod.sh` (`DISTRAINER_DRIVER=runpod`) |
 
 All four modes run. The verbs of `deploy/driver.sh`
 (`build`, `up N [minio]`, `down`, `nuke`, `scale N`, `exec-head`, `kill-worker I`, `stop-worker I`,
@@ -259,6 +259,17 @@ What is where:
 - `endpoint` prints the dashboard at the head pod's IP (the head Service is headless) and
   MinIO's ClusterIP; OrbStack routes pod and service IPs from the Mac, elsewhere use
   `kubectl port-forward svc/distrainer-head-svc 8265`.
+
+## E. RunPod pods (M8, in progress)
+
+Tutorial 6 (`docs/tutorials/runpod.md`) is the guide: the GPU image (`deploy/Dockerfile.gpu`,
+built by GitHub Actions into GHCR), the driver (`deploy/drivers/runpod.sh` on the REST v2 API:
+one GPU pod per Ray node on the secure cloud with global networking, the head a GPU pod too,
+pods found by a name prefix and a `DISTRAINER_CLUSTER` marker, a spend guard on the GPU
+type's hourly price, pods terminated rather than stopped), and the run. Nothing spans pods,
+so the store is the S3 bucket and the runner reads it as under C's AWS bed; `kill-worker`
+terminates a pod and makes a new one of the same name; `kill-head` needs the next `up` to
+replace the workers as well, since they dial the head by its pod id.
 
 ## What is the same everywhere
 

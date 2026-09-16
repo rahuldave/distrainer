@@ -65,7 +65,7 @@ def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) ->
         capture_output=True,
         text=True,
         env={**os.environ, **(env or {})},
-        timeout=600,
+        timeout=1800,  # `up` on pods waits for image pulls (the GPU image is 7.5 GB)
     )
     if check and proc.returncode != 0:
         raise RuntimeError(
@@ -74,8 +74,12 @@ def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) ->
     return proc.stdout
 
 
-def wait_for_trainers(n: int, timeout_s: float = 180) -> None:
-    """Block until Ray reports ``n`` `trainer` resources (all worker containers have joined)."""
+def wait_for_trainers(n: int, timeout_s: float | None = None) -> None:
+    """Block until Ray reports ``n`` `trainer` resources (all worker containers have joined).
+    ``DISTRAINER_WAIT_TRAINERS_S`` overrides the 180 s default: a driver whose nodes are pods
+    that restart and reconnect in minutes (RunPod) needs more."""
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("DISTRAINER_WAIT_TRAINERS_S", "180"))
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         out = driver(
@@ -216,8 +220,12 @@ class Store:
         per report) and the teardown lets them run a few more steps; measured on AWS: 24 and 18
         positions against bounds of 11 and 14, so 4 (bounds 27 and 38) is the smallest value
         that passes with some headroom. The same mechanism applies to every restart there (S2
-        passed within the base bound once). Zero when the store is in the cluster."""
-        return 4 if self.external else 0
+        passed within the base bound once). Zero when the store is in the cluster;
+        ``DISTRAINER_LAG_INTERVALS`` overrides the external value (RunPod pods in Europe
+        against a bucket in us-east-1 replayed 49 positions, bound 27 at 4)."""
+        if not self.external:
+            return 0
+        return int(os.environ.get("DISTRAINER_LAG_INTERVALS", "4"))
 
     @property
     def on_bucket(self) -> bool:

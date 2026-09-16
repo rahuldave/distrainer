@@ -12,7 +12,7 @@ fmt path=".":
 lint path=".":
   uv run ruff check {{path}}
   uv run ruff format --check {{path}}
-  for f in deploy/driver.sh deploy/drivers/*.sh deploy/uncloud/*.sh deploy/ray-head.sh deploy/ray-worker.sh; do bash -n "$f" || exit 1; done
+  for f in deploy/driver.sh deploy/drivers/*.sh deploy/uncloud/*.sh deploy/ray-head.sh deploy/ray-worker.sh deploy/runpod-entry.sh; do bash -n "$f" || exit 1; done
 
 typecheck:
   uv run ty check distrainer examples integration_tests
@@ -34,6 +34,11 @@ smoke:
 # (examples/toy_contrastive/local-remine.yaml streams the log through the re-mining hook)
 contrastive CFG="examples/toy_contrastive/local.yaml":
   uv run python examples/toy_contrastive/train.py --config {{CFG}}
+
+# the GPU-needing example at CPU size: SimCLR on a CIFAR-10 subset with a kNN probe at the end;
+# not part of verify (examples/image_contrastive/local-synthetic.yaml needs no download)
+images CFG="examples/image_contrastive/local.yaml":
+  uv run python examples/image_contrastive/train.py --config {{CFG}}
 
 diff-check:
   git diff --check

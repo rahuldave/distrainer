@@ -263,6 +263,44 @@ of rows in Parquet, positives and hard negatives per row, InfoNCE with the loss-
   4090"]` with `gpuTypePriority: availability` and `cloudType: COMMUNITY`, about half a dollar
   an hour for three pods. The head pod can be a CPU pod (`computeType: CPU`) if its data center
   also offers global networking; check at run time.
+- **Budget and storage (Rahul, 2026-09-16, the next session)**: the whole RunPod example and
+  integration test stays under about **20 USD**. The blocks, the log, the audit trail and the
+  checkpoints live on the S3 bucket (`examples/image_contrastive/harness-s3.yaml` puts
+  `store_root` and `storage_path` there); pod-local disk (the container disk, no persistent
+  volume) holds only the CIFAR download on the head and Ray's checkpoint staging on the workers;
+  a pod volume is allowed if something needs one, but nothing initial or final lives on a pod.
+  Estimate from the API prices that day: global networking needs **secure-cloud NVIDIA GPU
+  pods** (the head too, no CPU pod), where RTX 2000 Ada is 0.24 USD per hour, RTX A4000 and
+  A4500 0.25, RTX A5000 0.27, RTX 4000 Ada 0.28, L4 and A40 0.49, RTX 4090 0.74; three pods
+  0.72 per hour on the cheap types, about 1.50 on L4 or A40 class; the single-pod bring-up
+  0.25 to 0.50, the cluster scenarios 0.75 to 1.50 (up to 3.00 on L4 or A40), the re-mining
+  follow-up 0.40 to 0.75: about 1.5 to 3 USD in all, 5 at the outside. Terminate pods, never
+  stop them (a stopped pod's volume costs 0.20 USD per GB-month). The driver carries a spend
+  guard (`DISTRAINER_RUNPOD_MAX_GPU_HOURLY`, default 0.60) and prints the cluster's hourly cost.
+- **The API is v2 now**: `https://api.runpod.io/v2` (REST v1 at `rest.runpod.io/v1` is retired
+  on 2026-11-15; the fields in the next bullet are v1's). v2: `POST /v2/pods` with `name`,
+  `image`, `args` (the start command, a string), `ports` (`["22/tcp"]`), `env`, `disk`
+  (container GB), `cloud` (`SECURE` | `COMMUNITY`), `dataCenterIds`, `globalNetworking`
+  (true; NVIDIA GPU pods in a global-networking data center only, secure cloud), `gpu: {id,
+  count, minRamPerGpu, minVcpuCountPerGpu, allowedCudaVersions | minCudaVersion}` (**one**
+  type per create: the driver tries `DISTRAINER_RUNPOD_GPU_TYPES` in order), `startSsh` (injects
+  `PUBLIC_KEY` with the account's registered keys; **our image must start sshd from it**,
+  RunPod's official images do), `mounts.persistent {size, path}` (omit: no volume). The pod
+  object: `status` (`PROVISIONING STARTING RUNNING EXITED ERROR TERMINATED`),
+  `globalNetworking {enabled, ip, internalDns}` (`<id>.runpod.internal`), `ssh {proxy, direct}`
+  (`direct` needs `22/tcp` in `ports`: `{host, port, username, command}`), `runtime {uptime,
+  ports}`, `cost` (USD per hour), `dataCenterId`, `cudaVersion`. `GET /v2/pods` returns
+  `{pods: [...]}` with no name filter (filter client-side by the name prefix and the
+  `DISTRAINER_CLUSTER` env marker); `GET /v2/pods/{id}`; `POST /v2/pods/{id}/action` with
+  `{"action": "start" | "stop" | "restart" | "terminate"}`; `DELETE /v2/pods/{id}`; `GET
+  /v2/pods/{id}/logs`; `GET /v2/catalog/gpus?include=AVAILABILITY&product=POD` (per type:
+  `price {secure, community}`, `dataCenters [{id, availability}]`, `cudaVersions`); `GET
+  /v2/catalog/datacenters` (`globalNetwork: true` for CA-MTL-1 CA-MTL-3 EU-CZ-1 EU-FR-1 EU-NL-1
+  EU-RO-1 EU-SE-1 EUR-IS-2 EUR-IS-4 OC-AU-1 US-CA-2 US-GA-2 US-IL-1 US-KS-2 US-NC-1 US-TX-3
+  US-TX-4 US-WA-1); `GET /v2/billing/pods` for the spend; `GET /v2/account/ssh-keys` (four
+  registered). The spec: `https://api.runpod.io/v2/openapi.json`. Availability of the cheap
+  types in those data centers was LOW or NONE at the time; RTX 2000 Ada in EU-RO-1 was the
+  cheapest open door.
 - **The account**: `RUNPOD_KEY` is in `.env` (that name, not `RUNPOD_API_KEY`); `runpodctl`
   1.9.0 and `jq` 1.7 are installed. The account holds five stopped pods that belong to a
   teammate: **the driver must act only on pods it created**, found by a name prefix
@@ -310,12 +348,18 @@ of rows in Parquet, positives and hard negatives per row, InfoNCE with the loss-
     `[B, 0, e]`) and `all_gather: true`, so the new example imports it. The re-mining hook is
     `examples/toy_contrastive/remine.py` (`hooks: {remine: ...}` in the config, the log
     streamed); its GPU variant is a follow-up leaf, not the first one.
-  - Dependencies: `pyproject.toml` pins torch from the CPU index through `[tool.uv.sources]`;
-    add `torchvision` the same way for the laptop, and a `gpu` extra whose torch and
-    torchvision come from a CUDA index (a second `[tool.uv]` index, `explicit = true`, with
-    a marker-based source; or a separate lock in `deploy/gpu/`), which `deploy/Dockerfile.gpu`
-    installs on an `nvidia/cuda:12.6.x-runtime-ubuntu22.04` base with the same uv layout as
-    `deploy/Dockerfile`. CI (`.github/workflows/ci.yml`) syncs with `--all-groups`; the GPU
+  - Dependencies: `pyproject.toml` pins torch and torchvision from the CPU index through
+    `[tool.uv.sources]`. **A `gpu` extra does not work** (tried 2026-09-16): an
+    extra-conditional source collides with the base CPU source in the Linux fork unless torch
+    leaves the base dependencies for two conflicting extras, and uv has no default extras, so
+    every plain `uv run` would then drop torch. `deploy/Dockerfile.gpu` instead installs the
+    CUDA 12.6 wheels of the locked versions over the CPU ones in a layer of its own (`uv pip
+    install --index .../whl/cu126 torch==2.14.0+cu126 torchvision==0.29.0+cu126`, the `+cu126`
+    local versions spelled out, or uv sees `==2.14.0` as satisfied), on the same
+    `python:3.13-slim` base as the CPU image (the CUDA runtime rides in the wheels, the driver
+    comes from RunPod's NVIDIA runtime; no CUDA base image), and installs the project with `uv
+    pip install --no-deps -e .` because a second `uv sync` would restore the CPU wheels.
+    `tests/test_deploy_manifests.py` pins the Dockerfile's version ARGs to `uv.lock`. CI (`.github/workflows/ci.yml`) syncs with `--all-groups`; the GPU
     image workflow is a second file, triggered on pushes to `main` that touch `deploy/`,
     `pyproject.toml`, `uv.lock`, `distrainer/` or `examples/`, and by hand, with
     `permissions: packages: write` and `docker/login-action` against `ghcr.io` using

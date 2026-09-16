@@ -90,6 +90,8 @@ them from `/app`.
 | `examples/hello_blocks/make_blocks.py` | `--config` | builds the hello_blocks corpus and batch log (no Ray needed) |
 | `examples/toy_contrastive/train.py` | same flags as hello_blocks | same flow with the InfoNCE encoder; with `hooks.remine` configured a fresh run also wipes the store, because a streamed log belongs to one run |
 | `examples/toy_contrastive/make_blocks.py` | `--config` | builds the mined corpus with Ray Data and the batch log; with `hooks.remine` configured writes only the first `initial_segments` segments and leaves the log open |
+| `examples/image_contrastive/train.py` | the hello_blocks flags plus `--no-probe` | same flow with the SimCLR encoder on PNG image blocks; after training loads the final checkpoint on the driver and prints the kNN probe accuracy (`probe: knn_acc=...`) unless `--no-probe` |
+| `examples/image_contrastive/make_blocks.py` | `--config`, `--set` | downloads CIFAR-10 (or draws the synthetic images), writes the PNG blocks, the held-out split under `probe/` and the batch log (no Ray needed) |
 | `examples/streaming_producer/produce.py` | `--config`, `--store`, `--W`, `--seed`, `--segments N` (default 8), `--sleep-s S` (default 5), `--shuffle-buffer k`, `--rows`, `--features` | creates a log and streams `N` segments of hello_blocks-style blocks into it, sleeping `S` seconds after every segment committed while pushing (the `k-1` segments flushed at the end commit back to back), then writes `_END`; prints `segment <n> committed at <time>` per commit. `--config` supplies `store_root`, `seed`, `log.W`, `log.shuffle_buffer_segments`, `train.rows_per_block` and `train.features`; the flags override it, `--store` also its store; without a config the defaults are `W=24`, `seed=7`, `k=1`, 32 rows, 8 features and `--store` is required. Refuses a store that already has a log |
 
 `--set` is how the scenario runners reuse one config file:
@@ -127,6 +129,7 @@ head container against MinIO).
 | `just test [target]`, `just regression` | `pytest tests` (or a path); `pytest regression_tests` |
 | `just smoke` | hello_blocks on a local Ray cluster with the S1 check (the gate) |
 | `just contrastive [CFG]` | toy_contrastive; `examples/toy_contrastive/local-remine.yaml` streams the log through the re-mining hook |
+| `just images [CFG]` | image_contrastive at CPU size (a CIFAR-10 subset, the download cached under `.harness/datasets`); `examples/image_contrastive/local-synthetic.yaml` needs no download |
 | `just local-scenarios [S]` | S1, S5, S7 on a local Ray cluster |
 | `just verify` | lint, typecheck, static, test, regression, smoke, `git diff --check` |
 | `just build` | the harness image (again when `uv.lock` or `deploy/Dockerfile` changes) |
@@ -134,6 +137,7 @@ head container against MinIO).
 | `just mkbucket` | create the `distrainer` bucket on MinIO |
 | `just blocks [CFG]`, `just train [CFG]` | `make_blocks.py` / `train.py` of hello_blocks inside the head container |
 | `just kill-worker I`, `just scale N` | kill worker `I` (compose: restarted after `DISTRAINER_RESTART_DELAY` s; uncloud: `docker kill` over ssh on its machine, restarted the same way; kuberay: replaced by the operator at once); resize the worker set |
+| `DISTRAINER_DRIVER=runpod just ...` | the same verbs on RunPod GPU pods (`deploy/drivers/runpod.sh`, tutorial 6); `deploy/driver.sh cost` and `catalog` are its own: the cluster's hourly cost and the account's billing; the configured GPU types' prices and availability |
 | `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just kuberay-operator` | install the KubeRay operator into the current Kubernetes context (once; `DISTRAINER_DRIVER=kuberay` for the targets above) |
 | `just uncloud-machines` | create the OrbStack machines and the uncloud cluster (once; `DISTRAINER_DRIVER=uncloud` for the targets above; `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes them) |
