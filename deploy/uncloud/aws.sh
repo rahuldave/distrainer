@@ -29,8 +29,7 @@
 #   DISTRAINER_AWS_ARCH          arm64 (the image's)           DISTRAINER_AWS_DISK_GB      16
 #   DISTRAINER_AWS_NAME          distrainer (key pair, security group, IAM user, Name tags)
 #   DISTRAINER_AWS_KEY           ~/.ssh/distrainer-aws.pem     DISTRAINER_AWS_USER         ubuntu
-#   DISTRAINER_AWS_ALLOW_CIDR    this Mac's public address/32 (asked of checkip.amazonaws.com; never 0.0.0.0/0:
-#                                the dashboard on 8265 accepts job submissions from anyone who reaches it)
+#   DISTRAINER_AWS_ALLOW_CIDR    this Mac's public address/32 (asked of checkip.amazonaws.com; /24 at the widest)
 #   DISTRAINER_AWS_BUCKET        the bucket of examples/hello_blocks/harness-s3.yaml (store_root)
 # Cost (us-east-1 on-demand, 2026): about 0.15 USD per hour for the three instances with their
 # public addresses while they run, 0.13 USD per day for their disks while stopped; the bucket
@@ -43,10 +42,10 @@
 # cross-zone traffic), WireGuard peers over the private addresses
 # (stable across stop and start; UDP 51820 admitted from the group itself only), ingress off
 # (`--public-ip none`), the uncloud subnet checked against the VPC's. The Mac reaches the
-# machines over their public addresses (ssh and the dashboard, admitted from
-# DISTRAINER_AWS_ALLOW_CIDR only; MinIO is never deployed here, an ssh tunnel reaches it if it
-# ever is); `uc` runs the system ssh, so those addresses are accepted into ~/.ssh/known_hosts
-# (stale entries for a reused address are dropped first).
+# machines over their public addresses by ssh only (admitted from DISTRAINER_AWS_ALLOW_CIDR;
+# the Ray dashboard and MinIO, if ever deployed here, are reached through an ssh tunnel);
+# `uc` runs the system ssh, so those addresses are accepted into ~/.ssh/known_hosts (stale
+# entries for a reused address are dropped first).
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 state="$root/.harness/aws"
@@ -80,7 +79,9 @@ awsc() {   # the CLI with the profile and region of this bed, text output, no pa
 my_cidr() {
   local ip
   ip="$(curl -fsS --max-time 10 https://checkip.amazonaws.com | tr -d '[:space:]')" || return 1
-  [ -n "$ip" ] || return 1
+  case "$ip" in
+    *[!0-9.]*|"") return 1 ;;   # not a dotted quad (a captive portal's HTML, an empty answer)
+  esac
   echo "$ip/32"
 }
 allowed_cidr() {   # DISTRAINER_AWS_ALLOW_CIDR, else this Mac's public address; never the whole internet
@@ -89,9 +90,12 @@ allowed_cidr() {   # DISTRAINER_AWS_ALLOW_CIDR, else this Mac's public address; 
     cidr="$(my_cidr)" || die "cannot learn this Mac's public address (checkip.amazonaws.com): set DISTRAINER_AWS_ALLOW_CIDR"
   fi
   case "$cidr" in
-    0.0.0.0/*|::/0) die "DISTRAINER_AWS_ALLOW_CIDR=$cidr would open ssh and the Ray dashboard to everyone; use your address/32" ;;
     */*) ;;
     *) die "DISTRAINER_AWS_ALLOW_CIDR=$cidr is not a CIDR (address/32)" ;;
+  esac
+  case "${cidr#*/}" in
+    2[4-9]|3[0-2]) ;;
+    *) die "DISTRAINER_AWS_ALLOW_CIDR=$cidr admits too much (ssh to the machines): /24 at the widest, your address/32 is the norm" ;;
   esac
   echo "$cidr"
 }
@@ -157,16 +161,19 @@ allow() {   # allow SG PROTO FROM TO SOURCE DESCRIPTION: one ingress rule (a CID
     case "$out" in *InvalidPermission.Duplicate*) ;; *) echo "$out" >&2; return 1 ;; esac
   fi
 }
-mac_rules() {   # mac_rules SG: "rule-id cidr" of the rules admitting this Mac
+mac_rules() {   # mac_rules SG: "rule-id cidr port" of the rules admitting this Mac
   awsc ec2 describe-security-group-rules --filters "Name=group-id,Values=$1" \
-    --query 'SecurityGroupRules[?IsEgress==`false` && Description==`"from this Mac"`].[SecurityGroupRuleId, CidrIpv4]' | tr '\t' ' '
+    --query 'SecurityGroupRules[?IsEgress==`false` && Description==`"from this Mac"`].[SecurityGroupRuleId, CidrIpv4, FromPort]' | tr '\t' ' '
 }
-ensure_rules() {   # ensure_rules SG ALLOW_CIDR: this Mac in first, then a Mac that moved networks out; WireGuard between members
+ensure_rules() {   # ensure_rules SG ALLOW_CIDR: this Mac in first, then a Mac that moved networks (or a rule
+  # for another port, from an earlier version) out; WireGuard between the members
   local stale
   allow "$1" tcp 22 22 "$2" "from this Mac"
-  allow "$1" tcp 8265 8265 "$2" "from this Mac"       # the dashboard, published on the head's private address, NATed
   allow "$1" udp "$wg_port" "$wg_port" "$1" "WireGuard between the members"
-  stale="$(mac_rules "$1" | awk -v c="$2" '$2 != c {print $1}' | tr '\n' ' ')"
+  # nothing else: the Ray dashboard (8265) accepts job submissions from anyone who reaches it and
+  # the Mac's address may be a shared NAT; reach it through the ssh route instead:
+  #   ssh -F .harness/aws/ssh_config -L 8265:<head private address>:8265 aws1
+  stale="$(mac_rules "$1" | awk -v c="$2" '$2 != c || $3 != 22 {print $1}' | tr '\n' ' ')"
   if [ -n "${stale// /}" ]; then
     # shellcheck disable=SC2086
     awsc ec2 revoke-security-group-ingress --group-id "$1" --security-group-rule-ids $stale >/dev/null && echo "revoked rules for an earlier address: $stale"
@@ -195,7 +202,7 @@ refresh() {   # .harness/aws/instances and ssh_config from the current addresses
   mkdir -p "$state"
   rows="$(instances)"
   : > "$state/instances.tmp"
-  echo "# a Host per machine of uncloud context $ctx, for the driver (DISTRAINER_UNCLOUD_SSH=%s, -F this file) and for you: ssh -F $state/ssh_config head" > "$state/ssh_config.tmp"
+  echo "# a Host per machine of uncloud context $ctx, for the driver (DISTRAINER_UNCLOUD_SSH=%s, -F this file) and for you: ssh -F $state/ssh_config ${machines[0]}" > "$state/ssh_config.tmp"
   for m in "${machines[@]}"; do
     line="$(awk -v m="$m" '$1 == m {print; exit}' <<< "$rows")"
     [ -n "$line" ] || continue
@@ -288,7 +295,7 @@ write_env() {   # .harness/aws/env: what the driver and the runner need, from th
       echo "# bucket: $(bucket_name) (the one harness-s3.yaml names, or DISTRAINER_AWS_BUCKET)"
     fi
   } > "$f.tmp")
-  mv "$f.tmp" "$f"
+  mv "$f.tmp" "$f"; chmod 600 "$f"
   echo "wrote $f (DISTRAINER_ENV_FILE=.harness/aws/env in .env makes the driver read it)"
 }
 bring_up() {   # bring_up OLD_INSTANCES_TEXT: after the instances run: addresses, ssh, the cluster, the env file
@@ -380,6 +387,7 @@ case "$verb" in
     [ -n "$all" ] || die "no instances in context $ctx: run up"
     # shellcheck disable=SC2086
     awsc ec2 wait instance-running --instance-ids $all
+    if [ -f "$state/vpc" ]; then read -r _ _ _ sg < "$state/vpc"; ensure_rules "$sg" "$(allowed_cidr)"; fi   # the Mac may have moved networks
     bring_up "$old"
     cost_note ;;
   destroy)
@@ -419,6 +427,7 @@ case "$verb" in
     fi
     awsc s3api put-public-access-block --bucket "$bucket" \
       --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+    awsc s3api put-bucket-tagging --bucket "$bucket" --tagging "TagSet=[{Key=distrainer:cluster,Value=$ctx}]"   # what bucket-rm looks for
     if ! awsc iam get-user --user-name "$iam_user" >/dev/null 2>&1; then
       awsc iam create-user --user-name "$iam_user" --tags "Key=distrainer:cluster,Value=$ctx" >/dev/null
       echo "created IAM user $iam_user"
@@ -434,13 +443,16 @@ EOP
     echo "policy $name-bucket-$bucket on $iam_user: the bucket only"
     if [ ! -f "$state/s3-credentials" ]; then
       (umask 077; awsc iam create-access-key --user-name "$iam_user" --query 'AccessKey.[AccessKeyId,SecretAccessKey]' | tr '\t' ' ' > "$state/s3-credentials.tmp")
-      mv "$state/s3-credentials.tmp" "$state/s3-credentials"
+      mv "$state/s3-credentials.tmp" "$state/s3-credentials"; chmod 600 "$state/s3-credentials"
       echo "created an access key for $iam_user ($state/s3-credentials, mode 600; a new key takes about ten seconds to work)"
     fi
     write_env ;;
   bucket-rm)
     bucket="$(bucket_name)"; iam_user="$name-harness"
     if awsc s3api head-bucket --bucket "$bucket" 2>/dev/null; then
+      # only a bucket this script made (tagged by `bucket`): the name comes from an editable config
+      owner="$(awsc s3api get-bucket-tagging --bucket "$bucket" --query 'TagSet[?Key==`"distrainer:cluster"`].Value' 2>/dev/null | tr -d '[:space:]')"
+      [ "$owner" = "$ctx" ] || die "bucket $bucket is not tagged distrainer:cluster=$ctx (not made by '$0 bucket'): refusing to delete it"
       awsc s3 rm "s3://$bucket" --recursive >/dev/null
       # an interrupted checkpoint put leaves a multipart upload behind, and a bucket with one is not empty
       awsc s3api list-multipart-uploads --bucket "$bucket" --query 'Uploads[].[Key, UploadId]' | tr '\t' ' ' \
@@ -462,7 +474,7 @@ EOP
     write_env ;;
   env)
     [ -f "$state/env" ] || write_env >/dev/null
-    cat "$state/env" ;;
+    sed 's/^\(S3_SECRET_KEY=\).*/\1<in the file>/' "$state/env" ;;
   *)
     echo "usage: $0 up | status | stop | start | destroy | bucket | bucket-rm | env" >&2; exit 2 ;;
 esac
