@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # AWS test bed for the uncloud driver: the twin of machines.sh on EC2 (docs/running-modes.md C on
-# real machines, tutorial 4 section 9). Two or three Graviton instances (arm64, so the image built
+# real machines, tutorial 5: docs/tutorials/aws.md). Two or three Graviton instances (arm64, so the image built
 # on an arm64 Mac is pushed as it is), one key pair, one security group (ssh and the published
 # ports from this Mac's address only, WireGuard between the members only), joined into one uncloud
 # cluster over their private addresses; an S3 bucket with an IAM user scoped to it as the store
@@ -38,8 +38,9 @@
 # never throttles the step pacing the scenarios measure; a fully busy vCPU beyond the baseline
 # (30% on t4g.large, 20% on t4g.medium) adds 0.04 USD per hour. `stop` when done for the day,
 # `destroy` when done for good.
-# The network, explicitly: the instances sit in the default VPC's first default subnet (one
-# availability zone, so no cross-zone traffic), WireGuard peers over the private addresses
+# The network, explicitly: the instances sit in one default subnet of the default VPC (the first
+# whose zone offers both instance types, recorded so a later `up` keeps the same zone: no
+# cross-zone traffic), WireGuard peers over the private addresses
 # (stable across stop and start; UDP 51820 admitted from the group itself only), ingress off
 # (`--public-ip none`), the uncloud subnet checked against the VPC's. The Mac reaches the
 # machines over their public addresses (ssh and the dashboard, admitted from
@@ -70,9 +71,11 @@ export UNCLOUD_CONTEXT="$ctx" UNCLOUD_AUTO_CONFIRM=true
 . "$(dirname "${BASH_SOURCE[0]}")/common.sh"   # need, ctx_exists, cluster_has, check_overlap, uc_config_rewrite, ctx_forget, wait_up
 
 die() { echo "$*" >&2; exit 1; }
-awsc() {   # the CLI with the profile and region of this bed, text output, no pager
+awsc() {   # the CLI with the profile and region of this bed, text output, no pager. Not `command aws`:
+  # under macOS bash 3.2 a failing command run through `command` ignores set -e's suppression in
+  # `if` conditions and `||` lists and exits the script with no message (the plain call is fine)
   # shellcheck disable=SC2086
-  command aws ${profile:+--profile "$profile"} --region "$region" --output text --no-cli-pager "$@"
+  aws ${profile:+--profile "$profile"} --region "$region" --output text --no-cli-pager "$@"
 }
 my_cidr() {
   local ip
@@ -103,14 +106,27 @@ instances() {   # "machine id state private public" for this context's instances
     | tr '\t' ' '
 }
 instance_ids() { awk '{print $2}' | tr '\n' ' ' | sed 's/ $//'; }   # of the instances() lines on stdin
-vpc_info() {   # "vpc cidr subnet": the default VPC and its first default subnet (one zone)
-  local vpc cidr subnet out
+vpc_info() {   # "vpc cidr subnet": the default VPC and its first default subnet in a zone that offers
+  # both instance types (a zone may lack Graviton capacity: us-east-1a of one account had none)
+  local vpc cidr subnet out subnets zones z id want
   out="$(awsc ec2 describe-vpcs --filters Name=is-default,Values=true --query 'Vpcs[0].[VpcId,CidrBlock]' | tr '\t' ' ')"
   read -r vpc cidr <<< "$out"
   [ -n "$vpc" ] && [ "$vpc" != "None" ] || die "no default VPC in $region (create one: aws ec2 create-default-vpc)"
-  subnet="$(awsc ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" Name=default-for-az,Values=true \
-    --query 'sort_by(Subnets, &AvailabilityZone)[0].SubnetId')"
-  [ -n "$subnet" ] && [ "$subnet" != "None" ] || die "no default subnet in $vpc"
+  subnets="$(awsc ec2 describe-subnets --filters "Name=vpc-id,Values=$vpc" Name=default-for-az,Values=true \
+    --query 'sort_by(Subnets, &AvailabilityZone)[].[AvailabilityZone, SubnetId]' | tr '\t' ' ')"
+  [ -n "$subnets" ] || die "no default subnet in $vpc"
+  zones="$(awsc ec2 describe-instance-type-offerings --location-type availability-zone \
+    --filters "Name=instance-type,Values=$head_type,$worker_type" --query 'InstanceTypeOfferings[].[Location, InstanceType]' | tr '\t' ' ')"
+  [ -n "$zones" ] || die "no zone of $region offers $head_type or $worker_type (or ec2:DescribeInstanceTypeOfferings is denied)"
+  want=2; { [ "$head_type" = "$worker_type" ] || [ "${#machines[@]}" -le 1 ]; } && want=1
+  subnet=""
+  while read -r z id; do
+    [ -n "$z" ] || continue
+    if [ "$(awk -v z="$z" '$1 == z {print $2}' <<< "$zones" | sort -u | wc -l | tr -d ' ')" -ge "$want" ]; then
+      subnet="$id"; echo "zone $z offers $head_type and $worker_type: subnet $id" >&2; break
+    fi
+  done <<< "$subnets"
+  [ -n "$subnet" ] || die "no default subnet of $vpc is in a zone offering $head_type and $worker_type (aws ec2 describe-instance-type-offerings --location-type availability-zone)"
   echo "$vpc $cidr $subnet"
 }
 ensure_key_pair() {
@@ -295,8 +311,15 @@ case "$verb" in
   up)
     need aws "install the AWS CLI"; need uc "brew install psviderski/tap/uncloud"; need ssh "ssh"; need curl "curl"
     need python3 "the subnet check"; need uv "the uc config rewrite"
-    info="$(vpc_info)"
-    read -r vpc cidr subnet <<< "$info"
+    # the zone is chosen once: a later `up` (a machine relaunched after a partial destroy) keeps the
+    # recorded subnet while it is still a default subnet of that VPC, so the bed stays in one zone
+    if [ -f "$state/vpc" ] && read -r vpc cidr subnet _ < "$state/vpc" && [ -n "$subnet" ] \
+      && [ "$(awsc ec2 describe-subnets --subnet-ids "$subnet" --filters "Name=vpc-id,Values=$vpc" Name=default-for-az,Values=true --query 'length(Subnets)' 2>/dev/null)" = "1" ]; then
+      echo "keeping subnet $subnet of $vpc (recorded)"
+    else
+      info="$(vpc_info)"
+      read -r vpc cidr subnet <<< "$info"
+    fi
     check_overlap "$network" "$cidr" "the VPC"
     allow_cidr="$(allowed_cidr)"
     ensure_key_pair
@@ -333,7 +356,9 @@ case "$verb" in
       read -r vpc _ _ sg < "$state/vpc"
       echo "security group $sg in $vpc admits this Mac from: $(mac_rules "$sg" | awk '{print $2}' | sort -u | tr '\n' ' ')"
     fi
-    if ctx_exists; then uc machine ls; else echo "no uc context '$ctx'"; fi ;;
+    if ! ctx_exists; then echo "no uc context '$ctx'"
+    elif instances | awk '$3 == "running"' | grep -q .; then uc machine ls
+    else echo "no instance running: uc context '$ctx' is unreachable until 'start'"; fi ;;
   stop)
     ids="$(instances | awk '$3 == "running" || $3 == "pending"' | instance_ids)"
     [ -n "$ids" ] || { echo "nothing running in context $ctx"; exit 0; }
