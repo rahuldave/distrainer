@@ -21,7 +21,7 @@ jobs:
         run: uv sync --all-groups --python ${{ matrix.python }}
       - run: uv run ruff check .
       - run: uv run ruff format --check .
-      - run: bash -n deploy/driver.sh deploy/drivers/*.sh deploy/ray-head.sh deploy/ray-worker.sh
+      - run: for f in deploy/driver.sh deploy/drivers/*.sh deploy/uncloud/*.sh deploy/ray-head.sh deploy/ray-worker.sh; do bash -n "$f" || exit 1; done
       - run: docker compose --project-directory . -f deploy/docker-compose.yml --profile minio config -q
       - run: uv run ty check distrainer examples integration_tests
       - run: uv run python -m compileall -q distrainer examples tests integration_tests

@@ -293,6 +293,11 @@ def test_uncloud_driver_endpoint_names_the_store_and_reads_the_bootstrap_env():
         "http://minio:9000)" in driver
     )  # the compose default means MinIO, anything else is outside
     assert "DISTRAINER_ENV_FILE" in driver and "DISTRAINER_UNCLOUD_SSH_OPTS" in driver
+    for other in (ROOT / "deploy" / "drivers").glob("*.sh"):  # the caller wins over .env everywhere
+        text = other.read_text()
+        assert 'set -a; . "$root/.env"; set +a; eval "$caller_env"' in text, other.name
+        if other.name != "uncloud.sh":  # the env file belongs to an uncloud bed
+            assert "DISTRAINER_ENV_FILE" not in text.split("caller_env=")[1], other.name
     runner = (ROOT / "integration_tests" / "cluster" / "run_scenarios.py").read_text()
     assert 'for kind in ("minio", "s3")' in runner and "DISTRAINER_ENV_FILE" in runner
     env_example = (ROOT / ".env.example").read_text()
@@ -424,6 +429,13 @@ def test_uncloud_driver_env_precedence_is_caller_then_env_file_then_dotenv(tmp_p
         tmp_path, "endpoint", {"S3_ENDPOINT": "http://minio:9000"}, dotenv, env_file
     )
     assert "minio=http://1.2.3.4:9000" in out  # the caller said MinIO
+    aws_file = "DISTRAINER_UNCLOUD_PROVIDER=aws\n" + env_file
+    out = run_uncloud_driver(tmp_path, "endpoint", {}, dotenv, aws_file)
+    assert "s3=https://s3.us-east-1.amazonaws.com" in out
+    out = run_uncloud_driver(  # another bed pinned by the caller: the AWS file is not read
+        tmp_path, "endpoint", {"DISTRAINER_UNCLOUD_PROVIDER": "orbstack"}, dotenv, aws_file
+    )
+    assert "minio=http://1.2.3.4:9000" in out
     import subprocess
 
     proc = subprocess.run(  # a pointer to nothing is an error, not a fallback

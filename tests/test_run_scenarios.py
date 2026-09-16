@@ -64,7 +64,7 @@ def fake_driver(tmp_path, shared: str, endpoint: str):
 def test_store_endpoint_parses_the_endpoint_verb():
     out = "dashboard=http://h:8265\nminio=http://192.168.139.221:9000 console=http://h:9001\n"
     assert rs.store_endpoint(out) == ("minio", "http://192.168.139.221:9000")
-    out = "dashboard=http://54.1.2.3:8265\ns3=https://s3.us-east-1.amazonaws.com\n"
+    out = "dashboard=http://203.0.113.7:8265\ns3=https://s3.us-east-1.amazonaws.com\n"
     assert rs.store_endpoint(out) == ("s3", "https://s3.us-east-1.amazonaws.com")
     try:
         rs.store_endpoint("dashboard=http://h:8265\n")
@@ -72,14 +72,15 @@ def test_store_endpoint_parses_the_endpoint_verb():
         assert "minio= or s3=" in str(exc)
     else:
         raise AssertionError("no store line must be an error")
-    try:  # kuberay's placeholder when nothing runs: not a store
-        rs.store_endpoint(
-            "minio=http://<no minio service>:9000 console=http://<no minio service>:9001\n"
-        )
+    # kuberay's placeholder while nothing runs: MinIO is the store, its URL comes after `up`
+    out = "minio=http://<no minio service>:9000 console=http://<no minio service>:9001\n"
+    assert rs.store_endpoint(out) == ("minio", None)
+    try:  # a store outside the cluster must be a URL
+        rs.store_endpoint("s3=https://<unset>\n")
     except RuntimeError as exc:
         assert "no usable store" in str(exc)
     else:
-        raise AssertionError("a placeholder URL must be an error")
+        raise AssertionError("a placeholder external URL must be an error")
 
 
 def test_read_dotenv_reads_values_as_the_shell_would(tmp_path):
@@ -124,7 +125,7 @@ S3_CFG_ENDPOINT = rs.load_config(str(rs.ROOT / rs.S3_CFG)).storage.endpoint
 def test_store_is_the_external_bucket_when_the_driver_prints_s3(tmp_path, monkeypatch):
     """`s3=` names a store outside the cluster: harness-s3.yaml, no MinIO in the driver env."""
     monkeypatch.setattr(rs, "DOTENV", tmp_path / "no-dotenv")
-    endpoint = f"dashboard=http://54.1.2.3:8265\\ns3={S3_CFG_ENDPOINT}"
+    endpoint = f"dashboard=http://203.0.113.7:8265\\ns3={S3_CFG_ENDPOINT}"
     monkeypatch.setattr(rs, "DRIVER", fake_driver(tmp_path, "", endpoint))
     st = rs.store_for_driver()
     cfg = rs.load_config(str(rs.ROOT / rs.S3_CFG))
@@ -167,6 +168,37 @@ def recording_driver(tmp_path, endpoint: str):
     return script, log
 
 
+def test_up_bucket_reads_minio_url_after_the_deploy_when_the_driver_had_none(tmp_path, monkeypatch):
+    """kuberay prints a placeholder MinIO URL until the service exists: bucket_store() before
+    `up` is still the MinIO store, and up_bucket returns one that knows the URL."""
+    monkeypatch.setattr(rs, "DOTENV", tmp_path / "no-dotenv")
+    monkeypatch.setattr(rs, "wait_for_trainers", lambda n, timeout_s=0: None)
+    script, log = tmp_path / "driver.sh", tmp_path / "verbs.log"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'case "$1" in\n'
+        "  shared) ;;\n"
+        f'  endpoint) if [ -e "{tmp_path}/up-done" ]; then echo "minio=http://10.0.0.5:9000 x"; '
+        'else echo "minio=http://<no minio service>:9000 x"; fi ;;\n'
+        f'  up) touch "{tmp_path}/up-done"; echo "$*" >> "{log}" ;;\n'
+        f'  *) echo "$*" >> "{log}" ;;\n'
+        "esac\n"
+    )
+    script.chmod(0o755)
+    monkeypatch.setattr(rs, "DRIVER", script)
+    st = rs.bucket_store()
+    assert not st.external and st.s3["endpoint"] is None
+    try:
+        st.fs(st.blocks)
+    except RuntimeError as exc:
+        assert "before `up`" in str(exc)
+    else:
+        raise AssertionError("a store without a URL must refuse to build a client")
+    st = rs.up_bucket(2, st)
+    assert st.s3["endpoint"] == "http://10.0.0.5:9000"
+    assert log.read_text().splitlines() == ["up 2 minio", "mkbucket distrainer"]
+
+
 def test_up_bucket_deploys_minio_only_when_minio_is_the_store(tmp_path, monkeypatch):
     monkeypatch.setattr(rs, "DOTENV", tmp_path / "no-dotenv")
     monkeypatch.setattr(rs, "wait_for_trainers", lambda n, timeout_s=0: None)
@@ -186,6 +218,8 @@ def test_up_bucket_deploys_minio_only_when_minio_is_the_store(tmp_path, monkeypa
 def test_s3_settings_follow_the_env_file_dotenv_points_at(tmp_path, monkeypatch):
     """The bootstrap's env file (DISTRAINER_ENV_FILE) is read after .env, as the driver does."""
     monkeypatch.setattr(rs, "ROOT", tmp_path)
+    monkeypatch.setenv("DISTRAINER_DRIVER", "uncloud")
+    monkeypatch.delenv("DISTRAINER_UNCLOUD_PROVIDER", raising=False)
     dotenv = tmp_path / ".env"
     monkeypatch.setattr(rs, "DOTENV", dotenv)
     assert rs.s3_settings_from_dotenv()["S3_ACCESS_KEY"] == "distrainer"  # no .env: the defaults
@@ -214,6 +248,17 @@ def test_s3_settings_follow_the_env_file_dotenv_points_at(tmp_path, monkeypatch)
         "DISTRAINER_ENV_FILE", str(tmp_path / "aws" / "env")
     )  # the shell's pointer wins
     assert rs.s3_settings_from_dotenv()["S3_ACCESS_KEY"] == "AKIA"
+    monkeypatch.setenv("DISTRAINER_DRIVER", "compose")  # the env file belongs to an uncloud bed
+    assert rs.s3_settings_from_dotenv()["S3_ACCESS_KEY"] == "distrainer"  # .env has no key here
+    monkeypatch.setenv("DISTRAINER_DRIVER", "uncloud")
+    (tmp_path / "aws" / "env").write_text(
+        'DISTRAINER_UNCLOUD_PROVIDER=aws\nS3_ACCESS_KEY="AKIA"\nS3_SECRET_KEY=s\nS3_REGION=us-east-1\n'
+    )
+    monkeypatch.setenv("DISTRAINER_UNCLOUD_PROVIDER", "orbstack")  # another bed pinned: ignored
+    assert rs.s3_settings_from_dotenv()["S3_ACCESS_KEY"] == "distrainer"
+    monkeypatch.setenv("DISTRAINER_UNCLOUD_PROVIDER", "aws")
+    assert rs.s3_settings_from_dotenv()["S3_ACCESS_KEY"] == "AKIA"
+    monkeypatch.delenv("DISTRAINER_UNCLOUD_PROVIDER")
     dotenv.unlink()  # and works without any .env
     assert rs.s3_settings_from_dotenv()["S3_REGION"] == "us-east-1"
     monkeypatch.setenv("S3_REGION", "eu-west-1")  # the shell wins over both files

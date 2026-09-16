@@ -29,6 +29,8 @@
 #                          (uncloud only) the machines that form the uncloud cluster: OrbStack
 #                          machines (deploy/uncloud/machines.sh) or EC2 instances
 #                          (deploy/uncloud/aws.sh), by DISTRAINER_UNCLOUD_PROVIDER
+# Every driver reads .env, with the caller's environment winning over it; the uncloud driver
+# also reads the env file .env names as DISTRAINER_ENV_FILE (a bed's bootstrap wrote it).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 driver="${DISTRAINER_DRIVER:-compose}"

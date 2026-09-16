@@ -110,10 +110,13 @@ def shared() -> Path:
     return Path(out)
 
 
-def store_endpoint(endpoint_output: str) -> tuple[str, str]:
+def store_endpoint(endpoint_output: str) -> tuple[str, str | None]:
     """``("minio", url)`` or ``("s3", url)`` from the output of the driver's ``endpoint`` verb:
     MinIO in the cluster (``minio=http://h:9000 ...``), or a store outside it that the containers
-    reach directly (``s3=https://...``, the uncloud driver with S3_ENDPOINT set in .env)."""
+    reach directly (``s3=https://...``, the uncloud driver with S3_ENDPOINT set in .env). A
+    MinIO line without a usable host (kuberay prints ``minio=http://<no minio service>:9000``
+    while nothing is deployed) is ``("minio", None)``: the store is MinIO, its URL comes after
+    ``up``. A store outside the cluster must be a URL."""
     from urllib.parse import urlparse
 
     for line in endpoint_output.splitlines():
@@ -122,6 +125,8 @@ def store_endpoint(endpoint_output: str) -> tuple[str, str]:
                 url = line.split()[0][len(kind) + 1 :]
                 host = urlparse(url).hostname or ""
                 if not host or not all(c.isalnum() or c in ".-_" for c in host):
+                    if kind == "minio":
+                        return kind, None
                     raise RuntimeError(f"the driver's endpoint verb names no usable store: {line}")
                 return kind, url
     raise RuntimeError(
@@ -154,20 +159,28 @@ def read_dotenv(path: Path, values: dict[str, str]) -> dict[str, str]:
 
 def s3_settings_from_dotenv() -> dict[str, str]:
     """The S3 credentials and region the containers use: .env when present (the drivers source
-    it), then the file DISTRAINER_ENV_FILE names (in the environment, or in .env: a bootstrap's
-    env file, read after .env as the drivers do, so its settings win), else the compose
-    defaults. Returned, not exported: the driver subprocesses inherit this process's environment
-    and compose interpolates these names."""
+    it), then, under the uncloud driver, the file DISTRAINER_ENV_FILE names (in the environment,
+    or in .env: a bootstrap's env file, read after .env as that driver does, so its settings
+    win; skipped when the caller pins DISTRAINER_UNCLOUD_PROVIDER to another bed than the file
+    declares), else the compose defaults. Returned, not exported: the driver subprocesses
+    inherit this process's environment and compose interpolates these names."""
     values = {"S3_ACCESS_KEY": "distrainer", "S3_SECRET_KEY": "distrainer123", "S3_REGION": "auto"}
     pointer = os.environ.get("DISTRAINER_ENV_FILE", "")
     if DOTENV.exists():
         pointer = pointer or read_dotenv(DOTENV, {"DISTRAINER_ENV_FILE": ""})["DISTRAINER_ENV_FILE"]
         read_dotenv(DOTENV, values)
+    if pointer and os.environ.get("DISTRAINER_DRIVER", "compose") != "uncloud":
+        pointer = ""  # the env file belongs to an uncloud bed: the other drivers never read it
     if pointer:
         extra = Path(pointer) if pointer.startswith("/") else ROOT / pointer
         if not extra.exists():
             raise RuntimeError(f"DISTRAINER_ENV_FILE={pointer} does not exist")
-        read_dotenv(extra, values)
+        pinned = os.environ.get("DISTRAINER_UNCLOUD_PROVIDER", "")
+        declared = read_dotenv(extra, {"DISTRAINER_UNCLOUD_PROVIDER": ""})[
+            "DISTRAINER_UNCLOUD_PROVIDER"
+        ]
+        if not pinned or not declared or pinned == declared:
+            read_dotenv(extra, values)
     for key in values:  # what the shell exports wins over both files, as it does for the drivers
         if key in os.environ:
             values[key] = os.environ[key]
@@ -219,6 +232,10 @@ class Store:
         return load_config(str(ROOT / self.cfg)).log.W
 
     def fs(self, uri: str):
+        if self.on_bucket and not self.s3.get("endpoint"):
+            raise RuntimeError(
+                "the bucket's URL is not known before `up` (up_bucket returns the store)"
+            )
         with self.mac_env():  # the S3 client takes its credentials from the environment
             return resolve(uri, create=False, **self.s3)
 
@@ -331,14 +348,17 @@ def has_shared() -> bool:
     return bool(driver("shared").strip())
 
 
-def up_bucket(n: int, st: Store) -> None:
+def up_bucket(n: int, st: Store) -> Store:
     """Bring the cluster to ``n`` workers with what a bucket store needs: MinIO and the bucket
-    when MinIO is the store; nothing more when the store is outside the cluster (it exists)."""
+    when MinIO is the store; nothing more when the store is outside the cluster (it exists).
+    Returns the store to use: the same one, or, when the driver could not name MinIO's URL
+    before the deploy (kuberay), the store read again now that the service exists."""
     if st.external:
         up(n)
-    else:
-        up(n, "minio", env=st.env)
-        driver("mkbucket", st.bucket, env=st.env)
+        return st
+    up(n, "minio", env=st.env)
+    driver("mkbucket", st.bucket, env=st.env)
+    return st if st.s3.get("endpoint") else bucket_store()
 
 
 def up_store(n: int) -> Store:
@@ -346,9 +366,7 @@ def up_store(n: int) -> Store:
     if has_shared():
         up(n)
         return store_for_driver()
-    st = bucket_store()
-    up_bucket(n, st)
-    return st
+    return up_bucket(n, bucket_store())
 
 
 def start_train(
@@ -638,8 +656,9 @@ def streaming_scenario(cfg_path: str, run_name: str, store: Store | None = None)
     # bucket variant gets more segments for the trainer to close that gap
     segments, sleep_s = (14 if s3 else 10), 6.0
     if s3:
-        assert store is not None, "a bucket config needs the bucket store"
-        up_bucket(2, store)
+        if store is None:
+            raise RuntimeError("a bucket config needs the bucket store")
+        store = up_bucket(2, store)
         store_uri = f"s3://{cfg.store_root}"  # the whole streamed store belongs to this run
         run_uri = f"s3://{cfg.storage_path}/{run_name}"
         s3_rm([store_uri, run_uri], env or {})
@@ -833,7 +852,7 @@ def scenario_s9() -> list[str]:
     from the newest checkpoint URI into a new run."""
     st = bucket_store()
     env = st.env
-    up_bucket(2, st)
+    st = up_bucket(2, st)
     s3_rm(
         [
             f"{st.runs}/s9",
@@ -850,7 +869,7 @@ def scenario_s9() -> list[str]:
     )
     driver("down", env=env)
     driver("wipe-shared", env=env)
-    up_bucket(2, st)
+    st = up_bucket(2, st)
     # a completed run's newest checkpoint is the end of the log: resume from the middle one
     ckpt, seg, positions = pick_checkpoint(f"{st.runs}/s9", env, which="middle")
     print(f"S9 resuming from {ckpt} (segment {seg}, {positions} positions done)")
@@ -863,7 +882,7 @@ def scenario_s10() -> list[str]:
     brought back, and the run continues in a new run from its latest checkpoint on the bucket."""
     st = bucket_store()
     env = st.env
-    up_bucket(2, st)
+    st = up_bucket(2, st)
     s3_rm(
         [
             f"{st.runs}/s10",
@@ -879,7 +898,7 @@ def scenario_s10() -> list[str]:
     driver("kill-head", env=env)
     proc.communicate(timeout=120)  # the exec dies with the head
     _running.remove(proc)
-    up_bucket(2, st)  # recreates the head; workers rejoin it
+    st = up_bucket(2, st)  # recreates the head; workers rejoin it
     ckpt, seg, positions = pick_checkpoint(f"{st.runs}/s10", env)
     print(f"S10 resuming from {ckpt} (segment {seg}, {positions} positions done)")
     cli_resume(ckpt, "s10_resume", env, st.cfg)
