@@ -21,7 +21,7 @@ fi
 printenv | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
   | grep -Ev '^(PUBLIC_KEY|PATH|PWD|OLDPWD|HOME|SHLVL|HOSTNAME|_|TERM)=' \
   | awk -F = '{ val = $0; sub(/^[^=]*=/, "", val); gsub(/"/, "\\\"", val); print "export " $1 "=\"" val "\"" }' \
-  > /etc/rp_environment
+  > /etc/rp_environment || true   # pipefail: an empty selection is not an error
 cp /etc/rp_environment /etc/profile.d/distrainer-env.sh
 role="${1:-head}"
 case "$role" in
