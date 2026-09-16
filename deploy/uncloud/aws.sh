@@ -20,23 +20,29 @@
 #   bucket      create the bucket (private) and the IAM user with a policy scoped to it, one access
 #               key kept under .harness/aws/; write the env file
 #   bucket-rm   empty and delete the bucket; delete the user's keys, policy and the user
+#   ecr         create the private image repository (a lifecycle policy keeps the last images) and
+#               record it: the env file then names the image there and the platforms to build, so
+#               the driver's `build` pushes once and the machines pull in-region
+#   ecr-rm      delete the repository and its images
 #   env         print the env file
 # Settings (environment or .env):
 #   DISTRAINER_AWS_PROFILE       the CLI's default profile     DISTRAINER_AWS_REGION       us-east-1
 #   DISTRAINER_UNCLOUD_MACHINES  "aws1 aws2 aws3" (the first is the head machine; not `head`, a service name)
 #   DISTRAINER_UNCLOUD_CONTEXT   distrainer-aws                DISTRAINER_UNCLOUD_NETWORK  10.210.0.0/16
-#   DISTRAINER_AWS_HEAD_TYPE     t4g.large (2 vCPUs, 8 GB)     DISTRAINER_AWS_WORKER_TYPE  t4g.medium (4 GB)
-#   DISTRAINER_AWS_ARCH          arm64 (the image's)           DISTRAINER_AWS_DISK_GB      16
+#   DISTRAINER_AWS_HEAD_TYPE     t3.large (2 vCPUs, 8 GB)      DISTRAINER_AWS_WORKER_TYPE  t3.medium (4 GB)
+#   DISTRAINER_AWS_ARCH          amd64 (x86: what RunPod's GPU hosts are; arm64 with t4g types is
+#                                a quarter cheaper and what the M7 run used)
+#   DISTRAINER_AWS_DISK_GB       16                            DISTRAINER_AWS_ECR_REPOSITORY  <name> (the repository of `ecr`)
 #   DISTRAINER_AWS_NAME          distrainer (key pair, security group, IAM user, Name tags)
 #   DISTRAINER_AWS_KEY           ~/.ssh/distrainer-aws.pem     DISTRAINER_AWS_USER         ubuntu
 #   DISTRAINER_AWS_ALLOW_CIDR    this Mac's public address/32 (asked of checkip.amazonaws.com; /24 at the widest)
 #   DISTRAINER_AWS_BUCKET        the bucket of examples/hello_blocks/harness-s3.yaml (store_root)
-# Cost (us-east-1 on-demand, 2026): about 0.15 USD per hour for the three instances with their
-# public addresses while they run, 0.13 USD per day for their disks while stopped; the bucket
-# is cents. The t4g types are burstable and launched with unlimited CPU credits so a busy hour
-# never throttles the step pacing the scenarios measure; a fully busy vCPU beyond the baseline
-# (30% on t4g.large, 20% on t4g.medium) adds 0.04 USD per hour. `stop` when done for the day,
-# `destroy` when done for good.
+# Cost (us-east-1 on-demand, 2026): about 0.18 USD per hour for the three t3 instances with their
+# public addresses while they run (0.15 with t4g), 0.13 USD per day for their disks while
+# stopped; the bucket and the repository are cents. The t types are burstable and launched with
+# unlimited CPU credits so a busy hour never throttles the step pacing the scenarios measure; a
+# fully busy vCPU beyond the baseline (30% on the large, 20% on the medium) adds 0.05 USD per
+# hour. `stop` when done for the day, `destroy` when done for good.
 # The network, explicitly: the instances sit in one default subnet of the default VPC (the first
 # whose zone offers both instance types, recorded so a later `up` keeps the same zone: no
 # cross-zone traffic), WireGuard peers over the private addresses
@@ -58,9 +64,10 @@ region="${DISTRAINER_AWS_REGION:-us-east-1}"
 read -r -a machines <<< "${DISTRAINER_UNCLOUD_MACHINES:-aws1 aws2 aws3}"
 ctx="${DISTRAINER_UNCLOUD_CONTEXT:-distrainer-aws}"
 network="${DISTRAINER_UNCLOUD_NETWORK:-10.210.0.0/16}"
-head_type="${DISTRAINER_AWS_HEAD_TYPE:-t4g.large}"
-worker_type="${DISTRAINER_AWS_WORKER_TYPE:-t4g.medium}"
-arch="${DISTRAINER_AWS_ARCH:-arm64}"
+head_type="${DISTRAINER_AWS_HEAD_TYPE:-t3.large}"
+worker_type="${DISTRAINER_AWS_WORKER_TYPE:-t3.medium}"
+arch="${DISTRAINER_AWS_ARCH:-amd64}"
+ecr_repo="${DISTRAINER_AWS_ECR_REPOSITORY:-$name}"
 disk_gb="${DISTRAINER_AWS_DISK_GB:-16}"
 name="${DISTRAINER_AWS_NAME:-distrainer}"
 key="${DISTRAINER_AWS_KEY:-$HOME/.ssh/distrainer-aws.pem}"
@@ -295,6 +302,10 @@ write_env() {   # .harness/aws/env: what the driver and the runner need, from th
     echo "DISTRAINER_UNCLOUD_SSH_OPTS=\"-F $state/ssh_config\""
     [ -n "$cidr" ] && echo "DISTRAINER_UNCLOUD_HOST_PREFIX=$cidr"
     if [ -n "$head_pub" ] && [ "$head_pub" != "None" ]; then echo "DISTRAINER_UNCLOUD_HEAD_ADDRESS=$head_pub"; fi
+    if [ -f "$state/ecr" ]; then   # the driver's build pushes there once and the machines pull
+      echo "DISTRAINER_IMAGE=$(cat "$state/ecr"):latest"
+      echo "DISTRAINER_PLATFORMS=${DISTRAINER_PLATFORMS:-linux/amd64,linux/arm64}"
+    fi
     if [ -f "$state/s3-credentials" ]; then
       read -r ak sk < "$state/s3-credentials"
       echo "S3_ENDPOINT=https://s3.$region.amazonaws.com"
@@ -493,9 +504,35 @@ EOP
     fi
     rm -f "$state/s3-credentials" "$state/bucket-policy.json"
     write_env ;;
+  ecr)
+    need aws "install the AWS CLI"
+    uri="$(awsc ecr describe-repositories --repository-names "$ecr_repo" --query 'repositories[0].repositoryUri' 2>/dev/null)" || uri=""
+    if [ -n "$uri" ] && [ "$uri" != "None" ]; then
+      echo "repository $ecr_repo exists ($uri)"
+    else
+      uri="$(awsc ecr create-repository --repository-name "$ecr_repo" --image-tag-mutability MUTABLE \
+        --encryption-configuration encryptionType=AES256 --tags "Key=distrainer:cluster,Value=$ctx" --query 'repository.repositoryUri')"
+      echo "created repository $ecr_repo ($uri)"
+    fi
+    mkdir -p "$state"
+    cat > "$state/ecr-lifecycle.json" <<EOJ
+{"rules": [{"rulePriority": 1, "description": "keep the last 5 images",
+  "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 5}, "action": {"type": "expire"}}]}
+EOJ
+    awsc ecr put-lifecycle-policy --repository-name "$ecr_repo" --lifecycle-policy-text "file://$state/ecr-lifecycle.json" >/dev/null
+    echo "$uri" > "$state/ecr"
+    write_env
+    echo "next: DISTRAINER_DRIVER=uncloud just build (buildx pushes $uri:latest for ${DISTRAINER_PLATFORMS:-linux/amd64,linux/arm64}; the machines pull it)" ;;
+  ecr-rm)
+    if awsc ecr describe-repositories --repository-names "$ecr_repo" >/dev/null 2>&1; then
+      awsc ecr delete-repository --repository-name "$ecr_repo" --force >/dev/null
+      echo "deleted repository $ecr_repo and its images"
+    fi
+    rm -f "$state/ecr" "$state/ecr-lifecycle.json"
+    write_env ;;
   env)
     [ -f "$state/env" ] || write_env >/dev/null
     sed 's/^\(S3_SECRET_KEY=\).*/\1<in the file>/' "$state/env" ;;
   *)
-    echo "usage: $0 up | status | stop | start | destroy | bucket | bucket-rm | env" >&2; exit 2 ;;
+    echo "usage: $0 up | status | stop | start | destroy | bucket | bucket-rm | ecr | ecr-rm | env" >&2; exit 2 ;;
 esac

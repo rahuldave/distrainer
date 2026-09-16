@@ -271,7 +271,7 @@ def test_uncloud_bootstraps_share_the_verbs_the_driver_dispatches():
     verbs forward exactly those; aws.sh adds the bucket verbs."""
     base = {"up", "status", "stop", "start", "destroy"}
     assert case_labels(MACHINES_SH) == base
-    assert case_labels(AWS_SH) == base | {"bucket", "bucket-rm", "env"}
+    assert case_labels(AWS_SH) == base | {"bucket", "bucket-rm", "ecr", "ecr-rm", "env"}
     driver = UNCLOUD_DRIVER.read_text()
     (label,) = [
         lb for lb in re.findall(r"^  ([a-z|-]+)\)", driver, re.MULTILINE) if "machines-" in lb
@@ -472,3 +472,105 @@ def test_aws_bootstrap_admits_ssh_only_and_deletes_only_what_it_tagged():
     assert 'owner="$(bucket_owner "$bucket")"' in text.split("bucket-rm)")[1]  # the guard
     assert text.count("chmod 600") >= 3
     assert "S3_SECRET_KEY=\\).*/\\1<in the file>" in text  # `env` masks the secret
+
+
+def test_aws_bootstrap_defaults_to_amd64_and_records_the_registry():
+    text = AWS_SH.read_text()
+    assert "DISTRAINER_AWS_ARCH:-amd64" in text and "DISTRAINER_AWS_HEAD_TYPE:-t3.large" in text
+    assert "DISTRAINER_AWS_WORKER_TYPE:-t3.medium" in text
+    ecr = text.split("  ecr)")[1].split("  ecr-rm)")[0]
+    assert (
+        "create-repository" in ecr
+        and "put-lifecycle-policy" in ecr
+        and 'echo "$uri" > "$state/ecr"' in ecr
+    )
+    assert 'DISTRAINER_IMAGE=$(cat "$state/ecr"):latest' in text  # what the driver reads
+    assert "DISTRAINER_PLATFORMS=" in text
+    assert "DISTRAINER_PLATFORMS" in (ROOT / ".env.example").read_text()
+
+
+def stub_bin(tmp_path, log):
+    """docker, aws, uc and ssh as stubs that log their arguments (ssh also what it read)."""
+    b = tmp_path / "bin"
+    b.mkdir(exist_ok=True)
+    for name, body in {
+        "docker": (
+            'echo "docker $*" >> "$LOG"\n'
+            'if [ "$1 $2" = "buildx inspect" ]; then exit 1; fi\nexit 0\n'
+        ),
+        "aws": (
+            'echo "aws $*" >> "$LOG"\n'
+            'case "$*" in *get-login-password*) echo TOKEN ;; esac\nexit 0\n'
+        ),
+        "uc": 'echo "uc $*" >> "$LOG"\nexit 0\n',
+        "ssh": 'in=""; [ -t 0 ] || in="$(cat)"\necho "ssh $* <<< $in" >> "$LOG"\nexit 0\n',
+    }.items():
+        (b / name).write_text(f"#!/bin/bash\nLOG={log}\n{body}")
+        (b / name).chmod(0o755)
+    return b
+
+
+def run_build(tmp_path, image: str, extra_env: dict | None = None) -> list[str]:
+    import subprocess
+
+    log = tmp_path / "calls.log"
+    log.write_text("")
+    b = stub_bin(tmp_path, log)
+    root = tmp_path / "repo"
+    (root / "deploy" / "drivers").mkdir(parents=True, exist_ok=True)
+    (root / "deploy" / "uncloud").mkdir(exist_ok=True)
+    (root / "deploy" / "Dockerfile").write_text("FROM scratch\n")
+    import shutil
+
+    shutil.copy(UNCLOUD_DRIVER, root / "deploy" / "drivers" / "uncloud.sh")
+    env = {
+        "PATH": f"{b}:/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "DISTRAINER_IMAGE": image,
+        "DISTRAINER_UNCLOUD_HOST_PREFIX": "10.0.0.0/8",
+        "DISTRAINER_UNCLOUD_MACHINES": "m1 m2",
+        "DISTRAINER_UNCLOUD_SSH": "ubuntu@%s",
+        **(extra_env or {}),
+    }
+    proc = subprocess.run(
+        ["bash", str(root / "deploy" / "drivers" / "uncloud.sh"), "build"],
+        env=env, capture_output=True, text=True,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stderr
+    return log.read_text().splitlines()
+
+
+def test_uncloud_build_pushes_a_local_image_to_the_machines(tmp_path):
+    calls = run_build(tmp_path, "distrainer:local")
+    assert calls[0].startswith("docker build -t distrainer:local -f ")
+    assert calls[1] == "uc machine ls"  # need_cluster
+    assert calls[2] == "uc image push distrainer:local"
+    assert len(calls) == 3
+
+
+def test_uncloud_build_pushes_a_registry_image_once_and_every_machine_pulls(tmp_path):
+    """An ECR image: the builder is created when missing, the Mac logs in with a token from the
+    CLI, one multi-platform buildx push, then every machine logs in with the same token over the
+    ssh route and pulls."""
+    image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/distrainer:latest"
+    calls = run_build(tmp_path, image, {"DISTRAINER_PLATFORMS": "linux/amd64"})
+    registry = image.split("/")[0]
+    assert calls[0] == "docker buildx inspect distrainer"
+    assert (
+        calls[1] == "docker buildx create --name distrainer --driver docker-container --bootstrap"
+    )
+    assert calls[2] == "aws --region us-east-1 ecr get-login-password"
+    assert calls[3] == f"docker login --username AWS --password-stdin {registry}"
+    assert calls[4].startswith(
+        f"docker buildx build --builder distrainer --platform linux/amd64 -t {image} --push -f "
+    )
+    assert calls[5] == "uc machine ls"
+    pulls = sorted(c for c in calls[6:] if c.startswith("ssh "))
+    assert len(pulls) == 4, calls
+    for m in ("m1", "m2"):
+        assert any(
+            f"ubuntu@{m} sudo -n docker login --username AWS --password-stdin {registry} <<< TOKEN"
+            in c
+            for c in pulls
+        ), m
+        assert any(f"ubuntu@{m} sudo -n docker pull {image} <<< " in c for c in pulls), m
