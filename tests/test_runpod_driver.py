@@ -576,7 +576,13 @@ def test_stop_mode_keeps_pre_pulled_pods_and_scale_up_starts_them(bed):
         pod("distrainer-worker-3", "w3", head="headid"),
     )
     bed.run("scale", "2", env={"DISTRAINER_RUNPOD_DOWN": "stop"})
-    assert bed.actions("stop") == ["w3"] and bed.terminated() == []
+    assert (
+        bed.actions("stop") == [] and bed.terminated() == []
+    )  # the pod stays: its node is drained
+    remote = (bed.log.parent / "calls.log.remote").read_text()
+    assert "rm\\ -f" in remote or "distrainer-drained" in remote  # the last ssh: an undrain of 1..2
+    sshes = [ln for ln in bed.log.read_text().splitlines() if ln.startswith("ssh ")]
+    assert len(sshes) == 3 and any("touch" in ln and "stop" in ln for ln in sshes)
     # the stopped worker-3 is started again by the next scale-up: no new pod
     again = Bed(bed.root.parent / "again")
     again.pods(
@@ -593,3 +599,29 @@ def test_stop_mode_keeps_pre_pulled_pods_and_scale_up_starts_them(bed):
         sorted(bed.actions("stop")) == ["headid", "w1", "w2", "w3", "w3"] and bed.terminated() == []
     )
     assert "keeps its disk" in out
+
+
+def test_up_leaves_a_stopped_reserve_worker_beyond_n_alone_in_stop_mode(bed):
+    bed.respond(
+        "GET",
+        "/pods",
+        {
+            "pods": [
+                *OTHERS,
+                pod("distrainer-head", "headid"),
+                pod("distrainer-worker-1", "w1", head="headid"),
+                pod("distrainer-worker-2", "w2", head="headid"),
+                pod("distrainer-worker-3", "w3", head="headid", status="EXITED"),
+            ]
+        },
+    )
+    for p in ("headid", "w1", "w2"):
+        bed.respond("GET", f"/pods/{p}", pod("distrainer-head", p))
+    out = bed.run("up", "2", env={"DISTRAINER_RUNPOD_DOWN": "stop"}).stdout
+    assert (
+        bed.actions("start") == []
+        and bed.terminated() == []
+        and "leaving the stopped worker 3" in out
+    )
+    out = bed.run("up", "2").stdout  # the default: a stopped pod beyond N is a dead node
+    assert bed.terminated() == ["w3"] and bed.actions("start") == []

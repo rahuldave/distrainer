@@ -205,6 +205,19 @@ ssh_target() {  # host port of the head's direct ssh, cached by `up` (the cache 
   if [ -z "$host" ] || [ -z "$port" ]; then echo "runpod: the head has no direct ssh port yet" >&2; return 1; fi
   printf '%s %s\n' "$host" "$port" | tee "$state/$cluster-head.ssh"
 }
+# ssh_pod ID CMD...: a command on any pod of the cluster over its published 22/tcp (a login shell)
+ssh_pod() {
+  local id="$1" pod host port; shift
+  pod="$(api GET "/pods/$id")" || return 1
+  host="$(printf '%s' "$pod" | jq -r '.ssh.direct.host // empty')"; port="$(printf '%s' "$pod" | jq -r '.ssh.direct.port // empty')"
+  if [ -z "$host" ] || [ -z "$port" ]; then echo "runpod: pod $id has no direct ssh port" >&2; return 1; fi
+  local opts=(-T -p "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=20)
+  if [ -n "${DISTRAINER_RUNPOD_SSH_KEY:-}" ]; then opts+=(-i "${DISTRAINER_RUNPOD_SSH_KEY/#\~/$HOME}"); fi
+  local q; q="$(printf '%q ' "$@")"
+  ssh "${opts[@]}" "root@$host" "bash -lc $(printf '%q' "$q")"
+}
+drain_marker="${DISTRAINER_DRAIN_MARKER:-/tmp/distrainer-drained}"
+
 SSH_ARGS=()
 ssh_args() {  # fills SSH_ARGS for the head (no tty; the account's registered key); bash 3.2 has no mapfile
   local host port target
@@ -267,9 +280,16 @@ case "$verb" in
     errored="$(printf '%s\n' "$all" | jq -c 'select(.status == "ERROR")')"
     if [ -n "$errored" ]; then terminate_all "$errored" || exit 1; fi
     restarted=""   # "id=startedAt" of every pod started here: its new container has a newer startedAt
+    # only the head and workers 1..N start again: a stopped worker beyond N is the session's
+    # pre-pulled reserve in stop mode (a later scale-up starts it), a dead node otherwise
     while read -r p; do
       [ -n "$p" ] || continue
       id="$(printf '%s' "$p" | jq -r '.id')"
+      idx="$(printf '%s' "$p" | jq -r --arg c "$cluster" '.name | ltrimstr($c + "-worker-")')"
+      if [ "$idx" != "$cluster-head" ] && [ "$idx" -gt "$n" ] 2>/dev/null; then
+        if [ "$down_mode" = "stop" ]; then echo "leaving the stopped worker $idx ($id) for a later scale-up"; else terminate "$id"; fi
+        continue
+      fi
       echo "starting $(printf '%s' "$p" | jq -r '.name') ($id) again"
       if pod_action "$id" start; then
         restarted="$restarted $id=$(printf '%s' "$p" | jq -r '.startedAt // "0"')"
@@ -335,17 +355,28 @@ case "$verb" in
     workers="$(worker_pods)" || exit 1
     extra="$(printf '%s\n' "$workers" | jq -c --arg c "$cluster" --argjson n "$n" 'select((.name | ltrimstr($c + "-worker-") | tonumber) > $n)')"
     if [ -n "$extra" ]; then
-      if [ "$down_mode" = "stop" ]; then   # keep the pre-pulled pod for a later scale-up
+      if [ "$down_mode" = "stop" ]; then
+        # the pod stays (a stopped pod's card is rented away within minutes); only its Ray node
+        # leaves: the drain marker makes ray-worker.sh stop and wait
         while read -r w; do
           [ -n "$w" ] || continue
-          echo "stopping worker $(printf '%s' "$w" | jq -r '.name') ($(printf '%s' "$w" | jq -r '.id'))"
-          pod_action "$(printf '%s' "$w" | jq -r '.id')" stop || exit 1
+          wid="$(printf '%s' "$w" | jq -r '.id')"
+          echo "draining worker $(printf '%s' "$w" | jq -r '.name') ($wid): the node leaves Ray, the pod stays"
+          ssh_pod "$wid" bash -c "touch $drain_marker && ray stop --force >/dev/null 2>&1; true" || exit 1
         done <<< "$extra"
       else
         terminate_all "$extra" || exit 1
       fi
     fi
-    up_workers "$n" "$head_id" "$dc" ;;
+    up_workers "$n" "$head_id" "$dc"
+    if [ "$down_mode" = "stop" ]; then   # a drained worker within 1..N rejoins: the marker goes
+      i=1
+      while [ "$i" -le "$n" ]; do
+        w="$(pod_named "$cluster-worker-$i")" || exit 1
+        if [ -n "$w" ]; then ssh_pod "$(printf '%s' "$w" | jq -r '.id')" rm -f "$drain_marker" || exit 1; fi
+        i=$((i + 1))
+      done
+    fi ;;
   exec-head)
     exec_head "$@" ;;
   kill-worker)
