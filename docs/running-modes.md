@@ -181,7 +181,7 @@ What is where:
 - Timing: an `up` takes 60 to 90 s (containers start one at a time, monitored and
   health-checked), and a scenario 1.5 to 3 times its mode B wall time; the per-step pacing is
   the same, the difference is deploy time and object-store round trips over the mesh.
-- On real machines (M7, tutorial 4 section 9): `deploy/uncloud/aws.sh` is the EC2 twin of
+- On real machines (M7, tutorial 5, `docs/tutorials/aws.md`): `deploy/uncloud/aws.sh` is the EC2 twin of
   `machines.sh` (`DISTRAINER_UNCLOUD_PROVIDER=aws` routes the `machines-*` verbs to it; `stop`
   and `start` park and resume either bed): three Graviton instances, one security group (ssh
   from the Mac's address, WireGuard between the members), the cluster joined over the private

@@ -22,7 +22,7 @@ that a run measures the framework, not the model.
 | `local.yaml` | laptop, local Ray, 2 workers | 48 blocks of 32 rows, `W=12` (4 segments), `every_k=2`, about 30 s |
 | `harness.yaml` | container cluster, 2 to 3 workers, shared mount | 240 blocks, `W=24` (10 segments), `step_sleep_s: 0.25` so a run lasts about 30 s |
 | `harness-minio.yaml` | container cluster, everything on MinIO | same shape, `storage.kind: s3` |
-| `harness-s3.yaml` | cloud machines, everything on an S3 bucket outside the cluster (tutorial 4 section 9) | `harness-minio.yaml` with the bucket, the endpoint and the region changed (`tests/test_deploy_manifests.py` pins the pair); edit the bucket name, then `just build` |
+| `harness-s3.yaml` | cloud machines, everything on an S3 bucket outside the cluster (tutorial 5, `docs/tutorials/aws.md`) | `harness-minio.yaml` with the bucket, the endpoint and the region changed (`tests/test_deploy_manifests.py` pins the pair); edit the bucket name, then `just build` |
 
 Knobs in the `train:` section: `n_blocks`, `rows_per_block`, `features`, `lr`, and `step_sleep_s`
 (a sleep per step so failure injection lands mid-run; 0 on the laptop). Any config value can be
@@ -140,7 +140,7 @@ list of problems (empty means pass):
 | `check_report_count` / `expected_reports` | rank 0's final `reports` metric equals the number of policy points (plus one final report when the last step is not a checkpoint) |
 | `check_s5` / `expected_checkpoints` | every checkpoint's cursor is a multiple of `k` or the segment end; directory name matches its ledger; count matches the cadence |
 | `check_s7` | two trails have identical per-rank `(segment, step, position, block_id)` sequences |
-| `check_recovery` | several attempts: dealing per attempt with its own world size; each new attempt starts on a step boundary of its world size at or before the position after the previous attempt's last one; replay of at most `2*every_k*n_old + n_new` positions; the union covers positions 0 to the end of the last segment with no gap |
+| `check_recovery` | several attempts: dealing per attempt with its own world size; each new attempt starts on a step boundary of its world size at or before the position after the previous attempt's last one; replay of at most `2*every_k*n_old + n_new`, `(2 + lag_intervals)*every_k*n_old + n_new` on a store outside the cluster where the Train controller registers checkpoints behind the workers (`` positions; the union covers positions 0 to the end of the last segment with no gap |
 | `check_resume` | a run resumed from a ledger covers exactly `start .. end of its last segment`, once, dealt by the rule |
 | `check_s6` | S1 holds; every segment from `initial_segments` on carries `writer: remine` and `mined_after_segment` = the previous one, was committed after rank 0's last record of that previous segment and before the first record that consumed it, and its records name exactly its blocks, none from the base corpus |
 | `check_s8` | one attempt with S1 dealing; at least two time-budget checkpoints; rank 0's `reports` equals the number of checkpoints (plus one final metrics-only report); every ledger is a step boundary and matches its directory name |

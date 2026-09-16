@@ -103,3 +103,42 @@ work around every item below; this page exists so nobody rediscovers them. Add t
   machines, and over the mesh a segment costs the ranks 4 to 6 s against the producer's 6.7 s
   cadence, so the bucket variant of S11 runs 14 segments for the trainer to catch up and wait
   (10 under a shared mount).
+
+## The AWS bed (real machines, S3)
+
+What `deploy/uncloud/aws.sh` and the cloud run of 2026-09-16 taught, on top of the above.
+
+- **macOS bash 3.2 and `command`.** A failing command run through the `command` builtin ignores
+  `set -e`'s suppression inside `if` conditions and `||` lists: `f() { command false; }; if ! f;
+  then ...` exits the script silently with the command's status, while `f() { false; }` behaves.
+  The bootstrap's `awsc` wrapper therefore calls `aws` directly. Every script here runs under
+  `/usr/bin/env bash`, which is 3.2 on a Mac without a Homebrew bash, so keep `command` out of
+  anything that may fail on purpose.
+- **The AWS CLI installed by the pkg is x86_64.** Under Rosetta every call takes about 9 s and
+  `aws sts get-caller-identity` never returned on this Mac; `brew install awscli` gives a
+  native arm64 build that answers in a second (put `/opt/homebrew/bin` first in `PATH`).
+- **Not every zone offers Graviton.** In one account `us-east-1a` had no `t4g` capacity at all
+  (`RunInstances ... Unsupported ... choosing us-east-1b, ...`); the bootstrap now picks the first
+  default subnet whose zone lists both instance types in
+  `describe-instance-type-offerings --location-type availability-zone`. An old account may also
+  have no default VPC: `aws ec2 create-default-vpc` makes one (no cost).
+- **The recorded settings win over a changed default.** `aws.sh` reads its own
+  `.harness/aws/env` first, so `DISTRAINER_UNCLOUD_MACHINES` recorded by an earlier run (the
+  names `destroy` must find) outlives a new default in the script; a rename means `destroy`,
+  delete the env file, `up`. Set the variable in `.env` or on the command line to override.
+- **Real S3 signs by region.** A client with the endpoint and the credentials but the wrong
+  region (`auto`, what MinIO accepted for a year) gets `HTTP 400 ... No response body` from
+  `HeadObject`. The runner's Mac-side environment now carries `S3_REGION` with the endpoint.
+- **On S3 the Train controller registers checkpoints behind the workers.** Every registration
+  is S3 round trips in the controller's loop (the checkpoint-manager snapshot, the `num_to_keep`
+  deletions), so at a resize it restores a checkpoint one or two reports older than the newest
+  upload, and the teardown lets the workers run a few more steps: S3 replayed 24 positions
+  against the local bound of 11, S4 18 against 14. The ledger keeps every position trained;
+  the check's replay bound takes a `lag_intervals` allowance for a store outside the cluster.
+- **Checkpoint latency sets the step pace on S3.** With `every_k: 2` each checkpoint is an
+  upload of about a second from a `t4g.medium` to S3: 0.67 s per step against 0.25 s on
+  MinIO, and a segment of the streaming scenario takes about 13 s against the producer's
+  6.7 s cadence, so the trainer never catches the producer (S11s3 still passes its checks:
+  commit precedes consumption, the ranks wait for the end marker). Checkpoint less often
+  (`every_k: 6` or a time policy) on a real object store; the harness configs keep `2` so the
+  same run is comparable across beds.
