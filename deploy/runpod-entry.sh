@@ -15,13 +15,23 @@ if [ -n "${PUBLIC_KEY:-}" ]; then
   mkdir -p /run/sshd
   /usr/sbin/sshd   # host keys were made at build time (ssh-keygen -A); daemonizes
 fi
+# the address Ray advertises: the pod's global-networking address (its own <id>.runpod.internal,
+# or the 10.x interface), never the container's default one, which other pods cannot reach
+if [ -z "${RAY_NODE_IP:-}" ]; then
+  ip=""
+  if [ -n "${RUNPOD_POD_ID:-}" ]; then ip="$(getent hosts "$RUNPOD_POD_ID.runpod.internal" 2>/dev/null | awk '{print $1; exit}')" || ip=""; fi
+  if [ -z "$ip" ]; then ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 '^10\.')" || ip=""; fi
+  if [ -n "$ip" ]; then export RAY_NODE_IP="$ip"; echo "runpod-entry: RAY_NODE_IP=$ip" >&2; fi
+fi
 # every variable of the container (the S3 settings, RAY_*, DISTRAINER_*) for login shells; the
 # key stays out, like RunPod's script keeps it, and so do the shell's own (a login shell has its
-# own PWD, HOME and SHLVL; PATH comes from /etc/profile.d/distrainer-venv.sh)
+# own PWD, HOME and SHLVL; PATH comes from /etc/profile.d/distrainer-venv.sh); every value is
+# quoted with %q so a credential with $, ` or \ survives the login shell untouched
+: > /etc/rp_environment
 printenv | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' \
   | grep -Ev '^(PUBLIC_KEY|PATH|PWD|OLDPWD|HOME|SHLVL|HOSTNAME|_|TERM)=' \
-  | awk -F = '{ val = $0; sub(/^[^=]*=/, "", val); gsub(/"/, "\\\"", val); print "export " $1 "=\"" val "\"" }' \
-  > /etc/rp_environment || true   # pipefail: an empty selection is not an error
+  | while IFS= read -r line; do printf 'export %s=%q\n' "${line%%=*}" "${line#*=}"; done \
+  >> /etc/rp_environment || true   # pipefail: an empty selection is not an error
 cp /etc/rp_environment /etc/profile.d/distrainer-env.sh
 role="${1:-head}"
 case "$role" in

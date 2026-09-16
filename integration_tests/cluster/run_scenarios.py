@@ -65,7 +65,7 @@ def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) ->
         capture_output=True,
         text=True,
         env={**os.environ, **(env or {})},
-        timeout=600,
+        timeout=1800,  # `up` on pods waits for image pulls (the GPU image is 7.5 GB)
     )
     if check and proc.returncode != 0:
         raise RuntimeError(

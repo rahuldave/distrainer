@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Cluster-driver verb interface (spec section 9). Dispatches to deploy/drivers/<DISTRAINER_DRIVER>.sh
 # (default: compose; kuberay for OrbStack's Kubernetes; uncloud for a WireGuard mesh of Docker
-# hosts). The verbs are the whole contract between the Justfile / scenario runner and a way of
-# running containers:
+# hosts; runpod for GPU pods on RunPod over global networking). The verbs are the whole contract
+# between the Justfile / scenario runner and a way of running containers:
 #   build                  build the node image
 #   up N [minio]           head + N workers (+ MinIO with the minio profile)
 #   down                   stop the containers (the MinIO volume survives for cold-restore tests)
@@ -29,6 +29,8 @@
 #                          (uncloud only) the machines that form the uncloud cluster: OrbStack
 #                          machines (deploy/uncloud/machines.sh) or EC2 instances
 #                          (deploy/uncloud/aws.sh), by DISTRAINER_UNCLOUD_PROVIDER
+#   cost | catalog         (runpod only) the cluster's hourly cost and the account's pod billing;
+#                          the configured GPU types' prices and availability
 # Every driver reads .env, with the caller's environment winning over it; the uncloud driver
 # also reads the env file .env names as DISTRAINER_ENV_FILE (a bed's bootstrap wrote it).
 set -euo pipefail

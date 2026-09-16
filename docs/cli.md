@@ -137,6 +137,7 @@ head container against MinIO).
 | `just mkbucket` | create the `distrainer` bucket on MinIO |
 | `just blocks [CFG]`, `just train [CFG]` | `make_blocks.py` / `train.py` of hello_blocks inside the head container |
 | `just kill-worker I`, `just scale N` | kill worker `I` (compose: restarted after `DISTRAINER_RESTART_DELAY` s; uncloud: `docker kill` over ssh on its machine, restarted the same way; kuberay: replaced by the operator at once); resize the worker set |
+| `DISTRAINER_DRIVER=runpod just ...` | the same verbs on RunPod GPU pods (`deploy/drivers/runpod.sh`, tutorial 6); `deploy/driver.sh cost` and `catalog` are its own: the cluster's hourly cost and the account's billing; the configured GPU types' prices and availability |
 | `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just kuberay-operator` | install the KubeRay operator into the current Kubernetes context (once; `DISTRAINER_DRIVER=kuberay` for the targets above) |
 | `just uncloud-machines` | create the OrbStack machines and the uncloud cluster (once; `DISTRAINER_DRIVER=uncloud` for the targets above; `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes them) |

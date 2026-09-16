@@ -214,10 +214,71 @@ pod. Remove the local image afterwards (`docker rmi distrainer-gpu:local`); it i
 
 ## 5. The RunPod driver
 
-Written with the driver slice. The plan and the API facts (REST v2 at `api.runpod.io/v2`,
-global networking on secure-cloud NVIDIA GPU pods only, one GPU type per create, the pod's
-`ssh.direct` block, the `DISTRAINER_CLUSTER` marker, the spend guard) are in
-`docs/handoff-m8.md` section 6.3.
+`deploy/drivers/runpod.sh`, selected with `DISTRAINER_DRIVER=runpod`, implements the verbs of
+`deploy/driver.sh` on RunPod's REST v2 API (`https://api.runpod.io/v2`; v1 is retired on
+2026-11-15) with `curl` and `jq`, so `just up 2`, `just integration S2`, `just kill-worker 1`
+and the rest work unchanged. What a cluster is here:
+
+- **Every Ray node is a GPU pod** on the secure cloud with global networking, which is what
+  lets pods talk over TCP as `<pod id>.runpod.internal`. A CPU pod cannot join, so the head
+  is a GPU pod too; it advertises no `trainer` resource and runs no training worker.
+- **The store is the bucket**: the `S3_*` variables of `.env` are passed to every pod; the
+  runner reads the audit trail and the checkpoints from the bucket through `endpoint`'s
+  `s3=` line, `shared` prints nothing, `mkbucket` and `wipe-shared` have nothing to do.
+- **The image** is `DISTRAINER_IMAGE` (section 4; the branch tag until M8 merges); `build`
+  builds nothing and only checks that the tag is readable without credentials.
+- **The driver acts only on pods it made**: named `<cluster>-head` and
+  `<cluster>-worker-N` (`DISTRAINER_RUNPOD_CLUSTER`, default `distrainer`) *and* carrying
+  `DISTRAINER_CLUSTER=<cluster>` in their environment; the account holds other people's pods
+  and a name alone is not proof. `ps` lists the cluster with each pod's hourly cost and the
+  total.
+
+**Creating a pod.** v2 takes one GPU type per create, so `DISTRAINER_RUNPOD_GPU_TYPES` (an
+ordered, comma-separated list) is tried type by type until one is rented; a type without a
+price on the chosen cloud, or priced above `DISTRAINER_RUNPOD_MAX_GPU_HOURLY` (default 0.60
+USD per GPU-hour), is skipped: the spend guard. The head is placed in any data center with
+global networking (`GET /v2/catalog/datacenters`), or in `DISTRAINER_RUNPOD_DATA_CENTERS` if
+set; the workers go to the head's data center. A pod gets the image, `args` naming its role
+(`head` or `worker`, what the entrypoint reads), `22/tcp` exposed and `startSsh` (RunPod
+injects the account's registered ssh keys as `PUBLIC_KEY`; section 4.1), a
+`DISTRAINER_RUNPOD_DISK_GB` container disk and no persistent volume, and for a worker
+`RAY_HEAD_ADDRESS=<head pod id>.runpod.internal:6379`. Every create prints the pod's id, type,
+data center and hourly cost; `up` waits until each pod is `RUNNING` with its global-networking
+address and its ssh port (`DISTRAINER_RUNPOD_START_TIMEOUT`, default 600 s: the image is 7.5
+GB and a cold pull takes minutes).
+
+**Inside the pod** the entrypoint discovers the global-networking address (its own
+`<id>.runpod.internal`, or the 10.x interface) and exports it as `RAY_NODE_IP`, which
+`ray-head.sh` and `ray-worker.sh` pass as `--node-ip-address`: Ray must advertise that
+address, not the container's default one, or the other pods cannot reach the ports GCS hands
+out. `catalog` prints the configured types' prices and their availability in the
+global-networking data centers, the thing to check before `up`.
+
+**Breaking things.** `kill-worker I` terminates worker I's pod (node death) and, after
+`DISTRAINER_RESTART_DELAY` seconds (default 5, 0 = stays dead), creates a new pod of the same
+name in the background: a new Ray node, as under the other drivers. `kill-head` terminates the
+head; the next `up` makes a new head *and* new workers, because a worker dials the head by
+its pod id and a new head has a new id. `scale N` creates the missing workers or terminates
+the highest-numbered ones. `stop-worker I` is RunPod's stop (a preemption notice; the pod
+keeps its disk until `down`). `down` and `nuke` terminate every pod of the cluster: pods are
+terminated, never left stopped, since a stopped pod's disk bills by the month.
+
+**Reaching the head.** `exec-head CMD...` is ssh to the head's published `22/tcp` port
+(cached under `.harness/runpod/` by `up`), as `bash -lc "cd /app && CMD"`: a login shell
+reads the exported environment and starts in `/root`, hence the `cd`. `cp-from-head` is scp.
+`DISTRAINER_RUNPOD_SSH_KEY` names the key: its `.pub` is injected into every pod the driver
+creates as `PUBLIC_KEY` (RunPod then skips the account's registered keys, so a shared account
+needs no change and the pods admit only this machine), and it is the `-i` of both commands;
+left empty, the account's registered keys are injected and this machine must hold one of them.
+`DISTRAINER_RUNPOD_SSH_OPTS` adds options. The dashboard is not
+exposed; `endpoint` prints the tunnel to open (`ssh -L 8265:127.0.0.1:8265`). `logs [NAME]`
+fetches a pod's log from the API; `cost` prints the cluster's hourly total and the account's
+pod billing.
+
+The driver is tested against a stub of the API (`tests/test_runpod_driver.py`: a fake `curl`
+answering from canned JSON, so no account is touched): the create bodies, the guard and the
+fall-through on a capacity error, `down` sparing other people's pods, `scale`, `kill-worker`
+and `kill-head`, `up` after a head death, the ssh command line, `ps`.
 
 ## 6. The run on pods
 
