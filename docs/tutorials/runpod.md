@@ -267,6 +267,13 @@ terminates the highest-numbered ones. `stop-worker I` is the same stop without t
 preemption notice). `down` and `nuke` terminate every pod of the cluster; a stopped pod's disk
 bills by the month (cents for a session), which is why `down` ends every session.
 
+**A session of scenarios** sets `DISTRAINER_RUNPOD_DOWN=stop`: `down` then stops the pods
+instead of terminating them, a scale-down stops the removed worker, and a scale-up starts a
+stopped pod of the same name again instead of renting a new one. The point is the pull: with
+every new pod costing 4 to 35 minutes of image pull, the resize and cold-restore scenarios
+only fit in an afternoon if the pods are rented and pulled once (`up 3`, wait) and then
+stopped and started. A final `down` with the default ends the session.
+
 **Reaching the head.** `exec-head CMD...` is ssh to the head's published `22/tcp` port
 (cached under `.harness/runpod/` by `up`), as `bash -lc "cd /app && CMD"`: a login shell
 reads the exported environment and starts in `/root`, hence the `cd`. `cp-from-head` is scp.
