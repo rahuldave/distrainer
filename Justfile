@@ -12,7 +12,7 @@ fmt path=".":
 lint path=".":
   uv run ruff check {{path}}
   uv run ruff format --check {{path}}
-  for f in deploy/driver.sh deploy/drivers/*.sh deploy/uncloud/*.sh deploy/ray-head.sh deploy/ray-worker.sh; do bash -n "$f" || exit 1; done
+  for f in deploy/driver.sh deploy/drivers/*.sh deploy/uncloud/*.sh deploy/ray-head.sh deploy/ray-worker.sh deploy/runpod-entry.sh; do bash -n "$f" || exit 1; done
 
 typecheck:
   uv run ty check distrainer examples integration_tests

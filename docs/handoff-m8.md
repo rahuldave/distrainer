@@ -348,12 +348,18 @@ of rows in Parquet, positives and hard negatives per row, InfoNCE with the loss-
     `[B, 0, e]`) and `all_gather: true`, so the new example imports it. The re-mining hook is
     `examples/toy_contrastive/remine.py` (`hooks: {remine: ...}` in the config, the log
     streamed); its GPU variant is a follow-up leaf, not the first one.
-  - Dependencies: `pyproject.toml` pins torch from the CPU index through `[tool.uv.sources]`;
-    add `torchvision` the same way for the laptop, and a `gpu` extra whose torch and
-    torchvision come from a CUDA index (a second `[tool.uv]` index, `explicit = true`, with
-    a marker-based source; or a separate lock in `deploy/gpu/`), which `deploy/Dockerfile.gpu`
-    installs on an `nvidia/cuda:12.6.x-runtime-ubuntu22.04` base with the same uv layout as
-    `deploy/Dockerfile`. CI (`.github/workflows/ci.yml`) syncs with `--all-groups`; the GPU
+  - Dependencies: `pyproject.toml` pins torch and torchvision from the CPU index through
+    `[tool.uv.sources]`. **A `gpu` extra does not work** (tried 2026-09-16): an
+    extra-conditional source collides with the base CPU source in the Linux fork unless torch
+    leaves the base dependencies for two conflicting extras, and uv has no default extras, so
+    every plain `uv run` would then drop torch. `deploy/Dockerfile.gpu` instead installs the
+    CUDA 12.6 wheels of the locked versions over the CPU ones in a layer of its own (`uv pip
+    install --index .../whl/cu126 torch==2.14.0+cu126 torchvision==0.29.0+cu126`, the `+cu126`
+    local versions spelled out, or uv sees `==2.14.0` as satisfied), on the same
+    `python:3.13-slim` base as the CPU image (the CUDA runtime rides in the wheels, the driver
+    comes from RunPod's NVIDIA runtime; no CUDA base image), and installs the project with `uv
+    pip install --no-deps -e .` because a second `uv sync` would restore the CPU wheels.
+    `tests/test_deploy_manifests.py` pins the Dockerfile's version ARGs to `uv.lock`. CI (`.github/workflows/ci.yml`) syncs with `--all-groups`; the GPU
     image workflow is a second file, triggered on pushes to `main` that touch `deploy/`,
     `pyproject.toml`, `uv.lock`, `distrainer/` or `examples/`, and by hand, with
     `permissions: packages: write` and `docker/login-action` against `ghcr.io` using
