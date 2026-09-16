@@ -74,8 +74,12 @@ def driver(*args: str, env: dict[str, str] | None = None, check: bool = True) ->
     return proc.stdout
 
 
-def wait_for_trainers(n: int, timeout_s: float = 180) -> None:
-    """Block until Ray reports ``n`` `trainer` resources (all worker containers have joined)."""
+def wait_for_trainers(n: int, timeout_s: float | None = None) -> None:
+    """Block until Ray reports ``n`` `trainer` resources (all worker containers have joined).
+    ``DISTRAINER_WAIT_TRAINERS_S`` overrides the 180 s default: a driver whose nodes are pods
+    that restart and reconnect in minutes (RunPod) needs more."""
+    if timeout_s is None:
+        timeout_s = float(os.environ.get("DISTRAINER_WAIT_TRAINERS_S", "180"))
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         out = driver(
