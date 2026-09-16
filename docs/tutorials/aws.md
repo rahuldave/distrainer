@@ -276,7 +276,24 @@ controller registers checkpoints a couple of reports behind the workers there (i
 is S3 round trips) and restores one 24 and 18 positions back in S3 and S4 instead of at most 11
 and 14; the ledger keeps every position trained either way.
 
-## 10. Day to day
+## 10. Day to day: create, down, park, unpark, destroy
+
+The bed's lifecycle in five verbs, all with `DISTRAINER_DRIVER=uncloud` exported. Read the
+table top to bottom as "how much is gone":
+
+| you want | run | it takes | what bills afterwards | what it keeps | back with |
+|---|---|---|---|---|---|
+| a bed | `just aws-machines` (`aws.sh up`) | about four minutes; then `just build` a minute (the machines pull from the repository) | the instances, about 0.18 USD per hour | | |
+| the cluster gone, the machines kept (between two runs) | `just down` | seconds | the instances still, 0.18 USD per hour | the machines, the image on them, the cluster membership | `just up 2`, about 40 s |
+| the machines parked (end of the day) | `deploy/driver.sh machines-stop` | a minute | the disks only, about 0.13 USD per day | everything on the disks: the OS, Docker, uncloud, the image, the membership | `deploy/driver.sh machines-start`, about two minutes: new public addresses, the ssh config, the uc context and the ssh rule rewritten |
+| the machines gone (end of the work) | `deploy/driver.sh machines-destroy` | a minute | the bucket and the repository, cents a month | the bucket with the block log and the runs, the repository with the image, the env file's store and image settings, the default VPC, the admin user | `just aws-machines` and `just build`, about five minutes |
+| everything gone | `machines-destroy`, then `deploy/uncloud/aws.sh bucket-rm` and `ecr-rm` | a minute | nothing | the default VPC and the admin user of section 2 | sections 3 to 6 from the start |
+
+`just down` removes the head and the worker containers, not the machines: the right verb between
+two runs on the same day, the wrong one at the end of it. `machines-stop` parks a bed with
+containers still deployed too (they are gone when it comes back; `just up 2` again), and is
+what `orb stop uc1 uc2 uc3` is for the OrbStack bed. `machines-destroy` is idempotent: if it is
+interrupted (the instances gone, the group or the key pair still there), run it again.
 
 ```bash
 deploy/driver.sh machines-stop        # park: only the disks are billed; the public addresses are released

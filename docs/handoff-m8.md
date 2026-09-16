@@ -18,17 +18,17 @@ before relying on them.
   driver about it, `endpoint` prints `s3=` and the runner deploys no MinIO. The node image is
   built for `linux/amd64` and `linux/arm64` and lives in a private ECR repository; the machines
   pull it. Section 3 has the numbers.
-- **The AWS state at the end of the session**: the x86 bed (`aws1` t3.large, `aws2`, `aws3`
-  t3.medium, us-east-1b) is **parked** (stopped: disks only, about 0.13 USD per day, 4 USD a
-  month); the security group admits ssh from this Mac's address only; the bucket
-  `distrainer-rahuldave` (us-east-1, private, tagged) holds the block log, the streaming store
-  and the scenario runs (about 2 MB); the ECR repository `distrainer` (tagged) holds the
-  multi-architecture `latest` (an amd64 half of about 530 MB and an arm64 one of 490 MB,
-  compressed) plus the untagged manifests of earlier pushes (a lifecycle policy keeps twelve);
-  `.env` points at `.harness/aws/env`. Rahul decides whether to keep the bed parked or destroy
-  it: `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes the instances, the
-  group and the key pair; `deploy/uncloud/aws.sh bucket-rm` and `ecr-rm` remove the bucket with
-  its user and the repository. Spend for the whole session was under two dollars of the 15 USD
+- **The AWS state at the end of the session**: the x86 bed is **destroyed** at Rahul's request
+  (the instances terminated, the security group and the key pair deleted, the uc context
+  `distrainer-aws` forgotten; the `machines-destroy` verb ran twice because the first run was
+  interrupted, and finished cleanly the second time). What remains, cents a month: the bucket
+  `distrainer-rahuldave` (us-east-1, private, tagged; the block log, the streaming store and the
+  scenario runs, about 2 MB) and the ECR repository `distrainer` (tagged; the multi-architecture
+  `latest` plus earlier untagged manifests, a lifecycle policy keeps twelve). `.harness/aws/env`
+  keeps the store and image settings, so `just aws-machines` and `just build` bring a bed back
+  in about five minutes (tutorial 5 section 10 has the lifecycle table); `deploy/uncloud/aws.sh
+  bucket-rm` and `ecr-rm` remove the rest. Spend for the whole session was under two dollars of
+  the 15 USD budget.
   budget.
 
 ## 2. Environment checklist
