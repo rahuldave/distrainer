@@ -2,7 +2,7 @@
 # docs/tutorials/aws.md: real machines, no MinIO). harness-minio.yaml with the endpoint, the region and the
 # bucket of your account (tests/test_deploy_manifests.py pins the rest against it). The containers
 # read this file; the scenario runner learns the same endpoint from the driver's `endpoint` verb,
-# which prints S3_ENDPOINT from .env when it names a store outside the cluster. Edit the three
+# which prints S3_ENDPOINT from .env when it names a store outside the cluster. Edit the four
 # lines, then `just build` (the image carries the config under uncloud).
 run_name: hello_s3
 storage_path: distrainer-rahuldave/runs      # bucket/prefix

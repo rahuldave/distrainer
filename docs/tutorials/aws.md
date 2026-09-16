@@ -5,7 +5,7 @@ one runs the same driver, the same compose file, the same configs and the same s
 **EC2 instances**, with an **S3 bucket** as the store instead of MinIO. Nothing in the training
 code changes; what changes is how the machines come to exist (`deploy/uncloud/aws.sh` instead of
 `deploy/uncloud/machines.sh`), where the store is, and how the Mac reaches both. Budget: about
-0.15 USD per hour while the instances run; an afternoon of scenarios is a dollar or two.
+0.15 USD per hour while the instances run; the whole set of scenarios cost well under a dollar.
 
 Sections 1 and 2 are the one-time account work (an IAM user with the right permissions, the CLI).
 Sections 3 to 7 are the run. Section 8 is the bill. Section 9 is what went wrong the first time.
@@ -107,10 +107,12 @@ What it creates, all tagged `distrainer:cluster=distrainer-aws` so `status` and 
 exactly these:
 
 - a key pair `distrainer`, saved as `~/.ssh/distrainer-aws.pem`;
-- a security group `distrainer-uncloud`: ssh (22) and the Ray dashboard (8265) admitted from this
-  Mac's public address only (asked of checkip.amazonaws.com; set `DISTRAINER_AWS_ALLOW_CIDR` to
-  choose; `0.0.0.0/0` is refused because the dashboard accepts job submissions), and UDP 51820
-  from the group itself, so WireGuard runs between the members and nobody else;
+- a security group `distrainer-uncloud`: ssh (22) admitted from this Mac's public address only
+  (asked of checkip.amazonaws.com; `DISTRAINER_AWS_ALLOW_CIDR` to choose, `/24` at the widest;
+  `up` and `start` replace the rule when the Mac has moved networks), and UDP 51820 from the
+  group itself, so WireGuard runs between the members and nobody else. Nothing else is open:
+  the Ray dashboard accepts job submissions from anyone who reaches it and a Mac's public
+  address is often a shared NAT, so the dashboard is reached through an ssh tunnel (section 5);
 - three instances, `aws1` (the head machine, `t4g.large`, 2 vCPUs and 8 GB: the Ray head, the
   Train controller and the driver need it) and `aws2`, `aws3` (`t4g.medium`, 4 GB), Ubuntu
   24.04 arm64, a 16 GB gp3 disk each, IMDSv2 only, unlimited CPU credits so a busy hour never
@@ -134,9 +136,11 @@ ssh -F .harness/aws/ssh_config aws1       # a shell on the head machine
 ```
 
 `uc` runs the system `ssh`, so the instances' host keys are accepted into `~/.ssh/known_hosts`
-(a stale entry for a reused address is dropped first). Precedence, for the drivers and the
-runner: what your shell exports wins over both files, and the env file wins over `.env`, so
-`just uncloud-machines` (which sets the provider explicitly) still means the OrbStack bed while
+(a stale entry for a reused address is dropped first). Precedence: what your shell exports wins
+over both files, and the env file wins over `.env`; only the uncloud driver and the scenario
+runner read the env file (it belongs to an uncloud bed; the compose and KubeRay drivers never
+see it), and a command that pins another bed (`just uncloud-machines` sets
+`DISTRAINER_UNCLOUD_PROVIDER=orbstack`) skips it, so the OrbStack bed stays reachable while
 `.env` points at AWS.
 
 ## 5. The image, the cluster, a run
@@ -147,9 +151,12 @@ just up 2                                              # head + two workers, no 
 just blocks examples/hello_blocks/harness-s3.yaml      # log and blocks on s3://<bucket>/blocks
 just train  examples/hello_blocks/harness-s3.yaml      # hello_s3 on s3://<bucket>/runs; S1 PASS
 deploy/driver.sh endpoint                              # dashboard=http://<public address>:8265, s3=https://s3.us-east-1.amazonaws.com
+ssh -F .harness/aws/ssh_config -L 8265:172.31.x.y:8265 aws1   # the dashboard at http://localhost:8265 (the head's private address is in .harness/aws/instances)
 ```
 
-The push carries the 1.4 GB dependency layer once per instance, from the Mac's uplink; a code
+The dashboard line of `endpoint` names where the port is published, on the head's private
+address; the security group does not admit it from outside, hence the tunnel. The push carries
+the 1.36 GB dependency layer once per instance, from the Mac's uplink; a code
 change afterwards moves only the small layer on top. With `S3_ENDPOINT` naming a store outside
 the cluster, `endpoint` prints `s3=` instead of `minio=`: the runner deploys no MinIO, makes no
 bucket, and runs `harness-s3.yaml` and `harness-stream-s3.yaml`. Sections 4 to 6 of Tutorial 4
@@ -181,13 +188,13 @@ VM was sharing 8 GB with everything else), while the steps themselves are slower
 step against 0.25 s, because every checkpoint (one per two steps) is an upload of about a
 second from the worker to S3. That is why S11s3 is the one scenario slower than on the Mac:
 a segment takes about 13 s against the producer's 6.7 s cadence, so the trainer never catches
-the producer and the pacing premise of Tutorial 4 section 8 inverts (the checks still hold:
+the producer and the pacing premise of `docs/uncloud-gotchas.md` ("a streaming trainer starts late") inverts (the checks still hold:
 commit precedes consumption, the ranks wait for the end marker). Checkpoint less often on a
 real object store when pace matters. Two things had to change in the runner for this table:
 the Mac-side client must sign with the bucket's region (MinIO never cared), and the replay
 bound of S3 and S4 takes an allowance on a store outside the cluster, because the Train
 controller registers checkpoints a couple of reports behind the workers there (its bookkeeping
-is S3 round trips) and restores one 24 and 18 positions back instead of at most 11 and 14; the
+is S3 round trips) and restores one 24 and 18 positions back in S3 and S4 instead of at most 11 and 14; the
 ledger keeps every position trained either way.
 
 
@@ -226,7 +233,8 @@ running rate.
 - **`InvalidClientTokenId` or `SignatureDoesNotMatch` inside the containers** right after
   `aws-bucket`: the new key needs about ten seconds; run `up` and the blocks a little later.
 - **ssh refused after moving to another network**: the security group admits the address `up`
-  saw; run `deploy/driver.sh machines-start` (or `up`) again and it replaces the rule.
+  or `start` last saw; either one replaces the rule for the current address (the parked bed
+  needs `start` anyway).
 - **The script stops with no message** after an `aws` call that was allowed to fail: macOS bash
   3.2 and the `command` builtin (`docs/uncloud-gotchas.md`); the script avoids it, keep it so.
 - **Machines `Suspect` in `uc machine ls`** for a minute after a join or a start: wait; the
@@ -244,4 +252,4 @@ with its endpoint and bucket; the machines come from wherever, joined with `uc m
 and `uc machine add` as `aws.sh` does, with `DISTRAINER_UNCLOUD_MACHINES`,
 `DISTRAINER_UNCLOUD_CONTEXT`, the ssh route and `DISTRAINER_UNCLOUD_HOST_PREFIX` set by hand
 in `.env`. Azure Blob Storage is not S3-compatible: MinIO on a VM there, or an S3 gateway. An
-amd64 cluster needs the image built for it (`docker buildx --platform linux/amd64`).
+amd64 cluster needs the image built for it (`docker buildx build --platform linux/amd64`).

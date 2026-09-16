@@ -40,10 +40,10 @@ just integration S2                          # S3, S4, S8, S9, S10, S11s3 likewi
 deploy/driver.sh machines-stop               # park (disks only, 0.13 USD per day); machines-destroy removes everything but the bucket
 ```
 
-The OrbStack bed is unchanged: `orb start uc1 uc2 uc3`, then
-`DISTRAINER_UNCLOUD_PROVIDER=orbstack DISTRAINER_UNCLOUD_CONTEXT=distrainer deploy/driver.sh
-machines-status` (the shell wins over the env file, so those two variables select it while
-`.env` points at AWS; or comment the pointer out). A `kuberay-operator` pod in OrbStack's k3s was
+The OrbStack bed is unchanged: `orb start uc1 uc2 uc3`, then `just uncloud-machines` or
+`DISTRAINER_UNCLOUD_PROVIDER=orbstack deploy/driver.sh machines-status` (a pinned provider
+makes the driver skip an env file that belongs to another bed, so the OrbStack defaults apply
+while `.env` points at AWS; the compose and KubeRay drivers never read that file). A `kuberay-operator` pod in OrbStack's k3s was
 crash-looping (45 restarts) since M5 and loads the VM: `DISTRAINER_DRIVER=kuberay just down` and
 `kubectl -n <ns> delete deployment kuberay-operator`, or disable k8s, before the next OrbStack
 session.
@@ -57,8 +57,8 @@ session.
   addresses rewritten into the generated ssh config and the uc context's connections, the
   bucket with an IAM user scoped to it. `deploy/uncloud/common.sh` is shared with `machines.sh`
   (which gained `stop`/`start`).
-- Drivers: `DISTRAINER_ENV_FILE` read after `.env` by all three drivers, the caller's environment
-  winning at every step; `DISTRAINER_UNCLOUD_SSH_OPTS`; `machines-*` by
+- Drivers: `DISTRAINER_ENV_FILE` read after `.env` by the uncloud driver (and the runner under it),
+  the caller's environment winning at every step; `DISTRAINER_UNCLOUD_SSH_OPTS`; `machines-*` by
   `DISTRAINER_UNCLOUD_PROVIDER`; `endpoint` printing `s3=<S3_ENDPOINT>` for a store outside the
   cluster. `run_scenarios.py`: the bucket store from `endpoint`, S9/S10/S11s3 parametrised by
   the store, `harness-s3.yaml` and `harness-stream-s3.yaml`.
@@ -104,6 +104,12 @@ session.
   on a loaded Mac.
 - `harness-s3.yaml` names a personal bucket; anyone else edits it and rebuilds.
 - `aws.sh` does not manage the default VPC, the admin IAM user or a second region's bed.
+- The containers hold a long-lived IAM access key in their environment (no instance profile,
+  no rotation); an instance profile on the head and the workers would remove it from the image
+  and the env file.
+- `lag_intervals` is an allowance over an unmodelled controller lag; the exact check would
+  compare the resumed position with the ledger of the newest checkpoint the controller had
+  registered at the restart, which `num_to_keep` deletes before the run ends.
 - The M4 to M6 lists in `docs/handoff-m7.md` section 5 are unchanged.
 
 ## 6. What comes next: pointers

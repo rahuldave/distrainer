@@ -137,6 +137,7 @@ head container against MinIO).
 | `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just kuberay-operator` | install the KubeRay operator into the current Kubernetes context (once; `DISTRAINER_DRIVER=kuberay` for the targets above) |
 | `just uncloud-machines` | create the OrbStack machines and the uncloud cluster (once; `DISTRAINER_DRIVER=uncloud` for the targets above; `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes them) |
+| `just aws-bucket`, `just aws-machines` | the AWS bed (tutorial 5): the S3 bucket with an IAM user scoped to it, then three EC2 instances joined as uncloud context `distrainer-aws`; `deploy/driver.sh machines-stop|start|status|destroy` with `DISTRAINER_DRIVER=uncloud` afterwards, `deploy/uncloud/aws.sh bucket-rm` for the bucket |
 | `just docs` | list the docs |
 
 `DISTRAINER_DRIVER` selects the harness driver (`compose`, the default; `kuberay` for pods on
@@ -147,5 +148,8 @@ KubeRay driver acts (`orbstack`, `distrainer`), and the uncloud driver reads
 `DISTRAINER_UNCLOUD_CONTEXT` (`distrainer`), `DISTRAINER_UNCLOUD_MACHINES` (`uc1 uc2 uc3`, the first
 is the head machine), `DISTRAINER_UNCLOUD_SSH` (`%s@orb`, the ssh destination template for a
 machine), `DISTRAINER_UNCLOUD_HOST_PREFIX` (the CIDR the head machine publishes ports on) and
-`DISTRAINER_UNCLOUD_HEAD_ADDRESS` (an override for `endpoint`). The driver verbs behind these
-targets are documented at the top of `deploy/driver.sh`.
+`DISTRAINER_UNCLOUD_HEAD_ADDRESS` (an override for `endpoint`), plus `DISTRAINER_UNCLOUD_SSH_OPTS`
+(extra ssh options), `DISTRAINER_UNCLOUD_PROVIDER` (`orbstack` or `aws`: whose bootstrap the
+`machines-*` verbs drive) and `DISTRAINER_ENV_FILE` (a bootstrap's env file, read after `.env` by
+the uncloud driver and the scenario runner; what the shell exports wins over both files). The driver
+verbs behind these targets are documented at the top of `deploy/driver.sh`.

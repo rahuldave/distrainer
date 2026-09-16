@@ -69,7 +69,7 @@ the store (`deploy/uncloud/aws.sh`, tutorial 5); `docs/handoff-m8.md` says what 
 what comes next.
 Milestones are in the spec (section 12);
 development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
-issues #1 to #7 and #14.
+issues #1 to #7, #14 and #16.
 
 ## Quick start
 

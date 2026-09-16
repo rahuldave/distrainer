@@ -122,7 +122,7 @@ Images are arm64-native; containers are reachable from the Mac as `service.proje
 Use it for: everything that involves a node disappearing or the world size changing, the S3 path
 of the log commit protocol, and head loss. It is the exit gate for v0.1.
 
-## C. uncloud machines (M6)
+## C. uncloud machines (M6, and the AWS bed of M7)
 
 uncloud is the same shape at machine scale: a set of Docker hosts joined by a WireGuard mesh with
 cluster DNS, driven by a Compose-compatible file (`uc deploy`, `uc scale`, `uc exec`).
