@@ -31,6 +31,7 @@ cloud="${DISTRAINER_RUNPOD_CLOUD:-SECURE}"
 max_hourly="${DISTRAINER_RUNPOD_MAX_GPU_HOURLY:-0.60}"
 disk_gb="${DISTRAINER_RUNPOD_DISK_GB:-20}"
 net_iface="${DISTRAINER_RUNPOD_NET_IFACE:-podnet1}"   # the global-networking interface inside a pod
+down_mode="${DISTRAINER_RUNPOD_DOWN:-terminate}"      # stop: `down` and a scale-down keep the pods (pre-pulled) for the session
 state="$root/.harness/runpod"
 mkdir -p "$state"
 
@@ -66,6 +67,10 @@ live_pods() {  # the ones that are, or are becoming, Ray nodes; EXITED and ERROR
   printf '%s\n' "$out" | jq -c 'select(.status == "RUNNING" or .status == "STARTING" or .status == "PROVISIONING")'
 }
 pod_named() { local out; out="$(live_pods)" || return 1; printf '%s\n' "$out" | jq -c --arg n "$1" 'select(.name == $n)' | head -n 1; }
+stopped_named() {  # a stopped (pre-pulled) pod of that name, if any
+  local out; out="$(cluster_pods)" || return 1
+  printf '%s\n' "$out" | jq -c --arg n "$1" 'select(.name == $n and .status == "EXITED")' | head -n 1
+}
 head_pod() { pod_named "$cluster-head"; }
 worker_pods() {  # sorted by index
   local out
@@ -225,6 +230,13 @@ up_workers() {  # a worker i for every i in 1..N that has none dialling this hea
   while [ "$i" -le "$n" ]; do
     w="$(pod_named "$cluster-worker-$i")" || exit 1
     if [ -z "$w" ] || [ "$(printf '%s' "$w" | jq -r '.env.RAY_HEAD_ADDRESS // empty')" != "$head_id.runpod.internal:6379" ]; then
+      s="$(stopped_named "$cluster-worker-$i")" || exit 1
+      if [ -n "$s" ] && [ "$(printf '%s' "$s" | jq -r '.env.RAY_HEAD_ADDRESS // empty')" = "$head_id.runpod.internal:6379" ]; then
+        sid="$(printf '%s' "$s" | jq -r '.id')"
+        echo "starting the stopped worker $i ($sid) again: no pull"
+        if pod_action "$sid" start; then i=$((i + 1)); continue; fi
+        echo "runpod: $sid would not start (its host may be full); terminating it for a new pod" >&2; terminate "$sid"
+      fi
       if ! create_pod "$cluster-worker-$i" worker "$dc" "$head_id" >/dev/null; then
         echo "runpod: nothing left in $dc for worker $i; trying every global-networking data center (a slower link to the head)" >&2
         create_pod "$cluster-worker-$i" worker "$(gn_data_centers)" "$head_id" >/dev/null || exit 1
@@ -296,10 +308,22 @@ case "$verb" in
   nuke)
     exec "$0" down ;;   # no volumes, no shared mount: nuke is down
   down)
-    # terminate everything of the cluster; a listing failure or a failed terminate is an error
+    # terminate everything of the cluster (DISTRAINER_RUNPOD_DOWN=stop: stop the pods instead, so the
+    # next `up` starts the same pre-pulled pods; a session's tool, `down` with the default ends it);
+    # a listing failure or a failed call is an error
     all="$(cluster_pods)" || exit 1
     rm -f "$state/$cluster-head.ssh"
     if [ -z "$all" ]; then echo "no pods of cluster '$cluster'"; exit 0; fi
+    if [ "$down_mode" = "stop" ]; then
+      failed=0
+      while read -r p; do
+        [ -n "$p" ] || continue
+        [ "$(printf '%s' "$p" | jq -r '.status')" = "EXITED" ] && continue
+        echo "stopping $(printf '%s' "$p" | jq -r '.name') ($(printf '%s' "$p" | jq -r '.id')); the pod keeps its disk and its image"
+        pod_action "$(printf '%s' "$p" | jq -r '.id')" stop || failed=1
+      done <<< "$all"
+      exit $failed
+    fi
     terminate_all "$all" || exit 1 ;;
   wipe-shared)
     echo "runpod: nothing is shared between pods; the store is the bucket (delete its prefixes yourself)" ;;
@@ -310,7 +334,17 @@ case "$verb" in
     head_id="$(printf '%s' "$head" | jq -r '.id')"; dc="$(printf '%s' "$head" | jq -r '.dataCenterId')"
     workers="$(worker_pods)" || exit 1
     extra="$(printf '%s\n' "$workers" | jq -c --arg c "$cluster" --argjson n "$n" 'select((.name | ltrimstr($c + "-worker-") | tonumber) > $n)')"
-    if [ -n "$extra" ]; then terminate_all "$extra" || exit 1; fi
+    if [ -n "$extra" ]; then
+      if [ "$down_mode" = "stop" ]; then   # keep the pre-pulled pod for a later scale-up
+        while read -r w; do
+          [ -n "$w" ] || continue
+          echo "stopping worker $(printf '%s' "$w" | jq -r '.name') ($(printf '%s' "$w" | jq -r '.id'))"
+          pod_action "$(printf '%s' "$w" | jq -r '.id')" stop || exit 1
+        done <<< "$extra"
+      else
+        terminate_all "$extra" || exit 1
+      fi
+    fi
     up_workers "$n" "$head_id" "$dc" ;;
   exec-head)
     exec_head "$@" ;;

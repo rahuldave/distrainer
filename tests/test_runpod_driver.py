@@ -566,3 +566,30 @@ def test_workers_fall_back_to_any_global_networking_data_center_when_the_heads_i
     pinned.respond("POST", "/pods", pod("distrainer-worker-1", "w1", head="headid"), n=1)
     pinned.run("scale", "1", env={"DISTRAINER_RUNPOD_DATA_CENTERS": "EU-RO-1,EU-SE-1"})
     assert pinned.posts()[0]["dataCenterIds"] == ["EU-RO-1", "EU-SE-1"]
+
+
+def test_stop_mode_keeps_pre_pulled_pods_and_scale_up_starts_them(bed):
+    bed.pods(
+        pod("distrainer-head", "headid"),
+        pod("distrainer-worker-1", "w1", head="headid"),
+        pod("distrainer-worker-2", "w2", head="headid"),
+        pod("distrainer-worker-3", "w3", head="headid"),
+    )
+    bed.run("scale", "2", env={"DISTRAINER_RUNPOD_DOWN": "stop"})
+    assert bed.actions("stop") == ["w3"] and bed.terminated() == []
+    # the stopped worker-3 is started again by the next scale-up: no new pod
+    again = Bed(bed.root.parent / "again")
+    again.pods(
+        pod("distrainer-head", "headid"),
+        pod("distrainer-worker-1", "w1", head="headid"),
+        pod("distrainer-worker-2", "w2", head="headid"),
+        pod("distrainer-worker-3", "w3", head="headid", status="EXITED"),
+    )
+    out = again.run("scale", "3").stdout
+    assert again.actions("start") == ["w3"] and again.posts() == [] and "no pull" in out
+    # down in stop mode stops every running pod and terminates nothing
+    out = bed.run("down", env={"DISTRAINER_RUNPOD_DOWN": "stop"}).stdout
+    assert (
+        sorted(bed.actions("stop")) == ["headid", "w1", "w2", "w3", "w3"] and bed.terminated() == []
+    )
+    assert "keeps its disk" in out
