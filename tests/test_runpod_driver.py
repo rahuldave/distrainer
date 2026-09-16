@@ -521,6 +521,7 @@ def test_up_starts_stopped_pods_replaces_errored_ones_and_a_failed_listing_never
     partial = Bed(bed.root.parent / "partial")
     partial.pods(pod("distrainer-head", "headid"), pod("distrainer-worker-1", "w1", head="headid"))
     partial.respond("POST", "/pods/headid/action", {"title": "busy"}, code=429)
+    partial.respond("DELETE", "/pods/headid", {"title": "busy"}, code=500)  # the fallback fails too
     proc = partial.run("down", ok=False)
     assert proc.returncode == 1 and "headid still running" in proc.stderr
     assert sorted(partial.terminated()) == ["headid", "w1"]  # both attempted, one refused
@@ -559,3 +560,9 @@ def test_workers_fall_back_to_any_global_networking_data_center_when_the_heads_i
     assert [p["name"] for p in posts] == ["distrainer-head"] + ["distrainer-worker-1"] * 4
     assert all(p["dataCenterIds"] == ["EU-RO-1"] for p in posts[1:4])
     assert posts[4]["dataCenterIds"] == ["EU-RO-1", "CA-MTL-1"]
+    # an explicit data-center list wins over the head's data center for workers
+    pinned = Bed(bed.root.parent / "pinned")
+    pinned.pods(pod("distrainer-head", "headid", dc="CA-MTL-1"))
+    pinned.respond("POST", "/pods", pod("distrainer-worker-1", "w1", head="headid"), n=1)
+    pinned.run("scale", "1", env={"DISTRAINER_RUNPOD_DATA_CENTERS": "EU-RO-1,EU-SE-1"})
+    assert pinned.posts()[0]["dataCenterIds"] == ["EU-RO-1", "EU-SE-1"]

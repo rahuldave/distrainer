@@ -35,6 +35,21 @@ on RunPod pods (M8, tutorial 6). Dates are when it was seen.
   `NCCL_IB_DISABLE=1` into every pod's environment (`DISTRAINER_RUNPOD_NET_IFACE`), and the
   entrypoint derives the same from the route table as a fallback. An existing pod gets them
   through `PATCH /v2/pods/{id}` with the merged `env` while stopped, then `start`: no pull.
+- **A pod's global networking can be dead on arrival** (2026-09-16): an A40 pod in CA-MTL-1
+  came up with a 10.x address but could not resolve any `<id>.runpod.internal` name
+  ("temporary failure in name resolution") and could not open a TCP connection to the head's
+  10.x address in the same data center, nor to a worker in Romania that reached both. Its Ray
+  worker retried "head not reachable" forever. Nothing on our side fixes that: terminate the
+  pod and rent another; the `ps` and `ray status` pair (a pod running, no node for it) is the
+  tell, and the pod's log shows the GCS timeout.
+- **A whole data center's new pods could not reach the head** (2026-09-16, CA-MTL-1): a second
+  pod there, on another host, also timed out on the head's GCS while the head itself (in
+  CA-MTL-1) was reached from Romania throughout. Whatever it was, it was not ours to fix:
+  rent the workers where the network has behaved (`DISTRAINER_RUNPOD_DATA_CENTERS` pins the
+  list), and treat "a pod is up but its Ray node never appears" as this until proven otherwise.
+- **`terminate` through the action endpoint can answer 405** for a pod that `DELETE
+  /v2/pods/{id}` then removes with 204; the driver tries the action first and deletes on
+  failure.
 - **RunPod injects its API key into every pod** as `RUNPOD_API_KEY`, next to `RUNPOD_POD_ID`,
   `RUNPOD_DC_ID`, `RUNPOD_PUBLIC_IP`, `RUNPOD_TCP_PORT_22`, `RUNPOD_GPU_NAME`, `RUNPOD_CPU_COUNT`
   and `RUNPOD_MEM_GB`. The login-shell export carries it, as RunPod's own start script does.

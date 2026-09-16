@@ -174,7 +174,9 @@ wait_running() {
   done
 }
 
-terminate() { api POST "/pods/$1/action" '{"action":"terminate"}' >/dev/null; }
+terminate() {  # the action first; DELETE when the action is refused (seen: a 405 for a pod DELETE removed)
+  api POST "/pods/$1/action" '{"action":"terminate"}' >/dev/null 2>&1 || api DELETE "/pods/$1" >/dev/null
+}
 pod_action() { api POST "/pods/$1/action" "{\"action\":\"$2\"}" >/dev/null; }
 
 # terminate_all "JSON LINES": every pod given, going on after a failure; non-zero if any failed
@@ -217,7 +219,8 @@ exec_head() {
 }
 
 up_workers() {  # a worker i for every i in 1..N that has none dialling this head: in the head's data
-  local n="$1" head_id="$2" dc="$3" i w   # center, or in any global-networking one when that is sold out
+  local n="$1" head_id="$2" dc="$3" i w   # center, or in any global-networking one when that is sold out;
+  if [ -n "$data_centers" ]; then dc="$data_centers"; fi   # an explicit DISTRAINER_RUNPOD_DATA_CENTERS wins
   i=1
   while [ "$i" -le "$n" ]; do
     w="$(pod_named "$cluster-worker-$i")" || exit 1
