@@ -267,12 +267,15 @@ terminates the highest-numbered ones. `stop-worker I` is the same stop without t
 preemption notice). `down` and `nuke` terminate every pod of the cluster; a stopped pod's disk
 bills by the month (cents for a session), which is why `down` ends every session.
 
-**A session of scenarios** sets `DISTRAINER_RUNPOD_DOWN=stop`: `down` then stops the pods
-instead of terminating them, a scale-down stops the removed worker, and a scale-up starts a
-stopped pod of the same name again instead of renting a new one. The point is the pull: with
-every new pod costing 4 to 35 minutes of image pull, the resize and cold-restore scenarios
-only fit in an afternoon if the pods are rented and pulled once (`up 3`, wait) and then
-stopped and started. A final `down` with the default ends the session.
+**A session of scenarios** sets `DISTRAINER_RUNPOD_DOWN=stop`. `down` then stops the pods
+instead of terminating them and the next `up` starts them again; a scale-down *drains* the
+removed worker (a marker file makes `ray-worker.sh` stop Ray and wait, the pod and its card
+stay ours), and a scale-up removes the marker so the node rejoins in seconds; a stopped pod
+of the same name is started rather than replaced. The point is the pull and the card: every
+new pod costs 4 to 35 minutes of image pull, and a stopped pod's card is rented away within
+minutes (a restart is then refused), so the resize and cold-restore scenarios only fit in an
+afternoon if the pods are rented and pulled once (`up 3`, wait) and never released until the
+final `down` with the default, which terminates.
 
 **Reaching the head.** `exec-head CMD...` is ssh to the head's published `22/tcp` port
 (cached under `.harness/runpod/` by `up`), as `bash -lc "cd /app && CMD"`: a login shell

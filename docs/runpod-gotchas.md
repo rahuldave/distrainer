@@ -42,6 +42,12 @@ on RunPod pods (M8, tutorial 6). Dates are when it was seen.
   worker retried "head not reachable" forever. Nothing on our side fixes that: terminate the
   pod and rent another; the `ps` and `ray status` pair (a pod running, no node for it) is the
   tell, and the pod's log shows the GCS timeout.
+- **Stop and start cannot serve a resize** (2026-09-16, twice): a worker stopped for the
+  scenario's scale-up had its card rented away within minutes and the restart was refused;
+  the driver's fallback rented a new pod, which joined only after the run had ended. Hence
+  the drain marker: `ray-worker.sh` keeps the container alive with Ray stopped while
+  `/tmp/distrainer-drained` exists, and the driver's `scale` in stop mode drains and undrains
+  over ssh instead of touching the pod.
 - **A whole data center's new pods could not reach the head** (2026-09-16, CA-MTL-1): a second
   pod there, on another host, also timed out on the head's GCS while the head itself (in
   CA-MTL-1) was reached from Romania throughout. Whatever it was, it was not ours to fix:
