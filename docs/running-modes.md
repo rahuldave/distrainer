@@ -190,7 +190,10 @@ What is where:
   `DISTRAINER_UNCLOUD_SSH_OPTS`, the head's public address, `S3_*`), which the driver and the
   runner read after `.env` through `DISTRAINER_ENV_FILE`. With `S3_ENDPOINT` naming a store
   outside the cluster, `endpoint` prints `s3=<URL>` instead of `minio=...`: the runner deploys
-  no MinIO, makes no bucket, and runs `harness-s3.yaml` / `harness-stream-s3.yaml`.
+  no MinIO, makes no bucket, and runs `harness-s3.yaml` / `harness-stream-s3.yaml`. With a
+  private repository (`aws.sh ecr`, M7b), `build` pushes one multi-architecture image to ECR and
+  the machines pull it in-region instead of receiving three copies from the Mac; the bed defaults
+  to x86 (`t3`) since M7b, with Graviton (`t4g`) a setting.
 
 ## D. KubeRay on OrbStack Kubernetes (M5)
 

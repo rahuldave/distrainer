@@ -142,3 +142,12 @@ What `deploy/uncloud/aws.sh` and the cloud run of 2026-09-16 taught, on top of t
   commit precedes consumption, the ranks wait for the end marker). Checkpoint less often
   (`every_k: 6` or a time policy) on a real object store; the harness configs keep `2` so the
   same run is comparable across beds.
+- **uncloud has no registry login.** `uc image push` copies a local image to every machine;
+  `uc deploy` pulls nothing it cannot reach anonymously. For a private registry the driver's
+  `build` logs each machine's Docker in over the ssh route with the Mac's token (`aws ecr
+  get-login-password`, twelve hours) and pulls before the deploy, so `pull_policy: never` still
+  holds.
+- **A multi-platform push needs a `docker-container` builder.** The plain `docker` buildx
+  driver builds either platform under Rosetta but refuses `--platform a,b --push`; the driver
+  creates the builder `distrainer` once. Its cache is separate from Docker's: the first build
+  redoes the dependency layer for both architectures (a few minutes, the amd64 half emulated).
