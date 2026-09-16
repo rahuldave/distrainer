@@ -251,7 +251,90 @@ of rows in Parquet, positives and hard negatives per row, InfoNCE with the loss-
   bucket variant of S6 with `harness-remine.yaml` on S3, a follow-up from M6). Budget: a few
   dollars.
 
-### 6.3 Order of work for the session
+### 6.3 What this session already settled (2026-09-16, before the context was cleared)
+
+- **Decisions made with Rahul**: the image goes to **GHCR as a public package** (RunPod pulls
+  it with no stored credentials; GitHub Actions pushes it with its automatic token); the store
+  is the **AWS bucket** (`harness-s3.yaml`, unchanged; a RunPod network volume through its S3
+  API is a later experiment); the GPUs are the **cheapest that allow a reasonable test**: the
+  API's prices on the community cloud were RTX A5000 0.16 USD per hour (24 GB), RTX A4000 0.17
+  (16 GB), RTX 3090 0.22, RTX 4090 0.34, A40 0.35 (secure only), L4 0.44; so `gpuTypeIds`
+  `["NVIDIA RTX A5000", "NVIDIA RTX A4000", "NVIDIA GeForce RTX 3090", "NVIDIA GeForce RTX
+  4090"]` with `gpuTypePriority: availability` and `cloudType: COMMUNITY`, about half a dollar
+  an hour for three pods. The head pod can be a CPU pod (`computeType: CPU`) if its data center
+  also offers global networking; check at run time.
+- **The account**: `RUNPOD_KEY` is in `.env` (that name, not `RUNPOD_API_KEY`); `runpodctl`
+  1.9.0 and `jq` 1.7 are installed. The account holds five stopped pods that belong to a
+  teammate: **the driver must act only on pods it created**, found by a name prefix
+  (`distrainer-<context>-head`, `-worker-N`) and an environment marker
+  (`DISTRAINER_CLUSTER=<context>`), never by "all pods".
+- **The API, verified**: `POST https://rest.runpod.io/v1/pods` with `Authorization: Bearer
+  $RUNPOD_KEY`; fields `name`, `imageName`, `gpuTypeIds`, `gpuTypePriority`, `gpuCount`,
+  `cloudType` (`COMMUNITY` | `SECURE`), `dataCenterIds`, `dataCenterPriority`,
+  `globalNetworking` (true; creation time only), `ports` (`["22/tcp"]` for direct ssh),
+  `env`, `dockerEntrypoint`, `dockerStartCmd` (`["deploy/ray-head.sh"]` or
+  `["deploy/ray-worker.sh"]`), `containerDiskInGb`, `volumeInGb`, `volumeMountPath`,
+  `networkVolumeId`, `containerRegistryAuthId`, `templateId`, `supportPublicIp`,
+  `minRAMPerGPU`, `minVCPUPerGPU`, `interruptible`, `computeType`, `vcpuCount`; the response
+  has `id`, `publicIp`, `portMappings` (`{"22": 10341}`), `machine`, `desiredStatus`
+  (`RUNNING` | `EXITED` | `TERMINATED`); `POST /v1/pods/{id}/stop`, `/start`, `DELETE
+  /v1/pods/{id}`, `GET /v1/pods` lists (a teammate's pods included). The internal hostname is
+  `<pod id>.runpod.internal`. GPU types and prices come from the GraphQL endpoint
+  (`https://api.runpod.io/graphql`, query `gpuTypes { id displayName memoryInGb
+  communityPrice securePrice lowestPrice(input:{gpuCount:1}) { uninterruptablePrice } }`).
+  Not yet verified: how `GET /v1/pods/{id}` reports readiness and the internal address, the
+  `/dev/shm` size in a pod (Ray's object store; the harness uses 200 MB, `shm_size: 1g` in
+  compose), whether `dockerStartCmd` runs with the image's `PATH` (the Dockerfile sets it),
+  and which data centers offer both global networking and the chosen GPUs.
+- **Gest and git**: parent `zvymnspr` (issue #20), iteration `toonvruz`, leaves `xkmulnzr`
+  (the example at CPU size, claimed, nothing written yet), `nysusvou` (the GPU image and the
+  Actions workflow), `yrkynmlp` (the RunPod driver), `pmtxwnrx` (the run), `nnlkrrul` (docs
+  and the M9 handoff). Branch `gest/zvymnspr-runpod` exists from `main` with no commits.
+- **Implementation notes from reading the code** (so the next session does not re-read it):
+  - An example is `make_blocks.py` plus `train.py` plus configs. Blocks are written with
+    `distrainer.block.write_block(fs, root, block_id, table, meta)` and the log with
+    `BlockLog.create(fs, root, W=..., seed=...)` then `BatchWriter(log, refs, passes=...,
+    tail="error").run()`; `examples/toy_contrastive/make_blocks.py` builds the rows with Ray
+    Data (`groupby("batch_id").map_groups`) and is the model to copy; `make_blocks` returns
+    the existing refs when the log exists (idempotent per store).
+  - `train.py` defines `build_model(info) -> (model, optimizer)`, `train_step(model,
+    optimizer, table, info) -> metrics dict` (DDP all-reduces in `backward`), `entry(cfg)`
+    returning both (for `distrainer resume --entry`), and a `main` with `--config`, `--keep`,
+    `--no-check`, `--set KEY=VALUE`, `reset_run`, `ensure_blocks`, `init_ray`,
+    `DistTrainer(train_step, build_model, cfg).fit()`, then `read_audit` and the `check_s1`
+    assertions. `info.device` is Ray Train's device for the worker (the GPU with
+    `scaling.use_gpu: true`); move the batch there in the step. `info.train` is the free-form
+    `train:` section.
+  - `examples/toy_contrastive/model.py` has `info_nce(anchor, positive, negatives,
+    temperature, all_gather)`; NT-Xent is that with zero hard negatives (`negatives` of shape
+    `[B, 0, e]`) and `all_gather: true`, so the new example imports it. The re-mining hook is
+    `examples/toy_contrastive/remine.py` (`hooks: {remine: ...}` in the config, the log
+    streamed); its GPU variant is a follow-up leaf, not the first one.
+  - Dependencies: `pyproject.toml` pins torch from the CPU index through `[tool.uv.sources]`;
+    add `torchvision` the same way for the laptop, and a `gpu` extra whose torch and
+    torchvision come from a CUDA index (a second `[tool.uv]` index, `explicit = true`, with
+    a marker-based source; or a separate lock in `deploy/gpu/`), which `deploy/Dockerfile.gpu`
+    installs on an `nvidia/cuda:12.6.x-runtime-ubuntu22.04` base with the same uv layout as
+    `deploy/Dockerfile`. CI (`.github/workflows/ci.yml`) syncs with `--all-groups`; the GPU
+    image workflow is a second file, triggered on pushes to `main` that touch `deploy/`,
+    `pyproject.toml`, `uv.lock`, `distrainer/` or `examples/`, and by hand, with
+    `permissions: packages: write` and `docker/login-action` against `ghcr.io` using
+    `GITHUB_TOKEN`, `docker/build-push-action` with `platforms: linux/amd64`.
+  - The driver `deploy/drivers/runpod.sh`: `build` is a no-op that prints where the image
+    comes from (`DISTRAINER_IMAGE=ghcr.io/rahuldave/distrainer-gpu:latest`); `up N` creates
+    the head with the S3 settings and `RAY_TRAIN_V2_ENABLED` etc. in `env`, waits until
+    `desiredStatus` is `RUNNING` and ssh answers, then the workers with
+    `RAY_HEAD_ADDRESS=<head id>.runpod.internal:6379`; `kill-worker I` deletes and recreates
+    worker I (after `DISTRAINER_RESTART_DELAY`), `kill-head` deletes the head, `scale N`
+    creates or deletes workers, `down` deletes every pod of the cluster, `exec-head` is
+    `ssh -p <mapped port> root@<publicIp>` (the account's ssh public key must be set in
+    RunPod's settings; RunPod injects it) or `ssh <id>-<hash>@ssh.runpod.io`, `cp-from-head`
+    an scp, `shared` nothing, `endpoint` `s3=...`, `ps` and `logs` from the API. The runner's
+    `wait_for_trainers` (180 s) and `up` will need a bigger budget for pod start times. The
+    existing `tests/test_deploy_manifests.py::test_every_driver_implements_every_common_verb`
+    will demand every verb.
+
+### 6.4 Order of work for the session
 
 1. Rahul: a RunPod account and API key (`RUNPOD_API_KEY` in `.env`), the registry choice
    (GHCR needs a PAT in the repository's secrets for the Actions workflow), and whether the
