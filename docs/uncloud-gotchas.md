@@ -157,3 +157,9 @@ What `deploy/uncloud/aws.sh` and the cloud run of 2026-09-16 taught, on top of t
 - **A run name that exists in the bucket is restored, not rerun.** `just train` after a bed
   swap restored the finished `hello_s3` in 32 s and printed `S1 PASS` on its old trail; the
   scenarios clean their run state, a manual run needs a new name (`--set run_name=...`).
+- **A repeat push is not yet cheap.** Pushing the unchanged image to ECR a second time took
+  eight minutes (`pushing layers 310 s`), where a registry should skip blobs it holds. The
+  docker-container builder has its own cache and garbage collection, and its exporter may
+  compress differently from build to build; whether the dependency layer was rebuilt or merely
+  recompressed is the open question (an open item in `docs/handoff-m8.md`). Until then, count a
+  push per code change, not per dependency change.

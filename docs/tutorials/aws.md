@@ -203,9 +203,11 @@ name, or a registry image: by Docker's rule, a first path component with a dot, 
   driver cannot push a multi-platform image), the amd64 half under Rosetta, then a login and a
   `docker pull` on every machine over the ssh route. About four minutes to build both halves
   the first time, then the push once from the Mac (ten minutes on 2026-09-16 for about one
-  gigabyte of compressed layers, both halves), the three pulls in-region in seconds; after a
-  code change, only the changed layer is rebuilt and pushed. Works for either bed: each machine
-  pulls its own half of the manifest. The repository then holds one `latest` index with an
+  gigabyte of compressed layers, both halves), the three pulls in-region in seconds. A
+  repeat push should move only changed layers, but the measurement says otherwise for now: an
+  unchanged image pushed again took eight minutes (five of them uploading), so either the
+  builder's cache had let the dependency layer go or its compression made new blobs; an open
+  item in the handoff. Works for either bed: each machine pulls its own half of the manifest. The repository then holds one `latest` index with an
   amd64 manifest (about 530 MB compressed) and an arm64 one (about 490 MB).
 - **C. A cross-built local image for an x86 bed without a repository**
   (`DISTRAINER_PLATFORMS=linux/amd64`, `DISTRAINER_IMAGE=distrainer:local`): `docker build

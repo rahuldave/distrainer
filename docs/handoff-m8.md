@@ -1,149 +1,269 @@
-# Handoff: after M7 (the AWS bed): what is there, what it taught, what is next
+# Handoff: after M7 and M7b (the AWS beds, ECR): what is there, what it taught, and M8 on RunPod
 
-Written 2026-09-16 at the end of the M7 session for the thread that picks up the next step. Read
-`CLAUDE.md` and `AGENTS.md` first (workflow rules), then this file, then `docs/tutorials/aws.md`,
+Written 2026-09-16 at the end of the M7/M7b session for the thread that picks up the next step.
+Read `CLAUDE.md` and `AGENTS.md` first (workflow rules), then this file, then
+`docs/tutorials/aws.md` (both beds, the registry, which image for which machine),
 `docs/uncloud-gotchas.md` (the AWS section at the end) and the two cheat sheets under
 `docs/cheatsheets/`. Verify the Gest ids and branch state with `gest task show` and `git status`
 before relying on them.
 
 ## 1. Where things stand
 
-- M0 to M7 are merged to `main` (PRs #8 to #17). M7, the cloud stage, was branch
-  `gest/rpmyqnzs-cloud-aws`, PR #17 (issue #16; Gest parent `rpmyqnzs` under the v0.1 root
-  `qvuukpsm`, iteration `mtoypxln`, leaves `vvkwopls` bootstrap and driver, `xkpkkqqm` runner,
-  `wuykxnsn` the cloud run, `ktkzopov` docs, `ryxskkpu` cheat sheets). Merged to `main` as the squash commit `f988a4e` (PR #17,
-  issue #16 closed) on 2026-09-16; the branch is deleted.
-- The same driver, compose file and scenario runner as M6 run on three EC2 instances with an S3
+- M0 to M7b are merged to `main`: M7, the cloud stage (PR #17, issue #16, squash `f988a4e`; Gest
+  parent `rpmyqnzs`, iteration `mtoypxln`), and M7b, the image in a private registry and an x86
+  bed (PR #19, issue #18, squash `ed576d0`; Gest parent `norpvuup`, iteration `mkooymum`).
+  Nothing is open on GitHub.
+- The same driver, compose file and scenario runner as M6 run on EC2 instances with an S3
   bucket as the store: `deploy/uncloud/aws.sh` builds the bed, `.harness/aws/env` tells the
-  driver about it, `endpoint` prints `s3=` and the runner deploys no MinIO. Section 3 has the
-  numbers.
-- **Phase 7b** (2026-09-16, later the same day; issue #18, PR #19; Gest parent `norpvuup`,
-  iteration `mkooymum`, leaves `oylsztvn` code, `zxpwwtuq` the run, `oxtzpqwn` docs): the node
-  image published once to a private ECR repository (`aws.sh ecr`) as a multi-architecture
-  manifest and pulled by the machines (`build` logs them in over the ssh route with the Mac's
-  token), the bed on x86 (`t3.large`, `t3.medium`, the new defaults; Graviton a setting).
-  Every cluster scenario passed on the x86 bed pulling from ECR: S2 107 s, S3 118 s, S4 193 s,
-  S8 98 s, S9 212 s, S10 161 s, S11s3 222 s (arm64: 100, 103, 179, 87, 197, 163, 220). The
-  push of both halves took ten minutes from the Mac once; the pulls seconds.
-- The AWS bed was left **parked** (now the x86 one: `aws1`, `aws2`, `aws3` stopped: disks only, about 0.13 USD per
-  day; `deploy/driver.sh machines-start` brings it back with new public addresses, `machines-destroy`
-  removes it, `deploy/uncloud/aws.sh bucket-rm` the bucket `distrainer-rahuldave` and its IAM user).
-  The bucket holds the block log (`blocks/`), the streaming store (`blocks_stream/`) and the
-  scenario runs (`runs/`): 897 objects, 1.9 MB, a fraction of a cent per month; leaving it saves
-  the 71 s block build next time, and every scenario cleans its own run state. Spend for the
-  session was about 0.3 USD; parked, the bed costs about 4 USD per month for the disks.
+  driver about it, `endpoint` prints `s3=` and the runner deploys no MinIO. The node image is
+  built for `linux/amd64` and `linux/arm64` and lives in a private ECR repository; the machines
+  pull it. Section 3 has the numbers.
+- **The AWS state at the end of the session**: the x86 bed (`aws1` t3.large, `aws2`, `aws3`
+  t3.medium, us-east-1b) is **parked** (stopped: disks only, about 0.13 USD per day, 4 USD a
+  month); the security group admits ssh from this Mac's address only; the bucket
+  `distrainer-rahuldave` (us-east-1, private, tagged) holds the block log, the streaming store
+  and the scenario runs (about 2 MB); the ECR repository `distrainer` (tagged) holds the
+  multi-architecture `latest` (an amd64 half of about 530 MB and an arm64 one of 490 MB,
+  compressed) plus the untagged manifests of earlier pushes (a lifecycle policy keeps twelve);
+  `.env` points at `.harness/aws/env`. Rahul decides whether to keep the bed parked or destroy
+  it: `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes the instances, the
+  group and the key pair; `deploy/uncloud/aws.sh bucket-rm` and `ecr-rm` remove the bucket with
+  its user and the repository. Spend for the whole session was under two dollars of the 15 USD
+  budget.
 
 ## 2. Environment checklist
 
 ```bash
-just setup && just verify                    # laptop-only gate
+just setup && just verify                    # laptop-only gate (196 unit tests, smoke)
 brew install awscli psviderski/tap/uncloud   # the native CLI (the pkg one is x86_64 under Rosetta), uc 0.20
-aws iam get-user                             # the default profile's IAM user: EC2, S3, and the inline distrainer-harness-iam policy
+aws iam get-user                             # the default profile's IAM user: EC2, S3, ECR, and the inline distrainer-harness-iam policy
 cat .env                                     # DISTRAINER_ENV_FILE=.harness/aws/env
-deploy/uncloud/aws.sh status                 # the instances, the admitted address, uc machine ls
+deploy/uncloud/aws.sh status                 # the instances, the admitted address; uc machine ls once running
 export DISTRAINER_DRIVER=uncloud
-deploy/driver.sh machines-start              # if parked: new public addresses; the ssh config and the uc context follow
-just build                                   # only after a code change (docker build + uc image push over ssh)
-just up 2 && just blocks examples/hello_blocks/harness-s3.yaml && just train examples/hello_blocks/harness-s3.yaml
+deploy/driver.sh machines-start              # if parked: new public addresses; the ssh config, the uc context and the ssh rule follow
+just build                                   # after a code change: buildx pushes both halves to ECR, the machines pull (section 5: a repeat push is slow today)
+just up 2 && just blocks examples/hello_blocks/harness-s3.yaml && just train examples/hello_blocks/harness-s3.yaml --set run_name=<new>
 just integration S2                          # S3, S4, S8, S9, S10, S11s3 likewise; one at a time
-deploy/driver.sh machines-stop               # park (disks only, 0.13 USD per day); machines-destroy removes everything but the bucket
+deploy/driver.sh machines-stop               # park; machines-destroy removes everything but the bucket and the repository
 ```
 
 The OrbStack bed is unchanged: `orb start uc1 uc2 uc3`, then `just uncloud-machines` or
-`DISTRAINER_UNCLOUD_PROVIDER=orbstack deploy/driver.sh machines-status` (a pinned provider
-makes the driver skip an env file that belongs to another bed, so the OrbStack defaults apply
-while `.env` points at AWS; the compose and KubeRay drivers never read that file). A `kuberay-operator` pod in OrbStack's k3s was
-crash-looping (45 restarts) since M5 and loads the VM: `DISTRAINER_DRIVER=kuberay just down` and
-`kubectl -n <ns> delete deployment kuberay-operator`, or disable k8s, before the next OrbStack
-session.
+`DISTRAINER_UNCLOUD_PROVIDER=orbstack deploy/driver.sh machines-status` (a pinned provider makes
+the driver skip an env file that belongs to another bed, so the OrbStack defaults apply while
+`.env` points at AWS; the compose and KubeRay drivers never read that file). A `kuberay-operator`
+pod in OrbStack's k3s was crash-looping (45 restarts) since M5 and loads the VM:
+`DISTRAINER_DRIVER=kuberay just down` and `kubectl -n <ns> delete deployment kuberay-operator`,
+or disable k8s, before the next OrbStack session. Memory on the Mac stays tight with any cluster
+up: one scenario at a time.
 
-## 3. What M7 delivered
+## 3. What M7 and M7b delivered
 
-- `deploy/uncloud/aws.sh` (`up | status | stop | start | destroy | bucket | bucket-rm | env`):
-  key pair, security group (ssh and the dashboard from this Mac's address only, WireGuard
-  between the members), three tagged Graviton instances in a zone that offers the types,
-  the uncloud context over the private addresses, park and resume with the new public
-  addresses rewritten into the generated ssh config and the uc context's connections, the
-  bucket with an IAM user scoped to it. `deploy/uncloud/common.sh` is shared with `machines.sh`
-  (which gained `stop`/`start`).
-- Drivers: `DISTRAINER_ENV_FILE` read after `.env` by the uncloud driver (and the runner under it),
-  the caller's environment winning at every step; `DISTRAINER_UNCLOUD_SSH_OPTS`; `machines-*` by
-  `DISTRAINER_UNCLOUD_PROVIDER`; `endpoint` printing `s3=<S3_ENDPOINT>` for a store outside the
-  cluster. `run_scenarios.py`: the bucket store from `endpoint`, S9/S10/S11s3 parametrised by
-  the store, `harness-s3.yaml` and `harness-stream-s3.yaml`.
-- Results on 2026-09-16 (`t4g.large` head, two `t4g.medium` workers, us-east-1b, S3 in
-  us-east-1), against the OrbStack numbers of M6: S2 100 s (149), S3 103 s (146), S4 179 s
-  (210), S8 87 s (125), S9 197 s (254), S10 163 s (205), S11s3 220 s (161); `up` 78 s, the
-  blocks 71 s, the plain run 80 s with 0.67 s per step (0.25 on MinIO: each checkpoint is a
-  one-second upload to S3). All PASS after two runner fixes found on the first pass: the
-  Mac-side client signs with the bucket's region, and S3/S4's replay bound takes an allowance
-  (`lag_intervals`) on a store outside the cluster, where the Train controller registers
-  checkpoints behind the workers (24 and 18 positions replayed against 11 and 14).
-- Docs: tutorial 5 (`docs/tutorials/aws.md`), tutorial 4 section 9 pointing at it, the AWS
-  section of `docs/uncloud-gotchas.md`, running-modes C, the verb map and config tables, the
-  spec's section 11, the cheat sheets.
+- `deploy/uncloud/aws.sh` (`up | status | stop | start | destroy | bucket | bucket-rm | ecr |
+  ecr-rm | env`): key pair, security group (ssh from this Mac's address only, WireGuard between
+  the members; the dashboard through an ssh tunnel), three tagged instances in a zone that
+  offers the types (recorded, so a later `up` keeps the zone), the uncloud context over the
+  private addresses, park and resume with the new public addresses rewritten into the generated
+  ssh config, the uc context and the ssh rule, the bucket with an IAM user scoped to it, the
+  tagged ECR repository with a lifecycle policy; `bucket-rm` and `ecr-rm` delete only what
+  carries the tag (`DISTRAINER_AWS_ADOPT=1` adopts an existing one). `deploy/uncloud/common.sh`
+  is shared with `machines.sh` (which gained `stop`/`start`). The bed defaults to x86
+  (`t3.large`, `t3.medium`); Graviton (`t4g`) is a setting.
+- Drivers: every driver lets the caller's environment win over `.env`; the uncloud driver also
+  reads the env file `.env` names as `DISTRAINER_ENV_FILE` (skipped when the caller pins another
+  bed), takes `DISTRAINER_UNCLOUD_SSH_OPTS`, dispatches `machines-*` by
+  `DISTRAINER_UNCLOUD_PROVIDER`, prints `s3=<S3_ENDPOINT>` from `endpoint` for a store outside
+  the cluster, and its `build` takes a registry image: `docker buildx build --platform
+  linux/amd64,linux/arm64 --push` on a docker-container builder, then every machine logs in over
+  the ssh route with the Mac's twelve-hour ECR token and pulls; a local image keeps `docker
+  build` plus `uc image push`. `run_scenarios.py`: the bucket store from `endpoint` (`minio=` or
+  `s3=`, KubeRay's placeholder before the deploy), S9/S10/S11s3 parametrised by the store, the
+  Mac-side client signing with the bucket's region, a `lag_intervals` allowance on the replay
+  bound for a store outside the cluster, `harness-s3.yaml` and `harness-stream-s3.yaml`.
+- Results on 2026-09-16 (the bucket in us-east-1), every scenario green on both beds:
 
-## 4. Behaviours learned in M7 that will bite again
+  | scenario | arm64 bed (`t4g`, image pushed) | x86 bed (`t3`, image from ECR) | OrbStack (MinIO) |
+  |---|---|---|---|
+  | S2 | 100 s | 107 s | 149 s |
+  | S3 | 103 s | 118 s | 146 s |
+  | S4 | 179 s | 193 s | 210 s |
+  | S8 | 87 s | 98 s | 125 s |
+  | S9 | 197 s | 212 s | 254 s |
+  | S10 | 163 s | 161 s | 205 s |
+  | S11s3 | 220 s | 222 s | 161 s |
 
-- **macOS bash 3.2 and `command`**: a failing command run through the `command` builtin ignores
-  `set -e`'s suppression in `if` conditions and `||` lists and exits the script silently. Two
-  bootstrap runs died that way with no message before it was understood. Plain calls are fine.
-- **An old account has no default VPC** and one of its zones (`us-east-1a`) has no Graviton
-  capacity: `create-default-vpc` and a subnet chosen by `describe-instance-type-offerings`.
-- **The bootstrap's recorded settings outlive a changed default** (`DISTRAINER_UNCLOUD_MACHINES`
-  from `.harness/aws/env`): a rename means destroy, delete the env file, up.
-- **The pkg AWS CLI is x86_64** (nine seconds per call under Rosetta, `sts get-caller-identity`
-  never returning); the Homebrew build is native.
-- **Credentials**: the default profile's IAM user needed `AmazonEC2FullAccess` and a scoped IAM
-  policy added in the console; root sign-in wanted an MFA device that was not at hand. Do this
-  before a session that needs the bed, not during it.
-- **The Train controller lags the workers on S3**: its checkpoint bookkeeping is S3 round trips,
-  so a resize restores one or two reports back; and **checkpoint latency sets the step pace**
-  (0.67 s per step with `every_k: 2`), which inverts the S11 pacing premise. Checkpoint less
-  often on an object store when pace matters; the harness configs keep `every_k: 2` so the
-  beds compare.
-- **Real S3 signs by region**: `S3_REGION=auto` gets a 400 from `HeadObject` with no body.
+  `up` 78 s (arm64) and 42 s (x86); the 240 blocks 71 s to write; the plain run 80 s on arm64
+  with 0.67 s per step (0.25 on MinIO: each checkpoint is a one-second upload). The build of
+  both halves takes about four minutes on a warm builder; the push of both halves about ten
+  minutes from a home uplink; the three in-region pulls seconds.
+- Docs: tutorial 5 (`docs/tutorials/aws.md`) as the operations guide for both beds, tutorial 4
+  section 9 pointing at it, the AWS section of `docs/uncloud-gotchas.md`, running-modes C, the
+  verb map and config tables, docs/cli.md, `.env.example`, the spec's section 11 and the
+  milestone list, the cheat sheets under `docs/cheatsheets/`.
+
+## 4. Behaviours learned in M7 and M7b that will bite again
+
+- **macOS bash 3.2**: a failing command run through the `command` builtin ignores `set -e`'s
+  suppression in `if` conditions and `||` lists; a failing command substitution in an
+  assignment ends the script too. Both ended a bootstrap run silently before they were
+  understood. Plain calls, and `out="$(...)" || out=""`.
+- **An old account has no default VPC** and one of its zones (`us-east-1a`) has no Graviton:
+  `create-default-vpc` and a subnet chosen by `describe-instance-type-offerings`.
+- **The bootstrap's recorded settings outlive a changed default** (`.harness/aws/env` is read
+  first by the bootstrap): a rename means destroy, delete the env file, up.
+- **Real S3 signs by region** (`S3_REGION=auto` gets a 400 from `HeadObject` with no body), and
+  **the Train controller lags the workers on S3**: its checkpoint bookkeeping is S3 round trips,
+  so a resize restores one or two reports back (24 and 18 positions replayed against bounds of
+  11 and 14). **Checkpoint latency sets the step pace** there (0.67 s per step with `every_k:
+  2`), which inverts the S11 pacing premise.
+- **uncloud has no registry login**: the machines pull with a token the Mac hands them over
+  ssh; **a multi-platform push needs a docker-container builder**; **ECR's tag fields are
+  capitalised** (`Key`, `Value`), unlike EC2's; **a run name that exists in the bucket is
+  restored, not rerun**.
+- **Credentials**: every new AWS service needed a policy added in the console (EC2, the scoped
+  IAM policy, ECR); do the whole list of tutorial 5 section 2 before a session, not during it.
+  The auto-mode classifier refuses to inspect other profiles or list policies; ask Rahul.
 - Everything in the M6 list still applies (`docs/handoff-m7.md` section 4).
 
 ## 5. Review follow-ups still open
 
-- The driver's `build` verb has no `--platform`; an amd64 bed (`DISTRAINER_AWS_ARCH=amd64`,
-  `t3` types) needs `docker build --platform linux/amd64`, which OrbStack does under Rosetta.
-- `wait_for_trainers` gives 180 s after a full teardown; S9 under compose timed out there once
-  on a loaded Mac.
-- `harness-s3.yaml` names a personal bucket; anyone else edits it and rebuilds.
-- `aws.sh` does not manage the default VPC, the admin IAM user or a second region's bed.
-- The containers hold a long-lived IAM access key in their environment (no instance profile,
-  no rotation); an instance profile on the head and the workers would remove it from the image
-  and the env file.
+- **A repeat push to ECR is not cheap yet**: pushing the unchanged image again took eight
+  minutes (`pushing layers 310 s`) where a registry should skip blobs it holds. Either the
+  docker-container builder's cache let the dependency layer go (its own garbage collection) or
+  its exporter recompressed it into new blobs. Check with `docker buildx du`, a build with
+  `--cache-to type=registry` / `--cache-from`, or `--provenance=false` and a fixed compression;
+  until then a code change costs a full push.
+- The containers hold a long-lived IAM access key for S3 (no instance profile) and each machine
+  keeps the ECR token for twelve hours in root's Docker config; an instance profile with ECR read
+  and the bucket policy would retire both, and needs IAM role permissions the CLI user lacks.
 - `lag_intervals` is an allowance over an unmodelled controller lag; the exact check would
-  compare the resumed position with the ledger of the newest checkpoint the controller had
-  registered at the restart, which `num_to_keep` deletes before the run ends.
+  compare the resumed position with the ledger of the newest checkpoint registered at the
+  restart, which `num_to_keep` deletes before the run ends.
+- `wait_for_trainers` gives 180 s after a full teardown; S9 under compose timed out there once on
+  a loaded Mac.
+- `harness-s3.yaml` and `harness-stream-s3.yaml` name a personal bucket; anyone else edits and
+  rebuilds. The lifecycle policy counts manifests (twelve), not builds.
+- `stop-worker` and `cp-from-head` are used by no scenario under any driver.
 - The M4 to M6 lists in `docs/handoff-m7.md` section 5 are unchanged.
 
-## 6. What comes next: pointers
+## 6. M8: a GPU contrastive example on RunPod
 
-The harness now runs in four places (laptop, containers, OrbStack machines, EC2) against two
-stores (MinIO, S3). Candidates for the next stage, none scheduled; a Gest iteration with `gpl`
-when one starts:
+Rahul's direction (2026-09-16): the next session's work is a contrastive training example that
+needs a GPU, run on RunPod. The research below is from RunPod's documentation and price pages as
+of this date; verify the moving parts (prices, data centers, API fields) before building on them.
 
-- **Checkpointing on an object store**: a checkpoint policy that adapts `every_k` to the
-  measured upload time, or an asynchronous upload, so the step pace on S3 approaches the
-  local one; then the S11 premise holds again and S11s3 gets back under 161 s.
-- **A second store and a second architecture**: R2 (the same `.env` lines, another endpoint)
-  and an amd64 bed (`DISTRAINER_AWS_ARCH=amd64`, `t3` types, `--platform linux/amd64` on
-  `build`, which OrbStack does under Rosetta).
-- **Spot instances** for the workers (a real preemption notice instead of `docker stop`), and
-  `stop-worker`, which no scenario uses yet.
-- **A GPU instance type** behind the existing config flag, with a workload that needs it.
-- **Rahul's stated direction (2026-09-16): the next experiments run on RunPod.** Phase 7b did
-  the groundwork: the image is now built for amd64 too and lives in a private registry, and the
-  x86 bed proves the amd64 build. What remains for RunPod: a GPU image (a CUDA base image, a
-  CUDA torch wheel, `uv.lock` grown an extra; the current image has CPU torch from the CPU wheel
-  index), a registry RunPod can log in to (ECR's twelve-hour token is awkward there; GHCR or a
-  private Docker Hub repository is the usual choice), and a new driver: RunPod pods pull from a
-  registry and expose TCP ports through a proxy, no UDP, so uncloud's WireGuard mesh does not
-  fit; a RunPod "instant cluster" (a private network between nodes) or one multi-GPU pod with
-  Ray's own networking is the shape, behind the same verbs (`deploy/drivers/runpod.sh`). An
-  instance profile for the EC2 machines (ECR read and S3, retiring the token step and the
-  long-lived key) needs IAM role permissions the CLI user does not have.
+### 6.1 What RunPod offers, and what fits
+
+- **Pods** are single containers on a GPU host, created from an image (a template holds the
+  image, the start command, ports, environment, disks) through the console, `runpodctl pod
+  create --name ... --gpu-id "NVIDIA GeForce RTX 4090" --image ... --container-disk-in-gb 20
+  --volume-in-gb 50`, the REST API (`POST https://rest.runpod.io/v1/pods` with `Authorization:
+  Bearer <key>`; fields `name`, `imageName`, `gpuTypeIds`, `gpuCount`, `containerDiskInGb`,
+  `volumeInGb`, `templateId`; `POST /v1/pods/{id}/stop`, `/start`, `DELETE /v1/pods/{id}`), or
+  the `runpod` Python package. Private images use registry credentials stored in the account
+  (a username and password pair) and referenced by the template: fine for GHCR with a personal
+  access token or a private Docker Hub repository, not for ECR, whose password is a twelve-hour
+  token. **Decision for Rahul: GHCR (free for a public repository's packages, a PAT with
+  `write:packages`) or a private Docker Hub repository.**
+- **Global networking** gives pods private TCP/IP connectivity with each other as
+  `POD_ID.runpod.internal` (no ports to open, enabled at pod creation only, in about seventeen
+  data centers, 100 Mbps between pods). That is the Ray cluster's network: the head binds to its
+  internal address and the workers dial `<head pod>.runpod.internal:6379`; the loss-side
+  `all_gather` of the contrastive example is a few kilobytes per step, well within 100 Mbps,
+  and blocks and checkpoints go to the store, not between pods. There is no UDP promise, and
+  none is needed: uncloud does not apply here (its WireGuard mesh would need it, and RunPod
+  pods are not Docker hosts anyway).
+- **Instant Clusters** are multi-node H100 (and similar) clusters with InfiniBand, up to 8
+  nodes, with RunPod injecting `MASTER_ADDR`, `MASTER_PORT`, `NUM_NODES`, `NUM_TRAINERS`,
+  `NODE_RANK` on every node; RunPod's own Ray guide runs `ray start --head
+  --node-ip-address=$(hostname -I | awk '{print $1}') --port=6379 --num-gpus=$NUM_TRAINERS` on
+  pod-0 and `ray start --address=$MASTER_ADDR:6379 ...` on the others, with `/dev/shm` raised
+  to 8 GB. Too expensive and too big for a first experiment; global networking with cheap pods
+  is the fit. The `ray start` recipe transfers as it is: `--node-ip-address` set to the pod's
+  internal address, never `0.0.0.0`.
+- **Storage**: the block log, the audit trail and the checkpoints need an S3-compatible store.
+  Two options: keep the AWS bucket (works unchanged; S3 charges 0.09 USD per GB for data read
+  from outside AWS, small at these sizes, and RunPod charges no egress), or a RunPod **network
+  volume** with its **S3-compatible API** (`https://s3api-<datacenter>.runpod.io/`, keys made
+  in the console's settings, `s3://<volume id>/prefix`; put, get, delete, list, multipart
+  supported; no bucket creation, no presigned URLs; the volume also mounts at `/workspace` in
+  every pod of that data center, a shared mount, which would even let S6 and S11 run). The
+  library's `storage.kind: s3` with `endpoint` and `region` should work against it; verify
+  path-style addressing and the `ListObjects` limits (directories over 10 000 files). **Decision
+  for Rahul: the AWS bucket first (nothing to build), the network volume as the experiment's
+  second half.**
+- **Access**: ssh to a pod through `ssh.runpod.io` with the account's injected public key, or
+  a directly exposed TCP port; `exec-head` becomes an ssh command, `cp-from-head` an scp. Pods
+  have a public proxy for HTTP ports (the Ray dashboard could be exposed that way, behind
+  RunPod's proxy).
+- **Prices** (on-demand, per GPU-hour, 2026): RTX 4090 about 0.34 USD on the community cloud
+  and 0.69 on the secure cloud; A100 80 GB about 1.4 to 1.6; H100 about 2.9 to 3.3; network
+  volumes 0.07 USD per GB-month; container disk free while stopped (it is erased), a pod's
+  volume disk 0.10 per GB-month (0.20 while the pod is stopped); no ingress or egress fees.
+  Three RTX 4090 pods (a head and two workers) are about one dollar an hour on the community
+  cloud; the head could be a CPU-only pod if a data center offers those with global networking.
+
+### 6.2 The example: `examples/image_contrastive`
+
+`examples/toy_contrastive` (spec section 8) is a two-layer MLP on 32 synthetic features: a
+GPU changes nothing for it. The GPU-needing example keeps the same shape of the harness (blocks
+of rows in Parquet, positives and hard negatives per row, InfoNCE with the loss-side
+`all_gather`, the re-mining hook for S6) and changes what a row is:
+
+- **Data**: CIFAR-10 (60 000 images of 32 by 32, 170 MB, from torchvision) or STL-10's
+  unlabelled split (100 000 of 96 by 96, 2.6 GB) as PNG bytes in Parquet blocks of 256 rows
+  (`image`, `label`, `item_id`, `block_id`); `make_blocks.py` writes them to the store as
+  `hello_blocks/make_blocks.py` does. CIFAR-10 first: the download is quick and 235 blocks of
+  256 make a log of `W=24` with `passes: 2` an eleven-segment run.
+- **Model**: a ResNet-18 encoder (torchvision, no pretrained weights) with a two-layer
+  projection head, SimCLR's two random augmentations per image as anchor and positive (the
+  augmentation runs in `train_step` on the device), NT-Xent as the existing `info_nce` with
+  `all_gather: true` and the in-block others as negatives; then the re-mining hook (`remine.py`
+  of the toy example) mining hard negatives with the current encoder per segment, which is
+  where a GPU makes the hook cheap. `use_gpu: true`, `resources_per_worker: {GPU: 1, trainer:
+  1}`, a batch of 256 per step, mixed precision. On an RTX 4090 a step is well under 0.1 s
+  against seconds on a CPU: that is the "needs a GPU" property, and the 1 s checkpoint upload
+  becomes the pacing item again (`every_k` larger, or a time policy).
+- **A sanity metric**: a k-nearest-neighbour or linear-probe accuracy on the CIFAR-10 test
+  split at the end of the run, computed by rank 0 and printed as the final metric, so a run can
+  be judged (SimCLR on ResNet-18 reaches 80 to 90 percent with a long schedule; a few segments
+  will show a clear rise above 10 percent chance).
+- **The image**: a second Dockerfile, `deploy/Dockerfile.gpu`: an x86 CUDA base image
+  (`nvidia/cuda:12.x-runtime-ubuntu22.04` or RunPod's PyTorch image), the same uv-managed
+  environment with a `gpu` extra that pins torch and torchvision from the CUDA wheel index
+  (`https://download.pytorch.org/whl/cu126`), `ray[data,default,train]` as today. Six to eight
+  gigabytes: build and push it in **GitHub Actions to GHCR** (free for a public repository),
+  not from the Mac's uplink (the M7b measurement: ten minutes per gigabyte). The uncloud
+  driver's `build` already handles a non-ECR registry (no token) if the Mac is logged in.
+- **The driver**: `deploy/drivers/runpod.sh` behind the same verbs, on the REST API (`curl`
+  and `jq`, or `runpodctl`): `up N` creates the head pod (the image, `deploy/ray-head.sh` as
+  the start command, global networking, one data center, the S3 settings as environment) and
+  then N worker pods with `RAY_HEAD_ADDRESS=<head pod id>.runpod.internal:6379` (the head's id
+  is known once it exists; `ray-worker.sh` already retries until the head answers); `scale N`
+  creates or terminates workers; `kill-worker I` terminates a worker pod and creates a new one
+  (node death, then a new node, as `DISTRAINER_RESTART_DELAY` does); `kill-head` terminates the
+  head; `exec-head` is ssh; `shared` prints nothing; `endpoint` prints the store; `down`
+  terminates everything of the cluster's name. Pods take about a minute to start, so `up` and
+  a resize cost more than on uncloud; the runner's `wait_for_trainers` budget may need
+  raising. `docs/running-modes.md` gets a mode E; the verb map a RunPod column.
+- **Acceptance**: the example runs on one RTX 4090 pod (world size 1) with the probe accuracy
+  rising, then on three pods (a head and two workers) with S2, S3, S4, S9 and S10, and the
+  re-mining variant (S6 needs the shared mount: the network volume at `/workspace`, or a
+  bucket variant of S6 with `harness-remine.yaml` on S3, a follow-up from M6). Budget: a few
+  dollars.
+
+### 6.3 Order of work for the session
+
+1. Rahul: a RunPod account and API key (`RUNPOD_API_KEY` in `.env`), the registry choice
+   (GHCR needs a PAT in the repository's secrets for the Actions workflow), and whether the
+   store is the AWS bucket or a network volume.
+2. `gpl` an M8 iteration from the Gest task below; the leaves: the example and its GPU image
+   (with `just` targets and the Actions workflow), the RunPod driver, the run, the docs.
+3. The example on the laptop at CPU size first (a tiny ResNet, a few blocks) so `just smoke`
+   and the unit tests cover it; then the image; then one pod; then the cluster.
+
+Sources: RunPod docs on [global networking](https://docs.runpod.io/pods/networking), [managing
+pods](https://docs.runpod.io/pods/manage-pods), [the Ray instant-cluster
+guide](https://docs.runpod.io/instant-clusters/ray-vllm), [the S3-compatible
+API](https://docs.runpod.io/storage/s3-api), [the REST API announcement](https://www.runpod.io/blog/runpod-rest-api-gpu-management),
+and price surveys ([Flexprice](https://flexprice.io/blog/runprod-pricing-guide-with-gpu-costs),
+[Northflank](https://northflank.com/blog/runpod-gpu-pricing)).
