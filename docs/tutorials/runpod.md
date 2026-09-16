@@ -351,6 +351,40 @@ look like SimCLR.
 | the pair | 0.51 USD/h |
 | spend to the world-size-1 run | about 0.40 USD |
 
-### 6.5 Two nodes, and breaking things
+### 6.5 Two nodes across the Atlantic
 
-Written when the two-node run and the kills have happened.
+The first two-node attempt sat for ten minutes with both Train workers alive and no step
+taken: NCCL and Gloo bind the container's default interface, unreachable from the other pod
+(the gotchas have the fix; every pod now carries `NCCL_SOCKET_IFNAME` and friends). With that
+in place, the head (A5000, CA-MTL-1) and a worker (RTX 2000 Ada, EU-RO-1) trained the same
+384 positions at world size 2 in **15.5 minutes**: about 2.5 s per step, because NT-Xent's two
+`all_gather`s per step cross the Atlantic over the 100 Mbps global network and rank 0's
+checkpoints upload from Romania; the loss went from 6.2 to 3.66 (the gathered pool doubles
+the candidates, so its scale differs from the single-rank run), the probe reached
+**0.385**, the audit held (`S1 PASS`). Two nodes in one data center would be the sensible
+shape; the driver prefers it and falls back when the cards run out.
+
+### 6.6 Losing the worker mid-run
+
+`run_name=gpu_kill` with the elastic default (`num_workers: [1, 2]`), the head lending its GPU
+as above. At position 47 (the end of segment 1, a checkpoint just written):
+
+```bash
+DISTRAINER_RESTART_DELAY=45 deploy/driver.sh kill-worker 1
+```
+
+The audit tells the story: attempt 0 at world size 2 covered positions 0 to 47, attempt 1 at
+world size 1 (the head alone) resumed at position 48 with no replay and ran to 383; the probe
+came out at 0.411. Ray Train saw the node die within seconds (the health-check settings the
+driver passes), restored the last checkpoint from the bucket and carried on with what was
+left, which is the elastic behaviour the runner's S2 and S4 check. The worker itself did not
+come back: its restart was refused because another renter had taken the host's card in the
+meantime (the gotchas), and nothing else was rentable at that moment. `S1` fails on such a
+run by design (it expects one attempt); the runner's recovery checks are the ones to apply.
+
+### 6.7 What is left
+
+The runner's hello_blocks scenarios (S2, S3, S4, S9, S10) need two or three worker pods with a
+`trainer` resource at once; capacity on the cheap types came and went in single units all
+afternoon, and every pull into an EU-RO-1 host took half an hour. They ran, or did not, as the
+run leaf's notes say; the numbers table above is the honest cost of the day.

@@ -56,6 +56,13 @@ on RunPod pods (M8, tutorial 6). Dates are when it was seen.
 - **A stopped pod restarts without a pull**, on the same host with the same id and internal
   name; the driver's `kill-worker` and `kill-head` are therefore stop and start, and only
   `down`, `scale` down and an errored pod terminate. A stopped pod's disk bills by the month.
+  **But the start can be refused** (2026-09-16): while a worker was stopped for 45 seconds
+  someone else rented its host's card, `start` answered "no longer any instances available",
+  the driver's fallback tried a new pod and found nothing rentable, and the worker was gone.
+  The training run did not mind (it resumed on the head from the last checkpoint), but a
+  scenario that expects the node back must check `ps`. After a stop and start the API also
+  keeps reporting the old container's `runtime` for a while; the driver waits for a newer
+  `startedAt`.
 - **The CIFAR-10 download is slow from anywhere** (the Toronto server served 72 KB/s on
   2026-09-16, 40 minutes for 170 MB). The tarball is staged in the bucket under `datasets/`;
   fetch it into the pod's `data_root` through a presigned URL before `make_blocks` (torchvision
