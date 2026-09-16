@@ -243,7 +243,7 @@ bucket (above). "The head container" is the container on the head machine.
 | `kill-head` | `docker kill` of the head | `docker kill` over ssh on the head machine; the next `up` finds it stopped and `uc deploy` recreates it, the workers reconnect | S10 |
 | `down`, `wipe-shared`, `up` | containers go, the MinIO volume stays | the services go (every copy, by id), the MinIO volume on the head machine stays; `wipe-shared` is a no-op | S9 |
 | `exec-head`, `cp-from-head` | `docker compose exec`, `cp` | `uc exec -T head`, a tar stream through it (no `uc cp`) | all |
-| `shared`, `endpoint` | the shared directory; `localhost` URLs | nothing; the head machine's address (ports published inside `DISTRAINER_UNCLOUD_HOST_PREFIX`; on AWS its public address) and the store, `minio=` (MinIO on the head machine) or `s3=` (a bucket outside the cluster, from `S3_ENDPOINT`: no MinIO is deployed) | the runner |
+| `shared`, `endpoint` | the shared directory; `localhost` URLs | nothing; the head machine's address (ports published inside `DISTRAINER_UNCLOUD_HOST_PREFIX`; on AWS the private address, reached through an ssh tunnel) and the store, `minio=` (MinIO on the head machine) or `s3=` (a bucket outside the cluster, from `S3_ENDPOINT`: no MinIO is deployed) | the runner |
 
 What differs under the hood is in `docs/running-modes.md` C and, at length, in
 `docs/uncloud-gotchas.md` (duplicate service names, membership flaps, memory caps, the

@@ -93,11 +93,20 @@ allowed_cidr() {   # DISTRAINER_AWS_ALLOW_CIDR, else this Mac's public address; 
     */*) ;;
     *) die "DISTRAINER_AWS_ALLOW_CIDR=$cidr is not a CIDR (address/32)" ;;
   esac
+  case "${cidr%/*}" in
+    *[!0-9.]*|"") die "DISTRAINER_AWS_ALLOW_CIDR=$cidr is not an IPv4 address/prefix" ;;
+  esac
   case "${cidr#*/}" in
     2[4-9]|3[0-2]) ;;
     *) die "DISTRAINER_AWS_ALLOW_CIDR=$cidr admits too much (ssh to the machines): /24 at the widest, your address/32 is the norm" ;;
   esac
   echo "$cidr"
+}
+bucket_owner() {   # bucket_owner BUCKET -> the distrainer:cluster tag, empty when none (NoSuchTagSet) or unreadable;
+  # never a failure: a failing command substitution in an assignment would end the script under set -e
+  local out
+  out="$(awsc s3api get-bucket-tagging --bucket "$1" --query 'TagSet[?Key==`"distrainer:cluster"`].Value' 2>/dev/null)" || out=""
+  printf '%s' "$out" | tr -d '[:space:]'
 }
 bucket_name() {   # DISTRAINER_AWS_BUCKET, else the bucket harness-s3.yaml stores in
   if [ -n "${DISTRAINER_AWS_BUCKET:-}" ]; then echo "$DISTRAINER_AWS_BUCKET"; return; fi
@@ -277,7 +286,7 @@ write_env() {   # .harness/aws/env: what the driver and the runner need, from th
   [ -f "$state/instances" ] && head_pub="$(awk -v m="${machines[0]}" '$1 == m {print $5}' "$state/instances")"
   [ -f "$state/vpc" ] && cidr="$(awk '{print $2}' "$state/vpc")"
   (umask 077; {
-    echo "# written by deploy/uncloud/aws.sh on $(date -u +%Y-%m-%dT%H:%MZ); the drivers and the scenario runner read it after .env"
+    echo "# written by deploy/uncloud/aws.sh on $(date -u +%Y-%m-%dT%H:%MZ); the uncloud driver and the scenario runner read it after .env"
     echo "# when .env says DISTRAINER_ENV_FILE=.harness/aws/env (up, start, bucket and destroy rewrite it)"
     echo "DISTRAINER_UNCLOUD_PROVIDER=aws"
     echo "DISTRAINER_UNCLOUD_CONTEXT=$ctx"
@@ -387,7 +396,10 @@ case "$verb" in
     [ -n "$all" ] || die "no instances in context $ctx: run up"
     # shellcheck disable=SC2086
     awsc ec2 wait instance-running --instance-ids $all
-    if [ -f "$state/vpc" ]; then read -r _ _ _ sg < "$state/vpc"; ensure_rules "$sg" "$(allowed_cidr)"; fi   # the Mac may have moved networks
+    if [ -f "$state/vpc" ]; then   # the Mac may have moved networks; without an answer the rule stays as it is
+      read -r _ _ _ sg < "$state/vpc"
+      if cidr="$(allowed_cidr 2>/dev/null)"; then ensure_rules "$sg" "$cidr"; else echo "warning: could not learn this Mac's address; the ssh rule is unchanged" >&2; fi
+    fi
     bring_up "$old"
     cost_note ;;
   destroy)
@@ -419,15 +431,24 @@ case "$verb" in
     need aws "install the AWS CLI"
     bucket="$(bucket_name)"; iam_user="$name-harness"
     if awsc s3api head-bucket --bucket "$bucket" 2>/dev/null; then
-      echo "bucket $bucket exists"
+      # an existing bucket is used only when this script tagged it (or DISTRAINER_AWS_ADOPT_BUCKET=1
+      # says it is yours to tag): the name comes from an editable config, and bucket-rm deletes by tag
+      owner="$(bucket_owner "$bucket")"
+      if [ "$owner" = "$ctx" ]; then echo "bucket $bucket exists (tagged distrainer:cluster=$ctx)"
+      elif [ -z "$owner" ] && [ "${DISTRAINER_AWS_ADOPT_BUCKET:-0}" = "1" ]; then
+        awsc s3api put-bucket-tagging --bucket "$bucket" --tagging "TagSet=[{Key=distrainer:cluster,Value=$ctx}]"
+        echo "bucket $bucket exists; adopted (tagged distrainer:cluster=$ctx)"
+      else
+        die "bucket $bucket exists and is not tagged distrainer:cluster=$ctx (${owner:-no tag}): name another bucket in harness-s3.yaml, or DISTRAINER_AWS_ADOPT_BUCKET=1 if it is yours"
+      fi
     else
       if [ "$region" = "us-east-1" ]; then awsc s3api create-bucket --bucket "$bucket" >/dev/null
       else awsc s3api create-bucket --bucket "$bucket" --create-bucket-configuration "LocationConstraint=$region" >/dev/null; fi
-      echo "created bucket $bucket in $region"
+      awsc s3api put-bucket-tagging --bucket "$bucket" --tagging "TagSet=[{Key=distrainer:cluster,Value=$ctx}]"   # what bucket-rm looks for
+      echo "created bucket $bucket in $region (tagged distrainer:cluster=$ctx)"
     fi
     awsc s3api put-public-access-block --bucket "$bucket" \
       --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-    awsc s3api put-bucket-tagging --bucket "$bucket" --tagging "TagSet=[{Key=distrainer:cluster,Value=$ctx}]"   # what bucket-rm looks for
     if ! awsc iam get-user --user-name "$iam_user" >/dev/null 2>&1; then
       awsc iam create-user --user-name "$iam_user" --tags "Key=distrainer:cluster,Value=$ctx" >/dev/null
       echo "created IAM user $iam_user"
@@ -450,9 +471,9 @@ EOP
   bucket-rm)
     bucket="$(bucket_name)"; iam_user="$name-harness"
     if awsc s3api head-bucket --bucket "$bucket" 2>/dev/null; then
-      # only a bucket this script made (tagged by `bucket`): the name comes from an editable config
-      owner="$(awsc s3api get-bucket-tagging --bucket "$bucket" --query 'TagSet[?Key==`"distrainer:cluster"`].Value' 2>/dev/null | tr -d '[:space:]')"
-      [ "$owner" = "$ctx" ] || die "bucket $bucket is not tagged distrainer:cluster=$ctx (not made by '$0 bucket'): refusing to delete it"
+      # only a bucket this script made or adopted (tagged by `bucket`): the name comes from an editable config
+      owner="$(bucket_owner "$bucket")"
+      [ "$owner" = "$ctx" ] || die "bucket $bucket is not tagged distrainer:cluster=$ctx (${owner:-no tag}): refusing to delete it"
       awsc s3 rm "s3://$bucket" --recursive >/dev/null
       # an interrupted checkpoint put leaves a multipart upload behind, and a bucket with one is not empty
       awsc s3api list-multipart-uploads --bucket "$bucket" --query 'Uploads[].[Key, UploadId]' | tr '\t' ' ' \

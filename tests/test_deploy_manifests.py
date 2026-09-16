@@ -449,3 +449,26 @@ def test_uncloud_driver_env_precedence_is_caller_then_env_file_then_dotenv(tmp_p
         text=True,
     )
     assert proc.returncode == 2 and "DISTRAINER_ENV_FILE=nowhere" in proc.stderr
+
+
+def test_aws_bootstrap_admits_ssh_only_and_deletes_only_what_it_tagged():
+    """The gpa findings of the cloud stage: no dashboard rule (an ssh tunnel instead), stale rules
+    revoked on up and start, the allowed CIDR a narrow IPv4 prefix, the bucket tagged at creation
+    or adopted explicitly and bucket-rm refusing anything else, credential files at mode 600."""
+    text = AWS_SH.read_text()
+    rules = [ln for ln in text.splitlines() if ln.strip().startswith('allow "$1"')]
+    assert rules == [
+        '  allow "$1" tcp 22 22 "$2" "from this Mac"',
+        '  allow "$1" udp "$wg_port" "$wg_port" "$1" "WireGuard between the members"',
+    ]
+    assert "$2 != c || $3 != 22" in text  # another address or another port: revoked
+    assert text.count('ensure_rules "$sg"') == 2  # up and start
+    assert "2[4-9]|3[0-2])" in text and "*[!0-9.]*" in text  # /24 at the widest, dotted quads only
+    assert text.count("put-bucket-tagging") == 2  # the adopt branch and the create branch
+    exists_branch = text.split('echo "bucket $bucket exists')[0].rsplit(
+        "if awsc s3api head-bucket", 1
+    )[1]
+    assert "DISTRAINER_AWS_ADOPT_BUCKET" in text and 'owner="$(bucket_owner' in exists_branch
+    assert 'owner="$(bucket_owner "$bucket")"' in text.split("bucket-rm)")[1]  # the guard
+    assert text.count("chmod 600") >= 3
+    assert "S3_SECRET_KEY=\\).*/\\1<in the file>" in text  # `env` masks the secret

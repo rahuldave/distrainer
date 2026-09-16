@@ -51,7 +51,8 @@ if [ -n "${DISTRAINER_ENV_FILE:-}" ]; then
   env_file="$DISTRAINER_ENV_FILE"
   case "$env_file" in /*) ;; *) env_file="$root/$env_file" ;; esac
   if [ ! -f "$env_file" ]; then echo "DISTRAINER_ENV_FILE=$DISTRAINER_ENV_FILE does not exist" >&2; exit 2; fi
-  declared="$(sed -n 's/^DISTRAINER_UNCLOUD_PROVIDER=//p' "$env_file" | tr -d '"' | tail -1)"
+  declared="$(sed -n 's/^\(export \)\{0,1\}DISTRAINER_UNCLOUD_PROVIDER=//p' "$env_file" | tail -1 \
+    | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//')"   # as the runner's reader: export, quotes, comments
   if [ -n "${DISTRAINER_UNCLOUD_PROVIDER:-}" ] && [ -n "$declared" ] && [ "$DISTRAINER_UNCLOUD_PROVIDER" != "$declared" ]; then
     echo "note: $DISTRAINER_ENV_FILE belongs to the $declared bed; not read for provider $DISTRAINER_UNCLOUD_PROVIDER" >&2
   else

@@ -351,14 +351,18 @@ def has_shared() -> bool:
 def up_bucket(n: int, st: Store) -> Store:
     """Bring the cluster to ``n`` workers with what a bucket store needs: MinIO and the bucket
     when MinIO is the store; nothing more when the store is outside the cluster (it exists).
-    Returns the store to use: the same one, or, when the driver could not name MinIO's URL
-    before the deploy (kuberay), the store read again now that the service exists."""
+    Returns the store to use: the same one for a store outside the cluster; for MinIO the store
+    read again now that the service exists (the driver could not name its URL before the deploy
+    under kuberay, and a `down` and `up` there gives the service a new address)."""
     if st.external:
         up(n)
         return st
     up(n, "minio", env=st.env)
     driver("mkbucket", st.bucket, env=st.env)
-    return st if st.s3.get("endpoint") else bucket_store()
+    st = bucket_store()
+    if not st.s3.get("endpoint"):
+        raise RuntimeError("the driver's endpoint names no MinIO URL after the deploy")
+    return st
 
 
 def up_store(n: int) -> Store:

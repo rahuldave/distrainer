@@ -86,7 +86,9 @@ Bucket names are global to all of S3, so first name yours in the two harness con
 just aws-bucket               # deploy/uncloud/aws.sh bucket
 ```
 
-It creates the bucket with public access blocked, an IAM user `distrainer-harness` whose only
+It creates the bucket with public access blocked and a tag `distrainer:cluster=distrainer-aws` (what
+`bucket-rm` looks for; a bucket that exists already must carry it, or `DISTRAINER_AWS_ADOPT_BUCKET=1`
+says it is yours to tag), an IAM user `distrainer-harness` whose only
 policy is that bucket (list, get, put, delete, and the multipart calls), and one access key for
 it, kept at `.harness/aws/s3-credentials` (mode 600; a fresh key takes about ten seconds to
 work). Then it writes `.harness/aws/env`, the file every driver and the scenario runner read
@@ -150,7 +152,7 @@ just build                                             # docker build on the Mac
 just up 2                                              # head + two workers, no MinIO: the store is the bucket
 just blocks examples/hello_blocks/harness-s3.yaml      # log and blocks on s3://<bucket>/blocks
 just train  examples/hello_blocks/harness-s3.yaml      # hello_s3 on s3://<bucket>/runs; S1 PASS
-deploy/driver.sh endpoint                              # dashboard=http://<public address>:8265, s3=https://s3.us-east-1.amazonaws.com
+deploy/driver.sh endpoint                              # dashboard=http://<public address>:8265 (behind the tunnel below), s3=https://s3.us-east-1.amazonaws.com
 ssh -F .harness/aws/ssh_config -L 8265:172.31.x.y:8265 aws1   # the dashboard at http://localhost:8265 (the head's private address is in .harness/aws/instances)
 ```
 
