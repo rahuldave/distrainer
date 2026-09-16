@@ -394,27 +394,33 @@ run by design (it expects one attempt); the runner's recovery checks are the one
 
 ### 6.7 The runner's scenarios
 
-With two workers in Romania (an RTX 2000 Ada and an L4, the second Montreal pod having been
-unable to reach the head at all: the gotchas), the scenario runner ran unchanged against the
-pods, hello_blocks on the bucket:
+The scenario runner ran unchanged against the pods, hello_blocks on the bucket, in the
+session's stop mode with two settings the pods need:
 
 ```bash
-uv run python integration_tests/cluster/run_scenarios.py --scenario S2 --keep-up
+export DISTRAINER_RUNPOD_DOWN=stop DISTRAINER_WAIT_TRAINERS_S=900 DISTRAINER_LAG_INTERVALS=12
+uv run python integration_tests/cluster/run_scenarios.py --scenario S2 --keep-up   # then S3, S4, S9, S10
 ```
 
-**S2 passed in 218 s**: the worker killed at position 27 (RunPod's stop), the run resumed at
-world size 2 from position 12 (within the replay bound the runner allows for a store outside
-the cluster) and finished at 239, and the stopped worker came back on its host in time.
+`DISTRAINER_WAIT_TRAINERS_S` widens the runner's wait for the workers after `up` (a pod's
+stop and start plus the workers' reconnects took more than the default 180 s);
+`DISTRAINER_LAG_INTERVALS` widens the replay allowance on a store outside the cluster (the
+Train controller's checkpoint bookkeeping is S3 round trips, and from Romania to us-east-1 a
+resumed attempt replayed 49 positions where the AWS bed's allowance of 4 intervals gives 27).
 
-**S3 failed for want of a third card in time**: the runner's `scale 3` did rent a worker (an
-A40 in EU-SE-1, the only thing left) but its image pull outlasted the run, which finished at
-world size 2 and never resized; the check expects 2 to 3. Under the other drivers a new node
-joins in seconds; on RunPod it joins after a pull of 4 to 35 minutes, so the resize scenarios
-need the third pod rented and pulled *before* the run (`scale 3`, wait, then `scale 2` and
-the scenario), or a stop and start of a pre-pulled pod, which is what `kill-worker` does.
-S4, S9 and S10 (cold restores through `down` and `up`, new pods again) were left for a
-session with more capacity and time. The run leaf's notes have the exact sequence; every pod
-was terminated at 15:52.
+| scenario | what happened on the pods | result |
+|---|---|---|
+| S2 | a worker stopped at position 27 (RunPod's stop), the run resumed at world size 2 from position 12, the worker back on its host in time | pass, 218 s |
+| S3 | two workers plus a drained third; the runner's scale-up removed the marker and the third node joined in seconds: world size 2 to position 79, then 3 from position 36 | pass, 194 s |
+| S4 | three workers; the scale-down drained the third: world size 3 to position 29, then 2 from position 24 | pass, 297 s |
+| S9 | a full run, `down` stopping every pod, `up` starting them again, a resume from a middle checkpoint | see below |
+| S10 | the head stopped mid-run, started again on its host (same id, a new address), the workers reconnected, the run resumed from the checkpoint at segment 2 into a new run at world size 3 | pass, 255 s |
+
+Three attempts at S3 taught what section 5 now does: a stopped pod's card is rented away
+within minutes (its restart refused), a new pod joins only after a pull, and `up` must not
+restart a reserve worker; the drain marker is the answer, and the pods are never released
+until the final `down`. First attempts at S10 and S3 failed only on the two timing settings
+above.
 
 ### 6.8 The day's cost
 
