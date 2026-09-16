@@ -81,6 +81,7 @@ just smoke                 # hello_blocks: 48 linear-regression blocks, 2 local 
 just contrastive           # toy_contrastive: 240 mined blocks, InfoNCE encoder, 2 passes
 just local-scenarios       # S1 happy path, S5 checkpoint cadence, S7 determinism
 just contrastive examples/toy_contrastive/local-remine.yaml   # the log streamed by the re-mining hook
+just images                # image_contrastive: SimCLR on a CIFAR-10 subset (CPU size), a kNN probe at the end
 just build && just up 2 && just integration S2 && just down   # multi-container harness (OrbStack)
 just kuberay-operator && DISTRAINER_DRIVER=kuberay just integration S2   # the same on OrbStack's Kubernetes (KubeRay)
 just uncloud-machines && DISTRAINER_DRIVER=uncloud just build && DISTRAINER_DRIVER=uncloud just integration S2   # on three OrbStack machines (uncloud)

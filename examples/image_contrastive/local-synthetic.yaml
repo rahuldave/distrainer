@@ -1,0 +1,42 @@
+# image_contrastive without a download: class-coloured striped noise (data.py) instead of
+# CIFAR-10, the same tiny encoder as local.yaml, one segment of 12 blocks seen in 2 passes (so
+# the run crosses a pass boundary). A network-less smoke of the example, about 40 s; the probe
+# reaches 1.0 quickly because the classes are colours.
+run_name: images_synthetic
+storage_path: runs/images_synthetic
+store_root: blocks/images_synthetic
+seed: 1234
+ray_address: null
+storage:
+  kind: local
+log:
+  W: 12
+  passes: 2
+  wait_poll_s: 0.5
+checkpoint:
+  policy: any
+  every_k: 4
+  num_to_keep: 3
+loader:
+  prefetch: 2
+  threads: 2
+scaling:
+  num_workers: 2
+  resources_per_worker: {CPU: 1}
+  use_gpu: false
+failure:
+  max_failures: 1
+train:
+  dataset: synthetic
+  n_items: 1536            # 12 blocks of 128: one segment
+  n_test: 512
+  rows_per_block: 128
+  width: 16
+  layers: [1, 1, 1, 1]
+  embed: 32
+  proj_hidden: 64
+  lr: 0.001
+  temperature: 0.1
+  all_gather: true
+  probe_train: 512
+  probe_test: 512

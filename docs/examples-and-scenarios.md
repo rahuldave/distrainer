@@ -1,6 +1,6 @@
 # Examples and verification scenarios
 
-Three example workloads exercise distrainer, and eleven scenarios (spec section 10) verify its
+Four example workloads exercise distrainer, and eleven scenarios (spec section 10) verify its
 guarantees by reading audit trails and checkpoint metadata, never the cluster. This page says what
 each example computes, which configs drive it, how every scenario is run and checked, and where
 its artifacts end up. `docs/running-modes.md` covers the environments the scenarios run in,
@@ -79,6 +79,33 @@ successor is already committed does nothing. Segment metadata records `space: em
 | `local.yaml` | laptop, local Ray, 2 workers | batch log, 240 blocks, 2 passes |
 | `local-remine.yaml` | laptop, local Ray, 2 workers | streamed log, 12 segments (`just contrastive examples/toy_contrastive/local-remine.yaml`) |
 | `harness-remine.yaml` | container cluster, 2 workers, shared mount | streamed log, 6 segments (scenario S6) |
+
+### image_contrastive (`examples/image_contrastive/`, `just images`)
+
+The example that needs a GPU (M8): SimCLR on CIFAR-10, sized down for the laptop by config.
+`make_blocks.py` takes the `train.dataset` (`cifar10`, the torchvision download cached under
+`train.data_root`, or `synthetic`, class-coloured striped noise with no download), draws a seeded
+subset of `n_items` training images, assigns them to blocks of `rows_per_block` at random and
+writes every image as PNG bytes in a row `(item_id, label, image)`; the label rides along for the
+probe only, training never reads it. The `n_test` held-out images go to
+`<store_root>/probe/test.parquet`, outside the log so retention gc never touches them. `model.py`
+is ResNet-18's topology with the CIFAR stem (a 3x3 convolution, no max-pool), with `width` and
+`layers` as knobs (`16, [1, 1, 1, 1]` on the laptop, `64, [2, 2, 2, 2]` on the pods), a two-layer
+projection head, and SimCLR's augmentations (random resized crop, flip, colour jitter, grayscale)
+drawn per sample as batched tensor ops on the worker's device: `train_step` decodes one block,
+makes two views of every image with a generator seeded from the run's seed and the position (a
+replayed position sees the same views), and minimises NT-Xent between them through the toy
+example's `info_nce` with no mined negatives and `all_gather: true`, so the other images of the
+block and of the other ranks are the negatives; `amp: true` uses bf16 autocast on a GPU. After
+`fit()` the driver loads the final checkpoint and `probe.py` prints a weighted k-nearest-neighbour
+accuracy of the backbone features: the first `probe_train` rows of the log are the memory bank,
+the first `probe_test` held-out images the queries, chance is one in ten. `--no-probe` skips it.
+
+| config | where it runs | shape |
+|---|---|---|
+| `local.yaml` | laptop, local Ray, 2 workers, CPU | 3072 CIFAR-10 images in 24 blocks of 128, `W=12`, 2 passes, the tiny encoder; the probe on 1000 held-out images |
+| `local-synthetic.yaml` | laptop, local Ray, 2 workers, no download | 1536 synthetic images in 12 blocks of 128 (one segment, 2 passes), about 40 s; the probe reaches 1.0 because the classes are colours |
+| `harness-s3.yaml` | RunPod pods, one GPU per worker, the S3 bucket as the store (tutorial 6) | 49 152 images in 192 blocks of 256, `W=24` (8 segments per pass), 2 passes, ResNet-18, `every_k: 8` |
 
 ### streaming_producer (`examples/streaming_producer/`, the writer of S11)
 

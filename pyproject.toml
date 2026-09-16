@@ -9,6 +9,8 @@ authors = [{ name = "Rahul Dave", email = "rahuldave@gmail.com" }]
 dependencies = [
   "ray[data,default,train]==2.58.0",   # default: dashboard + agent (KubeRay probes, ray job submit)
   "torch>=2.4",
+  "torchvision>=0.19",              # examples/image_contrastive: the CIFAR-10 download
+  "pillow>=10",                     # examples/image_contrastive: the PNG codec of the rows
   "pyarrow>=17",
   "pandas>=2.2",
   "pyyaml>=6",
@@ -35,6 +37,7 @@ index = [{ name = "pytorch-cpu", url = "https://download.pytorch.org/whl/cpu", e
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [tool.ruff]
 line-length = 100

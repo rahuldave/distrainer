@@ -35,6 +35,11 @@ smoke:
 contrastive CFG="examples/toy_contrastive/local.yaml":
   uv run python examples/toy_contrastive/train.py --config {{CFG}}
 
+# the GPU-needing example at CPU size: SimCLR on a CIFAR-10 subset with a kNN probe at the end;
+# not part of verify (examples/image_contrastive/local-synthetic.yaml needs no download)
+images CFG="examples/image_contrastive/local.yaml":
+  uv run python examples/image_contrastive/train.py --config {{CFG}}
+
 diff-check:
   git diff --check
 

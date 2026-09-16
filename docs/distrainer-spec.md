@@ -137,6 +137,12 @@ examples/
     model.py           # tiny MLP encoder + InfoNCE with optional all_gather
     train.py           # DistTrainer entrypoint
     remine.py          # SegmentHook: re-embed, mine, write the next segment
+  image_contrastive/   # the GPU-needing workload of section 8 (M8): SimCLR on CIFAR-10 PNG blocks; `just images`
+    data.py            # CIFAR-10 (torchvision) or synthetic images; the PNG codec
+    make_blocks.py     # PNG rows in blocks, the held-out split under probe/, BatchWriter
+    model.py           # a CIFAR-style ResNet with width/depth knobs, batched SimCLR views, NT-Xent via info_nce
+    probe.py           # the weighted kNN accuracy of the backbone at the end of a run
+    train.py           # DistTrainer entrypoint plus the probe
 tests/                 # focused unit tests: log commit/discover, dealer determinism, ledger arithmetic, policy, loader
 regression_tests/      # bug / API regression tests (added as bugs are found)
 integration_tests/
@@ -440,6 +446,8 @@ hooks:                         # name -> {entry: "pkg.module:factory", ...args};
 ## 8. Toy workload (examples/toy_contrastive)
 
 Synthetic data: `N=7680` items, `d=32` features drawn from `C=64` Gaussian clusters; positive = another item of the same cluster, hard negatives = items from the `k` nearest *other* clusters (by centroid distance). `make_blocks.py` uses Ray Data (`groupby("batch_id").map_groups`) to write blocks of `B=32` anchors, each row carrying `anchor, positive, neg_0..neg_{k-1}`, `item_id`, and `block_id`, then runs `BatchWriter` to produce the log (`W=24`, `passes=2`, `_END` written). Model: 2-layer MLP encoder; loss: InfoNCE over in-block negatives, optional `all_gather` across ranks (config flag) to exercise the loss-side collective. `remine.py` re-embeds the items with the current model at each segment end, recomputes nearest clusters in embedding space, mines the anchors of the next segment (a fixed slice of a per-pass permutation of the corpus, so `pass_idx` advances when the slices wrap) and appends them as the next segment; with the hook configured (`hooks.remine`) `make_blocks.py` writes only the first `initial_segments` segments (mined by centroid distance in input space) and leaves the log open, and the hook writes `_END` once `segments` segments exist. The hook is idempotent across restarts: a re-run segment end whose successor is already committed does nothing. CPU-only; one pass of 240 blocks should train in well under a minute on an M1 with 4 worker containers.
+
+**The GPU workload (examples/image_contrastive, M8).** The same harness shape with an image row: CIFAR-10 images as PNG bytes in blocks of `rows_per_block` (`item_id, label, image`; the label is read by the probe only), the `n_test` held-out images under `<store_root>/probe/` outside the log, a CIFAR-style ResNet encoder with `width` and `layers` knobs (ResNet-18 at `64, [2, 2, 2, 2]`) and a projection head, SimCLR's two augmented views per image drawn per sample as batched tensor ops on the worker's device with a generator seeded from `seed` and the position, and NT-Xent through `info_nce` with no mined negatives and `all_gather` on. At the end of a run the driver loads the final checkpoint and prints a weighted kNN accuracy of the backbone features on the held-out split (chance 0.1). `train.dataset: synthetic` replaces the download with class-coloured striped noise for tests and a network-less smoke; the laptop config runs a tiny encoder on a 3072-image subset, the pod config the full encoder on 49 152 images with bf16 autocast. The re-mining hook on the GPU is a follow-up.
 
 ## 9. Local multi-node harness (OrbStack, docker compose)
 
