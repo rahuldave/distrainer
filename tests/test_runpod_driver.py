@@ -232,6 +232,9 @@ def test_up_creates_a_head_then_workers_that_dial_it_in_its_data_center(bed):
         and h["env"]["S3_SECRET_KEY"] == "sk"
     )
     assert h["env"]["RAY_health_check_period_ms"] == "1000" and "RAY_HEAD_ADDRESS" not in h["env"]
+    # the workers are created before the head is awaited: their POSTs precede the head's GET
+    calls = bed.calls()
+    assert calls.index(("POST", "/pods", posts[1])) < calls.index(("GET", "/pods/headid", None))
     for w in posts[1:]:
         assert (
             w["args"] == "worker" and w["env"]["RAY_HEAD_ADDRESS"] == "headid.runpod.internal:6379"
@@ -483,3 +486,20 @@ def test_scale_fills_gaps_and_logs_reads_the_event_stream(bed):
     )
     assert bed.run("logs").stdout.splitlines() == ["Ray runtime started.", "ok"]
     assert bed.run("cost").stdout.startswith("total: 0.72 USD/h")
+
+
+def test_workers_fall_back_to_any_global_networking_data_center_when_the_heads_is_sold_out(bed):
+    bed.pods()
+    bed.respond("POST", "/pods", pod("distrainer-head", "headid"), n=1)
+    bed.respond("GET", "/pods/headid", pod("distrainer-head", "headid"))
+    for n in (2, 3, 4):  # every affordable type is refused in EU-RO-1
+        bed.respond("POST", "/pods", {"title": "no capacity"}, n=n, code=400)
+    bed.respond(
+        "POST", "/pods", pod("distrainer-worker-1", "w1", head="headid", dc="CA-MTL-1"), n=5
+    )
+    proc = bed.run("up", "1")
+    assert "nothing left in EU-RO-1 for worker 1" in proc.stderr
+    posts = bed.posts()
+    assert [p["name"] for p in posts] == ["distrainer-head"] + ["distrainer-worker-1"] * 4
+    assert all(p["dataCenterIds"] == ["EU-RO-1"] for p in posts[1:4])
+    assert posts[4]["dataCenterIds"] == ["EU-RO-1", "CA-MTL-1"]

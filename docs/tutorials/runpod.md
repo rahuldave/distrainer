@@ -238,14 +238,16 @@ ordered, comma-separated list) is tried type by type until one is rented; a type
 price on the chosen cloud, or priced above `DISTRAINER_RUNPOD_MAX_GPU_HOURLY` (default 0.60
 USD per GPU-hour), is skipped: the spend guard. The head is placed in any data center with
 global networking (`GET /v2/catalog/datacenters`), or in `DISTRAINER_RUNPOD_DATA_CENTERS` if
-set; the workers go to the head's data center. A pod gets the image, `args` naming its role
+set; the workers go to the head's data center, or to any global-networking one when that is
+sold out (seen on the first run: the head took the last cheap card in EU-RO-1). The workers
+are created right after the head, so the image pulls run side by side. A pod gets the image, `args` naming its role
 (`head` or `worker`, what the entrypoint reads), `22/tcp` exposed and `startSsh` (RunPod
 injects the account's registered ssh keys as `PUBLIC_KEY`; section 4.1), a
 `DISTRAINER_RUNPOD_DISK_GB` container disk and no persistent volume, and for a worker
 `RAY_HEAD_ADDRESS=<head pod id>.runpod.internal:6379`. Every create prints the pod's id, type,
 data center and hourly cost; `up` waits until each pod is `RUNNING` with its global-networking
-address and its ssh port (`DISTRAINER_RUNPOD_START_TIMEOUT`, default 600 s: the image is 7.5
-GB and a cold pull takes minutes).
+address and its ssh port (`DISTRAINER_RUNPOD_START_TIMEOUT`, default 1500 s per pod: the image
+is 7.5 GB and the first pull in EU-RO-1 took more than ten minutes).
 
 **Inside the pod** the entrypoint discovers the global-networking address (its own
 `<id>.runpod.internal`, or the 10.x interface) and exports it as `RAY_NODE_IP`, which

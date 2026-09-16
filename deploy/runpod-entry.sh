@@ -16,12 +16,21 @@ if [ -n "${PUBLIC_KEY:-}" ]; then
   /usr/sbin/sshd   # host keys were made at build time (ssh-keygen -A); daemonizes
 fi
 # the address Ray advertises: the pod's global-networking address (its own <id>.runpod.internal,
-# or the 10.x interface), never the container's default one, which other pods cannot reach
+# or the 10.x interface), never the container's default one, which other pods cannot reach. The
+# interface is attached moments after the container starts (seen 2026-09-16: nothing at start,
+# the address there a little later), so look for up to two minutes before giving up
 if [ -z "${RAY_NODE_IP:-}" ]; then
-  ip=""
-  if [ -n "${RUNPOD_POD_ID:-}" ]; then ip="$(getent hosts "$RUNPOD_POD_ID.runpod.internal" 2>/dev/null | awk '{print $1; exit}')" || ip=""; fi
-  if [ -z "$ip" ]; then ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 '^10\.')" || ip=""; fi
-  if [ -n "$ip" ]; then export RAY_NODE_IP="$ip"; echo "runpod-entry: RAY_NODE_IP=$ip" >&2; fi
+  ip=""; tries=0
+  while [ -z "$ip" ] && [ "$tries" -lt 60 ]; do
+    if [ -n "${RUNPOD_POD_ID:-}" ]; then ip="$(getent hosts "$RUNPOD_POD_ID.runpod.internal" 2>/dev/null | awk '{print $1; exit}')" || ip=""; fi
+    if [ -z "$ip" ]; then ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -m1 '^10\.')" || ip=""; fi
+    if [ -z "$ip" ]; then tries=$((tries + 1)); sleep 2; fi
+  done
+  if [ -n "$ip" ]; then
+    export RAY_NODE_IP="$ip"; echo "runpod-entry: RAY_NODE_IP=$ip after $tries retries" >&2
+  else
+    echo "runpod-entry: no global-networking address found in two minutes; Ray will advertise the container's own address, which other pods cannot reach" >&2
+  fi
 fi
 # every variable of the container (the S3 settings, RAY_*, DISTRAINER_*) for login shells; the
 # key stays out, like RunPod's script keeps it, and so do the shell's own (a login shell has its

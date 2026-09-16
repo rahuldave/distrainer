@@ -146,7 +146,7 @@ create_pod() {
 # wait_running ID [need_ssh]: until the pod is RUNNING with its global-networking address (and, for
 # the head, its published ssh port); DISTRAINER_RUNPOD_START_TIMEOUT seconds at most
 wait_running() {
-  local id="$1" need_ssh="${2:-0}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-600}" waited=0 pod st port
+  local id="$1" need_ssh="${2:-0}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port
   while :; do
     pod="$(api GET "/pods/$id")" || return 1
     st="$(printf '%s' "$pod" | jq -r '.status')"
@@ -202,13 +202,16 @@ exec_head() {
   ssh "${SSH_ARGS[@]}" "bash -lc $(printf '%q' "$remote")"
 }
 
-up_workers() {  # a worker i for every i in 1..N that has none dialling this head (in its data center)
-  local n="$1" head_id="$2" dc="$3" i w
+up_workers() {  # a worker i for every i in 1..N that has none dialling this head: in the head's data
+  local n="$1" head_id="$2" dc="$3" i w   # center, or in any global-networking one when that is sold out
   i=1
   while [ "$i" -le "$n" ]; do
-    w="$(pod_named "$cluster-worker-$i")"
+    w="$(pod_named "$cluster-worker-$i")" || exit 1
     if [ -z "$w" ] || [ "$(printf '%s' "$w" | jq -r '.env.RAY_HEAD_ADDRESS // empty')" != "$head_id.runpod.internal:6379" ]; then
-      create_pod "$cluster-worker-$i" worker "$dc" "$head_id" >/dev/null || exit 1
+      if ! create_pod "$cluster-worker-$i" worker "$dc" "$head_id" >/dev/null; then
+        echo "runpod: nothing left in $dc for worker $i; trying every global-networking data center (a slower link to the head)" >&2
+        create_pod "$cluster-worker-$i" worker "$(gn_data_centers)" "$head_id" >/dev/null || exit 1
+      fi
     fi
     i=$((i + 1))
   done
@@ -240,14 +243,16 @@ case "$verb" in
       echo "head exists: $(printf '%s' "$head" | jq -r '"\(.id) (\(.status))"')"
     fi
     head_id="$(printf '%s' "$head" | jq -r '.id')"
-    head="$(wait_running "$head_id" 1)" || exit 1
-    dc="$(printf '%s' "$head" | jq -r '.dataCenterId')"
-    printf '%s %s\n' "$(printf '%s' "$head" | jq -r '.ssh.direct.host')" "$(printf '%s' "$head" | jq -r '.ssh.direct.port')" > "$state/$cluster-head.ssh"
+    dc="$(printf '%s' "$head" | jq -r '.dataCenterId // empty')"
     # workers made for another head (a recreated one has a new id and name) cannot rejoin: replace them
     workers="$(worker_pods)" || exit 1
     stale="$(printf '%s\n' "$workers" | jq -c --arg h "$head_id.runpod.internal:6379" 'select((.env.RAY_HEAD_ADDRESS // "") != $h)')"
     if [ -n "$stale" ]; then echo "workers made for another head:"; terminate_all "$stale" || exit 1; fi
+    # the workers are created before the head is up so the image pulls run side by side (a
+    # worker retries until the head answers); the head's id and data center are known at creation
     up_workers "$n" "$head_id" "$dc"
+    head="$(wait_running "$head_id" 1)" || exit 1
+    printf '%s %s\n' "$(printf '%s' "$head" | jq -r '.ssh.direct.host')" "$(printf '%s' "$head" | jq -r '.ssh.direct.port')" > "$state/$cluster-head.ssh"
     workers="$(worker_pods)" || exit 1
     while read -r w; do [ -n "$w" ] && { wait_running "$(printf '%s' "$w" | jq -r '.id')" >/dev/null || exit 1; }; done <<< "$workers"
     "$0" ps ;;
