@@ -111,6 +111,19 @@ def test_check_recovery_allows_one_in_flight_checkpoint_interval():
         rec(1, 1, 2, 0, 6, 13),
     ]
     assert any("replays" in p for p in check_recovery(first + too_far, W, every_k=2))
+    # a store outside the cluster: the controller lags, the allowance widens the bound by that
+    # many intervals of every_k * n_old and no more
+    assert check_recovery(first + too_far, W, every_k=2, lag_intervals=4) == []
+    # a first attempt two segments in, restarted from position 0: 48 replayed, beyond 38
+    long_first = [r for r in happy(W=W, n=3, segments=3, attempt=0) if r.position < 48]
+    from_zero = [
+        rec(1, rank, 2, seg, step, seg * W + step * 2 + rank)
+        for seg in range(3)
+        for step in range(W // 2)
+        for rank in range(2)
+    ]
+    problems = check_recovery(long_first + from_zero, W, every_k=2, lag_intervals=4)
+    assert any("replays 48 positions (> 38)" in p for p in problems), problems
 
 
 def test_check_recovery_rejects_short_runs_and_duplicates_within_an_attempt():

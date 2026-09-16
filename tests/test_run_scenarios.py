@@ -135,6 +135,9 @@ def test_store_is_the_external_bucket_when_the_driver_prints_s3(tmp_path, monkey
     assert st.s3 == {"endpoint": S3_CFG_ENDPOINT, "region": cfg.storage.region}
     assert st.segments == rs.MINIO_SEGMENTS and st.W == 24
     assert st.credentials == {"S3_ACCESS_KEY": "distrainer", "S3_SECRET_KEY": "distrainer123"}
+    assert st.lag_intervals > 0  # the controller registers checkpoints behind the workers there
+    with st.mac_env():
+        assert os.environ["S3_REGION"] == cfg.storage.region
 
 
 def test_external_store_must_match_the_config_endpoint(tmp_path, monkeypatch):
@@ -213,6 +216,29 @@ def test_s3_settings_follow_the_env_file_dotenv_points_at(tmp_path, monkeypatch)
     assert rs.s3_settings_from_dotenv()["S3_ACCESS_KEY"] == "AKIA"
     dotenv.unlink()  # and works without any .env
     assert rs.s3_settings_from_dotenv()["S3_REGION"] == "us-east-1"
+    monkeypatch.setenv("S3_REGION", "eu-west-1")  # the shell wins over both files
+    assert rs.s3_settings_from_dotenv()["S3_REGION"] == "eu-west-1"
+
+
+def test_recovery_scenarios_pass_the_store_allowance_to_check_recovery(tmp_path, monkeypatch):
+    """S2, S3 and S4 hand the store's lag_intervals to check_recovery: the wiring, not the bound."""
+    seen: list[int] = []
+    monkeypatch.setattr(rs, "check_recovery", lambda *a, **k: seen.append(k["lag_intervals"]) or [])
+    monkeypatch.setattr(rs, "check_transition", lambda *a, **k: [])
+    monkeypatch.setattr(rs, "summarize", lambda recs: "")
+    st = rs.Store(blocks="s3://b/blocks", runs="s3://b/runs", cfg=rs.S3_CFG, env={}, s3={},
+                  segments=10, external=True)  # fmt: skip
+    monkeypatch.setattr(rs, "up_store", lambda n: st)
+    monkeypatch.setattr(rs, "ensure_blocks", lambda cfg: None)
+    monkeypatch.setattr(rs.Store, "fresh", lambda self, run: None)
+    monkeypatch.setattr(rs.Store, "wait_for_blocks", lambda self, *a, **k: None)
+    monkeypatch.setattr(rs.Store, "records", lambda self, run: [])
+    monkeypatch.setattr(rs, "driver", lambda *a, **k: "")
+    monkeypatch.setattr(rs, "start_train", lambda *a, **k: object())
+    monkeypatch.setattr(rs, "finish", lambda *a, **k: "")
+    for scenario in (rs.scenario_s2, rs.scenario_s3, rs.scenario_s4):
+        scenario()
+    assert seen == [st.lag_intervals] * 3 and st.lag_intervals == 4
 
 
 def test_local_store_reads_a_trail_and_fresh_removes_the_run(tmp_path):
@@ -265,6 +291,8 @@ def test_mac_env_sets_the_bucket_for_the_mac_only_and_restores(monkeypatch):
     with st.mac_env():
         assert os.environ["S3_ENDPOINT"] == "http://mac-sees-this:9000"
         assert os.environ["S3_ACCESS_KEY"] == "k"
+        assert os.environ["S3_REGION"] == "auto"  # real S3 signs by region: it must travel too
+    assert st.lag_intervals == 0
     assert os.environ["S3_ENDPOINT"] == "http://containers-see-this:9000"
     assert "S3_ACCESS_KEY" not in os.environ
     local = rs.Store(blocks="/b", runs="/r", cfg=rs.HARNESS_CFG, env={}, s3={}, segments=10)
