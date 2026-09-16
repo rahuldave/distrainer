@@ -15,7 +15,6 @@ on:
       - deploy/ray-worker.sh
       - pyproject.toml
       - uv.lock
-      - README.md
       - distrainer/**
       - examples/**
       - integration_tests/**

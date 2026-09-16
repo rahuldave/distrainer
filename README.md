@@ -26,6 +26,8 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   an arm64 bed and an x86 bed, with an S3 bucket as the store and a private image repository: the
   account prerequisites, the scripts and their verbs, building and shipping the image for each
   architecture, the scenarios, day-to-day operation, the bill.
+- [`docs/tutorials/runpod.md`](docs/tutorials/runpod.md) — tutorial 6: the image contrastive example (SimCLR on
+  CIFAR-10 blocks, the machine learning explained), its GPU image and the Actions pipeline that builds it, RunPod pods (M8, in progress).
 - [`docs/cheatsheets/orbstack.md`](docs/cheatsheets/orbstack.md) and
   [`docs/cheatsheets/uncloud.md`](docs/cheatsheets/uncloud.md) — app-independent cheat sheets for the
   two tools the harness runs on.

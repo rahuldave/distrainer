@@ -82,6 +82,9 @@ successor is already committed does nothing. Segment metadata records `space: em
 
 ### image_contrastive (`examples/image_contrastive/`, `just images`)
 
+Tutorial 6 (`docs/tutorials/runpod.md`) explains the machine learning in it (SimCLR, the
+augmentations, the encoder, NT-Xent, the probe, why an image is a Parquet row) and the GPU image.
+
 The example that needs a GPU (M8): SimCLR on CIFAR-10, sized down for the laptop by config.
 `make_blocks.py` takes the `train.dataset` (`cifar10`, the torchvision download cached under
 `train.data_root`, or `synthetic`, class-coloured striped noise with no download), draws a seeded
