@@ -128,3 +128,15 @@ when one starts:
 - **Spot instances** for the workers (a real preemption notice instead of `docker stop`), and
   `stop-worker`, which no scenario uses yet.
 - **A GPU instance type** behind the existing config flag, with a workload that needs it.
+- **Rahul's stated direction (2026-09-16): the next experiments run on RunPod**, and the image
+  should live in a private registry (Amazon ECR was asked about). What that changes: the image
+  is arm64 today (built natively on the Mac for Graviton) with CPU torch from the CPU wheel
+  index; RunPod's GPU hosts are x86_64 with NVIDIA GPUs, so a second image (`--platform
+  linux/amd64`, a CUDA torch index or a CUDA base image, `uv.lock` grown an extra) is the first
+  step, published as a multi-arch manifest so each host pulls its own. RunPod pods pull from a
+  registry and expose TCP ports through a proxy, no UDP, so uncloud's WireGuard mesh does not
+  fit there: a RunPod "instant cluster" (a private network between nodes) or one multi-GPU pod
+  with Ray's own networking is the shape, which means a new driver (`deploy/drivers/runpod.sh`)
+  behind the same verbs. ECR for the EC2 bed is the smaller change: `build` pushes once from
+  the Mac, the machines pull in-region through an instance profile with ECR read (the same
+  profile would give the containers their S3 access and retire the long-lived key).
