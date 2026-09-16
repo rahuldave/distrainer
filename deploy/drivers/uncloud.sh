@@ -10,8 +10,18 @@
 #   - nothing spans machines: storage is S3 only (MinIO on the head machine, or any endpoint),
 #     `shared` prints nothing, `wipe-shared` has nothing to wipe, `cp-from-head` streams a tar
 #     through `uc exec`. The MinIO volume lives on the head machine; `down` keeps it, `nuke` drops it.
-#   - the image is pushed to every machine by `build` (`uc image push`); nothing is pulled from a
-#     registry. No bind mounts: a code edit needs `build` again.
+#   - the image reaches the machines by `build`: a local image (DISTRAINER_IMAGE without a
+#     registry host, the default distrainer:local) is built for the Mac's architecture and pushed
+#     to every machine with `uc image push`; a registry image (host/name:tag, what the AWS
+#     bootstrap's `ecr` verb records) is built once for DISTRAINER_PLATFORMS (default
+#     linux/amd64,linux/arm64: one manifest, every machine pulls its own architecture) with a
+#     docker-container buildx builder (DISTRAINER_BUILDER, default `distrainer`, created when
+#     missing), pushed, and then pulled by every machine in-region over the ssh route with the
+#     Mac's registry token (uncloud has no registry login; an ECR token lasts twelve hours,
+#     `build` obtains a fresh one, and each machine's Docker keeps it that long). "Registry
+#     image" follows Docker's rule: the first path component holds a dot, a colon or is
+#     `localhost`; `myorg/distrainer:local` is a local name. No bind mounts: a code edit needs
+#     `build` again either way.
 #   - node death is `docker kill` over ssh on the machine that runs the container (uncloud has no
 #     per-container kill); the container is started again after DISTRAINER_RESTART_DELAY seconds
 #     as with compose. The ssh route to a machine is DISTRAINER_UNCLOUD_SSH, a printf template
@@ -173,9 +183,55 @@ need_cluster() {
 verb="${1:-}"; shift || true
 case "$verb" in
   build)
-    docker build -t "$image" -f "$root/deploy/Dockerfile" "$root"
-    need_cluster
-    uc image push "$image" ;;
+    # Docker's own rule for "the first path component names a registry": a dot, a colon, or
+    # `localhost`; `myorg/distrainer:local` is a local name, `ghcr.io/x/y:t` and `localhost:5000/x` are not
+    kind=local
+    case "$image" in */*) case "${image%%/*}" in *.*|*:*|localhost) kind=registry ;; esac ;; esac
+    case "$kind" in
+      registry)   # build once for every platform, push, then every machine pulls
+        registry="${image%%/*}"
+        platforms="${DISTRAINER_PLATFORMS:-linux/amd64,linux/arm64}"
+        builder="${DISTRAINER_BUILDER:-distrainer}"   # multi-platform pushes need the docker-container driver
+        if docker buildx inspect "$builder" >/dev/null 2>&1; then
+          if ! docker buildx inspect "$builder" 2>/dev/null | grep -q "Driver: *docker-container"; then
+            echo "buildx builder '$builder' is not on the docker-container driver: remove it (docker buildx rm $builder) or set DISTRAINER_BUILDER" >&2; exit 2
+          fi
+        else
+          docker buildx create --name "$builder" --driver docker-container --bootstrap >/dev/null
+        fi
+        token=""
+        case "$registry" in
+          *.dkr.ecr.*.amazonaws.com)   # ECR: a twelve-hour token from the Mac's AWS credentials, for the Mac and the machines
+            region="${registry#*.dkr.ecr.}"; region="${region%%.*}"
+            # shellcheck disable=SC2086
+            token="$(aws ${DISTRAINER_AWS_PROFILE:+--profile "$DISTRAINER_AWS_PROFILE"} --region "$region" ecr get-login-password)"
+            printf '%s' "$token" | docker login --username AWS --password-stdin "$registry" >/dev/null ;;
+        esac
+        docker buildx build --builder "$builder" --platform "$platforms" -t "$image" --push -f "$root/deploy/Dockerfile" "$root"
+        need_cluster
+        # every machine pulls in-region (a multi-arch manifest resolves to the machine's architecture)
+        pids=(); logs="$(mktemp -d)"
+        trap 'rm -rf "$logs"' EXIT
+        for m in "${machines[@]}"; do
+          {
+            if [ -n "$token" ]; then printf '%s' "$token" | machine_ssh "$m" docker login --username AWS --password-stdin "$registry"; fi
+            machine_ssh "$m" docker pull "$image"
+          } > "$logs/$m" 2>&1 &
+          pids+=($!)
+        done
+        failed=0; i=0
+        for m in "${machines[@]}"; do
+          if wait "${pids[$i]}"; then echo "$m: pulled $image"; else echo "$m: pull failed:" >&2; cat "$logs/$m" >&2; failed=1; fi
+          i=$((i + 1))
+        done
+        rm -rf "$logs"
+        [ "$failed" = 0 ] || exit 1 ;;
+      *)   # a local image: built for the Mac's architecture (DISTRAINER_PLATFORMS to cross-build one), pushed to every machine
+        # shellcheck disable=SC2086
+        docker build ${DISTRAINER_PLATFORMS:+--platform "$DISTRAINER_PLATFORMS"} -t "$image" -f "$root/deploy/Dockerfile" "$root"
+        need_cluster
+        uc image push "$image" ;;
+    esac ;;
   machines-up|machines-status|machines-stop|machines-start|machines-destroy)
     [ -x "$machines_sh" ] || { echo "no bootstrap for DISTRAINER_UNCLOUD_PROVIDER=$provider ($machines_sh)" >&2; exit 2; }
     "$machines_sh" "${verb#machines-}" ;;

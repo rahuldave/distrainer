@@ -17,7 +17,15 @@ before relying on them.
   bucket as the store: `deploy/uncloud/aws.sh` builds the bed, `.harness/aws/env` tells the
   driver about it, `endpoint` prints `s3=` and the runner deploys no MinIO. Section 3 has the
   numbers.
-- The AWS bed was left **parked** (`aws1`, `aws2`, `aws3` stopped: disks only, about 0.13 USD per
+- **Phase 7b** (2026-09-16, later the same day; issue #18, PR #19; Gest parent `norpvuup`,
+  iteration `mkooymum`, leaves `oylsztvn` code, `zxpwwtuq` the run, `oxtzpqwn` docs): the node
+  image published once to a private ECR repository (`aws.sh ecr`) as a multi-architecture
+  manifest and pulled by the machines (`build` logs them in over the ssh route with the Mac's
+  token), the bed on x86 (`t3.large`, `t3.medium`, the new defaults; Graviton a setting).
+  Every cluster scenario passed on the x86 bed pulling from ECR: S2 107 s, S3 118 s, S4 193 s,
+  S8 98 s, S9 212 s, S10 161 s, S11s3 222 s (arm64: 100, 103, 179, 87, 197, 163, 220). The
+  push of both halves took ten minutes from the Mac once; the pulls seconds.
+- The AWS bed was left **parked** (now the x86 one: `aws1`, `aws2`, `aws3` stopped: disks only, about 0.13 USD per
   day; `deploy/driver.sh machines-start` brings it back with new public addresses, `machines-destroy`
   removes it, `deploy/uncloud/aws.sh bucket-rm` the bucket `distrainer-rahuldave` and its IAM user).
   The bucket holds the block log (`blocks/`), the streaming store (`blocks_stream/`) and the
@@ -128,15 +136,14 @@ when one starts:
 - **Spot instances** for the workers (a real preemption notice instead of `docker stop`), and
   `stop-worker`, which no scenario uses yet.
 - **A GPU instance type** behind the existing config flag, with a workload that needs it.
-- **Rahul's stated direction (2026-09-16): the next experiments run on RunPod**, and the image
-  should live in a private registry (Amazon ECR was asked about). What that changes: the image
-  is arm64 today (built natively on the Mac for Graviton) with CPU torch from the CPU wheel
-  index; RunPod's GPU hosts are x86_64 with NVIDIA GPUs, so a second image (`--platform
-  linux/amd64`, a CUDA torch index or a CUDA base image, `uv.lock` grown an extra) is the first
-  step, published as a multi-arch manifest so each host pulls its own. RunPod pods pull from a
+- **Rahul's stated direction (2026-09-16): the next experiments run on RunPod.** Phase 7b did
+  the groundwork: the image is now built for amd64 too and lives in a private registry, and the
+  x86 bed proves the amd64 build. What remains for RunPod: a GPU image (a CUDA base image, a
+  CUDA torch wheel, `uv.lock` grown an extra; the current image has CPU torch from the CPU wheel
+  index), a registry RunPod can log in to (ECR's twelve-hour token is awkward there; GHCR or a
+  private Docker Hub repository is the usual choice), and a new driver: RunPod pods pull from a
   registry and expose TCP ports through a proxy, no UDP, so uncloud's WireGuard mesh does not
-  fit there: a RunPod "instant cluster" (a private network between nodes) or one multi-GPU pod
-  with Ray's own networking is the shape, which means a new driver (`deploy/drivers/runpod.sh`)
-  behind the same verbs. ECR for the EC2 bed is the smaller change: `build` pushes once from
-  the Mac, the machines pull in-region through an instance profile with ECR read (the same
-  profile would give the containers their S3 access and retire the long-lived key).
+  fit; a RunPod "instant cluster" (a private network between nodes) or one multi-GPU pod with
+  Ray's own networking is the shape, behind the same verbs (`deploy/drivers/runpod.sh`). An
+  instance profile for the EC2 machines (ECR read and S3, retiring the token step and the
+  long-lived key) needs IAM role permissions the CLI user does not have.

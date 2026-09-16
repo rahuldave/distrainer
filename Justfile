@@ -76,6 +76,10 @@ aws-machines:
 aws-bucket:
   deploy/uncloud/aws.sh bucket
 
+# the private image repository (ECR): `just build` then pushes the image once and the machines pull it
+aws-ecr:
+  deploy/uncloud/aws.sh ecr
+
 mkbucket:
   DISTRAINER_MINIO=1 deploy/driver.sh mkbucket distrainer
 

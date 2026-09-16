@@ -168,7 +168,7 @@ What is where:
   the `DISTRAINER_UNCLOUD_SSH` template, `%s@orb` by default); the container is started again
   after `DISTRAINER_RESTART_DELAY` seconds as in mode B. `stop-worker` is `docker stop`. `up`
   after `kill-head` finds the head stopped and `uc deploy` recreates it; the workers reconnect.
-- The image is pushed, not pulled: `build` is `docker build` plus `uc image push` (the 1.36 GB
+- The image is pushed, not pulled, on the OrbStack bed: `build` is `docker build` plus `uc image push` (the 1.36 GB
   dependency layer takes about three minutes to reach three machines, a code change seconds);
   no source tree is mounted, so a code edit needs `build` again.
 - `endpoint` prints the dashboard and MinIO at the head machine's address, published only inside
@@ -190,7 +190,10 @@ What is where:
   `DISTRAINER_UNCLOUD_SSH_OPTS`, the head's public address, `S3_*`), which the driver and the
   runner read after `.env` through `DISTRAINER_ENV_FILE`. With `S3_ENDPOINT` naming a store
   outside the cluster, `endpoint` prints `s3=<URL>` instead of `minio=...`: the runner deploys
-  no MinIO, makes no bucket, and runs `harness-s3.yaml` / `harness-stream-s3.yaml`.
+  no MinIO, makes no bucket, and runs `harness-s3.yaml` / `harness-stream-s3.yaml`. With a
+  private repository (`aws.sh ecr`, M7b), `build` pushes one multi-architecture image to ECR and
+  the machines pull it in-region instead of receiving three copies from the Mac; the bed defaults
+  to x86 (`t3`) since M7b, with Graviton (`t4g`) a setting.
 
 ## D. KubeRay on OrbStack Kubernetes (M5)
 

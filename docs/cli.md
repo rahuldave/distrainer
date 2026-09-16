@@ -137,7 +137,7 @@ head container against MinIO).
 | `just integration [S]` | cluster scenarios S2, S3, S4, S6, S8, S9, S10, S11, S11s3 (or `all`) |
 | `just kuberay-operator` | install the KubeRay operator into the current Kubernetes context (once; `DISTRAINER_DRIVER=kuberay` for the targets above) |
 | `just uncloud-machines` | create the OrbStack machines and the uncloud cluster (once; `DISTRAINER_DRIVER=uncloud` for the targets above; `DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-destroy` removes them) |
-| `just aws-bucket`, `just aws-machines` | the AWS bed (tutorial 5): the S3 bucket with an IAM user scoped to it, then three EC2 instances joined as uncloud context `distrainer-aws`; `deploy/driver.sh machines-stop|start|status|destroy` with `DISTRAINER_DRIVER=uncloud` afterwards, `deploy/uncloud/aws.sh bucket-rm` for the bucket |
+| `just aws-bucket`, `just aws-ecr`, `just aws-machines` | the AWS bed (tutorial 5): the S3 bucket with an IAM user scoped to it, the private image repository (then `just build` pushes once and the machines pull), then three EC2 instances joined as uncloud context `distrainer-aws`; `deploy/driver.sh machines-stop|start|status|destroy` with `DISTRAINER_DRIVER=uncloud` afterwards, `deploy/uncloud/aws.sh bucket-rm` and `ecr-rm` for the bucket and the repository |
 | `just docs` | list the docs |
 
 `DISTRAINER_DRIVER` selects the harness driver (`compose`, the default; `kuberay` for pods on
