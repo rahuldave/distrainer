@@ -232,8 +232,14 @@ ssh_args() {  # fills SSH_ARGS for the head (no tty; the account's registered ke
 exec_head() {
   ssh_args || exit 1
   # two shell layers: the pod's login shell unwraps one %q quoting, then bash -lc runs the argv
-  local q remote; q="$(printf '%q ' "$@")"; remote="cd /app && $q"
-  ssh "${SSH_ARGS[@]}" "bash -lc $(printf '%q' "$remote")"
+  local q remote rc; q="$(printf '%q ' "$@")"; remote="cd /app && $q"
+  ssh "${SSH_ARGS[@]}" "bash -lc $(printf '%q' "$remote")"; rc=$?
+  if [ "$rc" = "255" ]; then   # ssh itself failed: a restarted head has a new port; refresh the cache once
+    rm -f "$state/$cluster-head.ssh"
+    ssh_args || exit 1
+    ssh "${SSH_ARGS[@]}" "bash -lc $(printf '%q' "$remote")"; rc=$?
+  fi
+  return $rc
 }
 
 up_workers() {  # a worker i for every i in 1..N that has none dialling this head: in the head's data
