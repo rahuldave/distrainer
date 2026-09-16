@@ -30,6 +30,7 @@ data_centers="${DISTRAINER_RUNPOD_DATA_CENTERS:-}"
 cloud="${DISTRAINER_RUNPOD_CLOUD:-SECURE}"
 max_hourly="${DISTRAINER_RUNPOD_MAX_GPU_HOURLY:-0.60}"
 disk_gb="${DISTRAINER_RUNPOD_DISK_GB:-20}"
+net_iface="${DISTRAINER_RUNPOD_NET_IFACE:-podnet1}"   # the global-networking interface inside a pod
 state="$root/.harness/runpod"
 mkdir -p "$state"
 
@@ -98,11 +99,14 @@ ssh_pubkey() {
 pod_env() {
   local role="$1" head_id="${2:-}" pub
   pub="$(ssh_pubkey)" || return 1
-  jq -nc --arg c "$cluster" --arg role "$role" --arg head "$head_id" --arg pub "$pub" \
+  # NCCL and Gloo must use the global-networking interface: left alone they take the default
+  # route's (the container's eth0), and DDP's process-group setup hangs across pods
+  jq -nc --arg c "$cluster" --arg role "$role" --arg head "$head_id" --arg pub "$pub" --arg iface "$net_iface" \
     --arg ep "${S3_ENDPOINT:-}" --arg ak "${S3_ACCESS_KEY:-}" --arg sk "${S3_SECRET_KEY:-}" --arg rg "${S3_REGION:-auto}" \
     '{DISTRAINER_CLUSTER: $c, DISTRAINER_ROLE: $role,
       S3_ENDPOINT: $ep, S3_ACCESS_KEY: $ak, S3_SECRET_KEY: $sk, S3_REGION: $rg,
-      RAY_health_check_period_ms: "1000", RAY_health_check_timeout_ms: "1000", RAY_health_check_failure_threshold: "3"}
+      RAY_health_check_period_ms: "1000", RAY_health_check_timeout_ms: "1000", RAY_health_check_failure_threshold: "3",
+      NCCL_SOCKET_IFNAME: $iface, GLOO_SOCKET_IFNAME: $iface, NCCL_IB_DISABLE: "1"}
      + (if $role == "worker" then {RAY_HEAD_ADDRESS: ($head + ".runpod.internal:6379")} else {} end)
      + (if $pub != "" then {PUBLIC_KEY: $pub} else {} end)'
 }
@@ -145,18 +149,22 @@ create_pod() {
   return 1
 }
 
-# wait_running ID [need_ssh]: until the pod's container runs (the API says RUNNING from the moment
-# the pod is rented, while the image still pulls: `runtime` appears only once the container is up)
-# with its global-networking address and, for the head, its published ssh port;
-# DISTRAINER_RUNPOD_START_TIMEOUT seconds at most
+# wait_running ID [need_ssh] [after]: until the pod's container runs (the API says RUNNING from the
+# moment the pod is rented, while the image still pulls: `runtime` appears only once the container
+# is up) with its global-networking address and, for the head, its published ssh port; `after` is
+# the startedAt of a pod this call restarted: the API keeps reporting the old container's runtime
+# for a while, so the new one is recognised by a newer startedAt. DISTRAINER_RUNPOD_START_TIMEOUT
+# seconds at most
 wait_running() {
-  local id="$1" need_ssh="${2:-0}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port up
+  local id="$1" need_ssh="${2:-0}" after="${3:-}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port up started
   while :; do
     pod="$(api GET "/pods/$id")" || return 1
     st="$(printf '%s' "$pod" | jq -r '.status')"
     port="$(printf '%s' "$pod" | jq -r '.ssh.direct.port // empty')"
     up="$(printf '%s' "$pod" | jq -r '.runtime.uptime // empty')"
+    started="$(printf '%s' "$pod" | jq -r '.startedAt // empty')"
     if [ "$st" = "RUNNING" ] && [ -n "$up" ] && [ "$(printf '%s' "$pod" | jq -r '.globalNetworking.ip // empty')" != "" ] \
+       && { [ -z "$after" ] || [ "$started" \> "$after" ]; } \
        && { [ "$need_ssh" = "0" ] || [ -n "$port" ]; }; then
       printf '%s\n' "$pod"; return 0
     fi
@@ -243,12 +251,21 @@ case "$verb" in
     all="$(cluster_pods)" || exit 1
     errored="$(printf '%s\n' "$all" | jq -c 'select(.status == "ERROR")')"
     if [ -n "$errored" ]; then terminate_all "$errored" || exit 1; fi
+    restarted=""   # "id=startedAt" of every pod started here: its new container has a newer startedAt
     while read -r p; do
       [ -n "$p" ] || continue
       id="$(printf '%s' "$p" | jq -r '.id')"
       echo "starting $(printf '%s' "$p" | jq -r '.name') ($id) again"
-      pod_action "$id" start || { echo "runpod: $id would not start (its host may be full); terminating it for a new pod" >&2; terminate "$id"; }
+      if pod_action "$id" start; then
+        restarted="$restarted $id=$(printf '%s' "$p" | jq -r '.startedAt // "0"')"
+      else
+        echo "runpod: $id would not start (its host may be full); terminating it for a new pod" >&2; terminate "$id"
+      fi
     done <<< "$(printf '%s\n' "$all" | jq -c 'select(.status == "EXITED")')"
+    started_after() {  # the old startedAt of a pod this up restarted, else nothing
+      local pair
+      for pair in $restarted; do [ "${pair%%=*}" = "$1" ] && printf '%s' "${pair#*=}"; done
+    }
     head="$(head_pod)" || exit 1
     if [ -z "$head" ]; then
       head="$(create_pod "$cluster-head" head "$(gn_data_centers)")" || exit 1
@@ -264,10 +281,14 @@ case "$verb" in
     # the workers are created before the head is up so the image pulls run side by side (a
     # worker retries until the head answers); the head's id and data center are known at creation
     up_workers "$n" "$head_id" "$dc"
-    head="$(wait_running "$head_id" 1)" || exit 1
+    head="$(wait_running "$head_id" 1 "$(started_after "$head_id")")" || exit 1
     printf '%s %s\n' "$(printf '%s' "$head" | jq -r '.ssh.direct.host')" "$(printf '%s' "$head" | jq -r '.ssh.direct.port')" > "$state/$cluster-head.ssh"
     workers="$(worker_pods)" || exit 1
-    while read -r w; do [ -n "$w" ] && { wait_running "$(printf '%s' "$w" | jq -r '.id')" >/dev/null || exit 1; }; done <<< "$workers"
+    while read -r w; do
+      [ -n "$w" ] || continue
+      wid="$(printf '%s' "$w" | jq -r '.id')"
+      wait_running "$wid" 0 "$(started_after "$wid")" >/dev/null || exit 1
+    done <<< "$workers"
     "$0" ps ;;
   nuke)
     exec "$0" down ;;   # no volumes, no shared mount: nuke is down

@@ -27,6 +27,14 @@ on RunPod pods (M8, tutorial 6). Dates are when it was seen.
   everything else). The entrypoint now looks for up to two minutes, inside a RunPod pod only;
   the head's log must show `runpod-entry: RAY_NODE_IP=10.…` and Ray's "Local node IP" must be
   that address.
+- **DDP hangs across pods unless NCCL and Gloo are told the interface** (2026-09-16): the first
+  two-node run sat for ten minutes with both Train workers alive and no step taken. NCCL (the
+  DDP backend on GPUs) and Gloo bind the default route's interface, the container's `eth0`
+  (172.18.x), which the other pod cannot reach; Ray itself was fine because it advertised the
+  10.x address. The driver puts `NCCL_SOCKET_IFNAME=podnet1`, `GLOO_SOCKET_IFNAME=podnet1` and
+  `NCCL_IB_DISABLE=1` into every pod's environment (`DISTRAINER_RUNPOD_NET_IFACE`), and the
+  entrypoint derives the same from the route table as a fallback. An existing pod gets them
+  through `PATCH /v2/pods/{id}` with the merged `env` while stopped, then `start`: no pull.
 - **RunPod injects its API key into every pod** as `RUNPOD_API_KEY`, next to `RUNPOD_POD_ID`,
   `RUNPOD_DC_ID`, `RUNPOD_PUBLIC_IP`, `RUNPOD_TCP_PORT_22`, `RUNPOD_GPU_NAME`, `RUNPOD_CPU_COUNT`
   and `RUNPOD_MEM_GB`. The login-shell export carries it, as RunPod's own start script does.

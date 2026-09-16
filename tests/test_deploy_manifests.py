@@ -693,6 +693,9 @@ def test_runpod_entrypoint_starts_sshd_from_the_injected_key_and_runs_the_role()
     assert "grep -Ev '^(PUBLIC_KEY|PATH|PWD|OLDPWD|HOME|SHLVL|HOSTNAME|_|TERM)='" in text
     assert "> /etc/rp_environment" in text and "/etc/profile.d/distrainer-env.sh" in text
     assert re.search(r"^  head\) exec deploy/ray-head.sh ;;$", text, re.MULTILINE)
+    assert (
+        'NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-$iface}"' in text
+    )  # collectives on the 10.x interface
     assert re.search(r"^  worker\) exec deploy/ray-worker.sh ;;$", text, re.MULTILINE)
     assert re.search(r'^  \*\) exec "\$@" ;;$', text, re.MULTILINE)
     lint = (ROOT / "Justfile").read_text()

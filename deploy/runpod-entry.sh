@@ -29,6 +29,14 @@ if [ -z "${RAY_NODE_IP:-}" ]; then
   done
   if [ -n "$ip" ]; then
     export RAY_NODE_IP="$ip"; echo "runpod-entry: RAY_NODE_IP=$ip after $tries retries" >&2
+    # the collectives (NCCL for DDP on GPUs, Gloo otherwise) must use that interface too, or
+    # their setup hangs on the container's default one; the driver sets these, this is the fallback
+    iface="$(awk '$2 == "0000000A" { print $1; exit }' /proc/net/route 2>/dev/null)" || iface=""
+    if [ -n "$iface" ]; then
+      export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-$iface}" GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-$iface}"
+      export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"
+      echo "runpod-entry: collectives on $iface" >&2
+    fi
   else
     echo "runpod-entry: no global-networking address found; Ray will advertise the container's own address (fine outside RunPod, unreachable for other pods on it)" >&2
   fi

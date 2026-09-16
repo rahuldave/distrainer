@@ -45,7 +45,16 @@ printf '{}\n%s' "$code"
 """
 
 
-def pod(name, pid, marker="distrainer", head=None, status="RUNNING", dc="EU-RO-1", cost=0.24):
+def pod(
+    name,
+    pid,
+    marker="distrainer",
+    head=None,
+    status="RUNNING",
+    dc="EU-RO-1",
+    cost=0.24,
+    started="2026-09-16T10:00:00Z",
+):
     env = {"S3_ENDPOINT": "https://s3.example"}
     if marker:
         env["DISTRAINER_CLUSTER"] = marker
@@ -66,6 +75,7 @@ def pod(name, pid, marker="distrainer", head=None, status="RUNNING", dc="EU-RO-1
         },
         "ssh": {"direct": {"host": "1.2.3.4", "port": 10341}, "proxy": None},
         "runtime": {"uptime": 5} if status == "RUNNING" else None,  # null while the image pulls
+        "startedAt": started,
     }
 
 
@@ -236,6 +246,10 @@ def test_up_creates_a_head_then_workers_that_dial_it_in_its_data_center(bed):
         and h["env"]["S3_SECRET_KEY"] == "sk"
     )
     assert h["env"]["RAY_health_check_period_ms"] == "1000" and "RAY_HEAD_ADDRESS" not in h["env"]
+    assert (
+        h["env"]["NCCL_SOCKET_IFNAME"] == "podnet1" and h["env"]["GLOO_SOCKET_IFNAME"] == "podnet1"
+    )
+    assert h["env"]["NCCL_IB_DISABLE"] == "1"  # the collectives on the global-networking interface
     # the workers are created before the head is awaited: their POSTs precede the head's GET
     calls = bed.calls()
     assert calls.index(("POST", "/pods", posts[1])) < calls.index(("GET", "/pods/headid", None))
@@ -475,10 +489,17 @@ def test_up_starts_stopped_pods_replaces_errored_ones_and_a_failed_listing_never
         },
         n=1,
     )
-    bed.pods(pod("distrainer-head", "headid"))  # every later listing: the head running again
+    # every later listing: the head running again with a newer start (the API keeps the old
+    # container's runtime for a while after a start; a stale one must not satisfy the wait)
+    bed.respond(
+        "GET", "/pods/headid", pod("distrainer-head", "headid"), n=1
+    )  # stale: old startedAt
+    bed.pods(pod("distrainer-head", "headid", started="2026-09-16T11:00:00Z"))
     bed.respond("POST", "/pods", pod("distrainer-worker-1", "w1b", head="headid"), n=1)
     out = bed.run("up", "1").stdout
     assert bed.actions("start") == ["headid"] and "starting distrainer-head (headid) again" in out
+    gets = [p for m, p, _ in bed.calls() if m == "GET" and p == "/pods/headid"]
+    assert len(gets) >= 2  # the stale answer was not taken
     assert bed.terminated() == ["w1"] and [p["name"] for p in bed.posts()] == [
         "distrainer-worker-1"
     ]

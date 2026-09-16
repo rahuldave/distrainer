@@ -288,10 +288,69 @@ and `kill-head`, `up` after a head death, the ssh command line, `ps`.
 
 ## 6. The run on pods
 
-Written with the run slice. The budget is a ceiling of about 20 USD for the whole example and
-integration test; the estimate from the prices of 2026-09-16 is 1.5 to 3 USD on RTX 2000 Ada,
-A4000 or A5000 class pods (about 0.25 USD per GPU-hour on the secure cloud, three pods needed:
-the head too, since a CPU pod cannot join global networking), 5 USD if only L4 or A40 class
-GPUs are available. The blocks, the log, the audit trail and the checkpoints live on the S3
-bucket; pod-local disk holds only the dataset cache and Ray's checkpoint staging; pods are
-terminated, never stopped (a stopped pod's volume bills by the month).
+The session of 2026-09-16, in the order it happened; the numbers are that day's.
+
+### 6.1 The session's shell
+
+```bash
+export $(grep '^S3_' .harness/aws/env | xargs)        # the bucket's endpoint, region and keys
+export DISTRAINER_DRIVER=runpod
+export DISTRAINER_IMAGE=ghcr.io/rahuldave/distrainer-gpu:gest-zvymnspr-runpod   # the branch tag until the merge
+deploy/driver.sh catalog                               # what is rentable now, and where
+deploy/driver.sh up 1                                  # the head and one worker
+deploy/driver.sh ps                                    # the pods and the hourly total
+```
+
+`.env` holds `RUNPOD_KEY` and `DISTRAINER_RUNPOD_SSH_KEY=~/.ssh/id_rsa`; the `S3_*` lines are
+exported from the AWS bed's env file because the RunPod driver reads `.env` only (the gotchas
+say why they are not in `.env`).
+
+### 6.2 The data, once
+
+The CIFAR-10 tarball was staged in the bucket from the laptop's cache (`aws s3 cp` to
+`s3://distrainer-rahuldave/datasets/`), then fetched into the head over a presigned URL
+(`aws s3 presign`, `urllib.request.urlretrieve` on the pod, seconds) so torchvision finds it
+under `data_root` and skips the download. `make_blocks.py` on the head then wrote the 192
+blocks, the 16 segments and the held-out split to the bucket in 7 min 28 s (the transatlantic
+puts from EU-RO-1 to us-east-1; the PNG encoding is seconds). Every run since reuses them.
+
+```bash
+url=$(aws s3 presign s3://distrainer-rahuldave/datasets/cifar-10-python.tar.gz --expires-in 14400)
+deploy/driver.sh exec-head python -c "import urllib.request, os, sys; os.makedirs('/tmp/datasets', exist_ok=True); urllib.request.urlretrieve(sys.argv[1], '/tmp/datasets/cifar-10-python.tar.gz')" "$url"
+deploy/driver.sh exec-head python examples/image_contrastive/make_blocks.py --config examples/image_contrastive/harness-s3.yaml
+```
+
+### 6.3 World size 1, on the head's own GPU
+
+The head advertises no `trainer` (the harness rule), so a single-pod run lends it the training
+slot with two overrides; nothing else changes:
+
+```bash
+deploy/driver.sh exec-head python examples/image_contrastive/train.py \
+    --config examples/image_contrastive/harness-s3.yaml --set run_name=gpu_w1 \
+    --set scaling.num_workers=1 --set 'scaling.resources_per_worker={GPU: 1}'
+```
+
+On an RTX A5000 (CA-MTL-1): **95 s end to end** for 384 positions (two passes over the 192
+blocks of 256 images), 48 checkpoints to the bucket (`every_k: 8`, each about 135 MB of model
+and optimizer state, uploaded asynchronously), about 0.15 s per step, the loss from 5.5 (the
+log of the number of candidates) to 1.93, and the probe **`knn_acc=0.448` against 0.10
+chance** on 2000 held-out images against 5000 training images, computed on the GPU; the
+audit check `S1 PASS`. On the laptop's tiny encoder the same probe reaches 0.29 after 48
+positions; the full ResNet-18 after 384 positions on a GPU is where the example starts to
+look like SimCLR.
+
+### 6.4 What the pods cost and how long they took
+
+| item | value |
+|---|---|
+| head, first attempt | RTX 2000 Ada, EU-RO-1, 0.24 USD/h; container up after a 27-minute pull; terminated (it advertised the wrong address, section 4 of the gotchas) |
+| head, second attempt | RTX A5000, CA-MTL-1, 0.27 USD/h; container up 4 minutes after the create |
+| worker, first | RTX 2000 Ada, EU-RO-1, 0.24 USD/h (the fallback: CA-MTL-1 was sold out); its host was still pulling after 31 minutes; terminated |
+| worker, second | RTX 2000 Ada, EU-RO-1, 0.24 USD/h |
+| the pair | 0.51 USD/h |
+| spend to the world-size-1 run | about 0.40 USD |
+
+### 6.5 Two nodes, and breaking things
+
+Written when the two-node run and the kills have happened.
