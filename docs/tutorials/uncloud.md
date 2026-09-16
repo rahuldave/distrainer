@@ -211,38 +211,31 @@ bucket before a run (`check_audit.py` does not change). S6 and S11 store under `
 config and are skipped with a message. On 2026-09-14 every cluster scenario passed under this
 driver: S2 149 s, S3 146 s, S4 210 s, S8 125 s, S9 254 s, S10 205 s, S11s3 161 s.
 
-## 9. Real machines: a cloud, and S3 or R2 instead of MinIO
+## 9. Real machines: AWS, and S3 instead of MinIO
 
 Everything above is OrbStack-specific only in `deploy/uncloud/machines.sh` (how the machines
-come to exist and how ssh reaches them). The driver and the compose file work on any uncloud
-cluster; this is what changes. (Not run yet: an experiment on cloud VMs with S3 is a later stage.)
+come to exist and how ssh reaches them). [Tutorial 5](aws.md) runs the same driver, compose
+file and scenarios on three EC2 instances with an S3 bucket as the store: `deploy/uncloud/aws.sh`
+is the twin of `machines.sh` (the same verbs plus `bucket` and `bucket-rm`, driven through the
+`machines-*` verbs under `DISTRAINER_UNCLOUD_PROVIDER=aws`), it writes one env file with the
+context, the machines, the ssh route and the S3 settings that the driver and the runner read
+through `DISTRAINER_ENV_FILE`, and with `S3_ENDPOINT` naming a store outside the cluster the
+driver's `endpoint` prints `s3=` instead of `minio=`, so the runner deploys no MinIO and runs
+`harness-s3.yaml`. In short:
 
-- **Machines.** Two or three Linux VMs (Ubuntu 22.04 or later, or Debian 11+; arm64 or amd64),
-  reachable over ssh as root or a user with passwordless sudo, with UDP 51820 open between them.
-  Join them yourself: `uc machine init ubuntu@10.0.0.11 -c distrainer -n head --no-caddy
-  --no-dns` and `uc machine add ubuntu@10.0.0.12 -n worker-a`, one more for `worker-b`. Give the
-  head VM more memory than the workers (section 10).
-- **Tell the driver about them.** `DISTRAINER_UNCLOUD_MACHINES="head worker-a worker-b"` (the
-  first is the head machine), `DISTRAINER_UNCLOUD_CONTEXT=distrainer`, and the ssh route the
-  driver uses for `docker kill` on a machine: `DISTRAINER_UNCLOUD_SSH` is a printf template of
-  the ssh destination given the machine name, so either name the machines by their ssh alias
-  in `~/.ssh/config` (`DISTRAINER_UNCLOUD_SSH='%s'`) or by an address the template completes
-  (`'ubuntu@%s'`). `DISTRAINER_UNCLOUD_HOST_PREFIX` is the VMs' private subnet, so the dashboard
-  and MinIO bind to private addresses only. All of it can live in `.env`.
-- **The image.** `DISTRAINER_DRIVER=uncloud just build` pushes it over ssh to every machine;
-  for an amd64 cluster build on an amd64 host or with `docker buildx --platform linux/amd64`.
-- **Storage.** The simplest is what this tutorial does: MinIO on the head machine (the
-  `minio` service, a volume on that VM's disk). To use S3, R2, Backblaze or another
-  S3-compatible service instead, copy `examples/hello_blocks/harness-minio.yaml`, set
-  `storage.endpoint` (`https://s3.eu-west-1.amazonaws.com`, or an R2 account endpoint),
-  `storage.region`, and `storage_path` / `store_root` to your bucket and prefix; put the
-  credentials in `.env` as `S3_ACCESS_KEY` / `S3_SECRET_KEY` (the containers read them from
-  their environment) and set `S3_ENDPOINT` to the same endpoint; then `just up 2` without
-  MinIO. Azure Blob Storage is not S3-compatible; use MinIO on a VM there, or an S3 gateway.
-- **What to expect.** A real network adds latency to every block read and checkpoint write and
-  to Ray's own traffic; the scenarios' timing-sensitive parts (the S11 pacing check, the 3 s
-  dead-node threshold in the compose environment) are the ones to watch, and
-  `docs/uncloud-gotchas.md` lists the behaviours that already bit once.
+```bash
+just aws-bucket && echo 'DISTRAINER_ENV_FILE=.harness/aws/env' >> .env
+just aws-machines
+export DISTRAINER_DRIVER=uncloud
+just build && just up 2 && just blocks examples/hello_blocks/harness-s3.yaml && just train examples/hello_blocks/harness-s3.yaml
+just integration S2
+deploy/driver.sh machines-stop        # or machines-destroy
+```
+
+Tutorial 5 has the account prerequisites (an IAM user with two policies, the CLI, a default
+VPC, a zone with Graviton), what the bootstrap builds and why, the numbers, the bill, and the
+things that went wrong the first time. Any other S3-compatible store and any other set of
+machines work the same way; its last section says how.
 
 ## 10. When something is off
 

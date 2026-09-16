@@ -16,24 +16,59 @@
 #     per-container kill); the container is started again after DISTRAINER_RESTART_DELAY seconds
 #     as with compose. The ssh route to a machine is DISTRAINER_UNCLOUD_SSH, a printf template
 #     of the ssh destination with the machine name (default `%s@orb`, OrbStack's route, the one
-#     `uc` uses); options such as a port or a key go in ~/.ssh/config. Machines need passwordless
-#     sudo for docker (uncloud's own requirement).
-#   - `endpoint` prints the head machine's WireGuard endpoint address (its address on the machine
-#     network, where the ports are published); DISTRAINER_UNCLOUD_HEAD_ADDRESS overrides it.
+#     `uc` uses), plus DISTRAINER_UNCLOUD_SSH_OPTS, extra ssh options (`-F <config>` for the
+#     AWS bed, whose bootstrap writes one with a Host per machine); otherwise a port or a key go
+#     in ~/.ssh/config. Machines need passwordless sudo for docker (uncloud's own requirement).
+#   - `endpoint` prints the dashboard at the head machine's address (its WireGuard endpoint
+#     address, where the ports are published; DISTRAINER_UNCLOUD_HEAD_ADDRESS overrides it, the
+#     public address on AWS) and then the store: `minio=` at that address when MinIO on the head
+#     machine is the store (S3_ENDPOINT unset or http://minio:9000), else `s3=<S3_ENDPOINT>`, a
+#     store outside the cluster that the containers reach directly and the runner reads as is
+#     (MinIO is not deployed then; the bucket exists before `up`).
 #   - every uc call names its context (DISTRAINER_UNCLOUD_CONTEXT, default distrainer): down and
 #     nuke delete things. A failing uc fails the verb, and never reads as "no containers".
+#   - the machines come from a bootstrap script the `machines-*` verbs dispatch to by
+#     DISTRAINER_UNCLOUD_PROVIDER: orbstack (deploy/uncloud/machines.sh, the default) or aws
+#     (deploy/uncloud/aws.sh). A bootstrap may write a second env file with the context, the
+#     machines, the ssh route and the store's settings; .env names it as DISTRAINER_ENV_FILE and
+#     it is read after .env (so its S3_* lines win over the MinIO defaults there). What the
+#     caller's environment sets wins over both files (docker compose's own precedence), so
+#     `DISTRAINER_UNCLOUD_PROVIDER=orbstack deploy/driver.sh machines-up` means OrbStack even
+#     while .env points at the AWS bed.
 # Worker index I (kill-worker, stop-worker) counts worker containers sorted by machine then
 # container id, 1-based: stable across a kill and restart of the same container, not across a
 # scale or a redeploy (a new container's id sorts anywhere), so scale first, then look up.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; fi
+# .env, then the env file it (or the caller) names as DISTRAINER_ENV_FILE (a bootstrap's,
+# deploy/uncloud/aws.sh), and what the caller's environment sets wins over both files at every
+# step (docker compose's own precedence): the exported variables are restored after each file.
+# An env file that declares another bed than the caller pinned (DISTRAINER_UNCLOUD_PROVIDER)
+# is skipped, so `just uncloud-machines` means the OrbStack bed while .env points at AWS.
+caller_env="$(export -p)"
+if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; eval "$caller_env"; fi
+if [ -n "${DISTRAINER_ENV_FILE:-}" ]; then
+  env_file="$DISTRAINER_ENV_FILE"
+  case "$env_file" in /*) ;; *) env_file="$root/$env_file" ;; esac
+  if [ ! -f "$env_file" ]; then echo "DISTRAINER_ENV_FILE=$DISTRAINER_ENV_FILE does not exist" >&2; exit 2; fi
+  declared="$(sed -n 's/^\(export \)\{0,1\}DISTRAINER_UNCLOUD_PROVIDER=//p' "$env_file" | tail -1 \
+    | sed 's/[[:space:]]*#.*$//; s/[[:space:]]*$//; s/^["'"'"']//; s/["'"'"']$//')"   # as the runner's reader: export, quotes, comments
+  if [ -n "${DISTRAINER_UNCLOUD_PROVIDER:-}" ] && [ -n "$declared" ] && [ "$DISTRAINER_UNCLOUD_PROVIDER" != "$declared" ]; then
+    echo "note: $DISTRAINER_ENV_FILE belongs to the $declared bed; not read for provider $DISTRAINER_UNCLOUD_PROVIDER" >&2
+  else
+    set -a; . "$env_file"; set +a; eval "$caller_env"
+  fi
+fi
 ctx="${DISTRAINER_UNCLOUD_CONTEXT:-distrainer}"
 export UNCLOUD_CONTEXT="$ctx" UNCLOUD_AUTO_CONFIRM=true
 image="${DISTRAINER_IMAGE:-distrainer:local}"
 export DISTRAINER_IMAGE="$image"
 compose="$root/deploy/uncloud/compose.yml"
-machines_sh="$root/deploy/uncloud/machines.sh"
+provider="${DISTRAINER_UNCLOUD_PROVIDER:-orbstack}"   # what the machines-* verbs drive
+case "$provider" in
+  orbstack) machines_sh="$root/deploy/uncloud/machines.sh" ;;
+  *) machines_sh="$root/deploy/uncloud/$provider.sh" ;;
+esac
 read -r -a machines <<< "${DISTRAINER_UNCLOUD_MACHINES:-uc1 uc2 uc3}"
 head_machine="${DISTRAINER_UNCLOUD_HEAD_MACHINE:-${machines[0]}}"
 export DISTRAINER_UNCLOUD_HEAD_MACHINE="$head_machine"
@@ -49,6 +84,7 @@ case "$ssh_template" in
   *%s*) ;;
   *) echo "DISTRAINER_UNCLOUD_SSH must contain %s for the machine name (got '$ssh_template')" >&2; exit 2 ;;
 esac
+ssh_opts="${DISTRAINER_UNCLOUD_SSH_OPTS:-}"   # word-split on purpose: `-F file`, `-p 2222`, ...
 if [ -z "${DISTRAINER_UNCLOUD_HOST_PREFIX:-}" ]; then
   # published ports (dashboard, MinIO) bind only to the head machine's addresses inside this
   # prefix: OrbStack's machine network here (OrbStack forwards machine ports to the LAN
@@ -63,8 +99,8 @@ export DISTRAINER_UNCLOUD_HOST_PREFIX
 
 machine_ssh() {   # machine_ssh MACHINE CMD...: run a docker command on the machine (sudo)
   local m="$1"; shift
-  # shellcheck disable=SC2059  # the template is the point
-  ssh -o BatchMode=yes -o LogLevel=ERROR "$(printf "$ssh_template" "$m")" sudo -n "$@"
+  # shellcheck disable=SC2059,SC2086  # the template and the split are the point
+  ssh $ssh_opts -o BatchMode=yes -o LogLevel=ERROR "$(printf "$ssh_template" "$m")" sudo -n "$@"
 }
 # a failing uc must fail the verb, never read as "no containers": the listings below abort on error,
 # explicitly with `|| exit 1` at every capture (an `exit` inside a command substitution ends only
@@ -130,7 +166,7 @@ retry_once() {   # retry_once CMD...: uncloud's membership can show a machine as
 }
 need_cluster() {
   if ! uc machine ls >/dev/null 2>&1; then
-    echo "uc context '$ctx' unreachable: run 'deploy/driver.sh machines-up' (just uncloud-machines) once" >&2; exit 2
+    echo "uc context '$ctx' unreachable: run 'deploy/driver.sh machines-up' (just uncloud-machines, or just aws-machines) once" >&2; exit 2
   fi
 }
 
@@ -140,9 +176,9 @@ case "$verb" in
     docker build -t "$image" -f "$root/deploy/Dockerfile" "$root"
     need_cluster
     uc image push "$image" ;;
-  machines-up) "$machines_sh" up ;;
-  machines-status) "$machines_sh" status ;;
-  machines-destroy) "$machines_sh" destroy ;;
+  machines-up|machines-status|machines-stop|machines-start|machines-destroy)
+    [ -x "$machines_sh" ] || { echo "no bootstrap for DISTRAINER_UNCLOUD_PROVIDER=$provider ($machines_sh)" >&2; exit 2; }
+    "$machines_sh" "${verb#machines-}" ;;
   up)
     n="${1:-2}"; shift || true
     minio="${DISTRAINER_MINIO:-0}"
@@ -233,7 +269,11 @@ case "$verb" in
     if [ -z "$ip" ]; then ip="$(head_address)" || exit 1; fi
     if [ -z "$ip" ]; then echo "endpoint: no address for head machine '$head_machine' in uc machine ls" >&2; exit 1; fi
     echo "dashboard=http://$ip:8265"
-    echo "minio=http://$ip:9000 console=http://$ip:9001" ;;
+    case "${S3_ENDPOINT:-http://minio:9000}" in
+      http://minio:*|http://minio.internal:*|http://minio/*|http://minio)   # MinIO on the head machine is the store
+        echo "minio=http://$ip:9000 console=http://$ip:9001" ;;
+      *) echo "s3=$S3_ENDPOINT" ;;   # a store outside the cluster: the containers and the runner reach it directly
+    esac ;;
   mkbucket)
     bucket="${1:-distrainer}"
     for attempt in $(seq 1 15); do

@@ -22,6 +22,7 @@ that a run measures the framework, not the model.
 | `local.yaml` | laptop, local Ray, 2 workers | 48 blocks of 32 rows, `W=12` (4 segments), `every_k=2`, about 30 s |
 | `harness.yaml` | container cluster, 2 to 3 workers, shared mount | 240 blocks, `W=24` (10 segments), `step_sleep_s: 0.25` so a run lasts about 30 s |
 | `harness-minio.yaml` | container cluster, everything on MinIO | same shape, `storage.kind: s3` |
+| `harness-s3.yaml` | cloud machines, everything on an S3 bucket outside the cluster (tutorial 5, `docs/tutorials/aws.md`) | `harness-minio.yaml` with the bucket, the endpoint and the region changed (`tests/test_deploy_manifests.py` pins the pair); edit the bucket name, then `just build` |
 
 Knobs in the `train:` section: `n_blocks`, `rows_per_block`, `features`, `lr`, and `step_sleep_s`
 (a sleep per step so failure injection lands mid-run; 0 on the laptop). Any config value can be
@@ -95,6 +96,7 @@ producer).
 | `hello_blocks/local-stream.yaml` | laptop, local Ray, 2 workers | `W=12`, `gc: true` with `retention_segments: 2`; producer started by hand (Tutorial 2) |
 | `hello_blocks/harness-stream.yaml` | container cluster, 2 workers, shared mount `/shared/blocks_stream` | `W=24`, `step_sleep_s: 0.25`, `gc: true` with `retention_segments: 2`; producer started by the S11 runner in the head container |
 | `hello_blocks/harness-stream-minio.yaml` | container cluster, log, blocks, audit and checkpoints all on MinIO | same shape, `storage.kind: s3`: the segment file's single S3 put is the commit the ranks poll for (S11s3) |
+| `hello_blocks/harness-stream-s3.yaml` | the same on the bucket outside the cluster (S11s3 on the AWS bed) | `harness-stream-minio.yaml` with the bucket, the endpoint and the region of `harness-s3.yaml` |
 
 Start the producer first (it creates the log at once, so `train.py` finds it instead of building
 a batch log), then the trainer:
@@ -138,7 +140,7 @@ list of problems (empty means pass):
 | `check_report_count` / `expected_reports` | rank 0's final `reports` metric equals the number of policy points (plus one final report when the last step is not a checkpoint) |
 | `check_s5` / `expected_checkpoints` | every checkpoint's cursor is a multiple of `k` or the segment end; directory name matches its ledger; count matches the cadence |
 | `check_s7` | two trails have identical per-rank `(segment, step, position, block_id)` sequences |
-| `check_recovery` | several attempts: dealing per attempt with its own world size; each new attempt starts on a step boundary of its world size at or before the position after the previous attempt's last one; replay of at most `2*every_k*n_old + n_new` positions; the union covers positions 0 to the end of the last segment with no gap |
+| `check_recovery` | several attempts: dealing per attempt with its own world size; each new attempt starts on a step boundary of its world size at or before the position after the previous attempt's last one; replay of at most `2*every_k*n_old + n_new` positions (`(2 + lag_intervals)*every_k*n_old + n_new` on a store outside the cluster, where the Train controller registers checkpoints behind the workers); the union covers positions 0 to the end of the last segment with no gap |
 | `check_resume` | a run resumed from a ledger covers exactly `start .. end of its last segment`, once, dealt by the rule |
 | `check_s6` | S1 holds; every segment from `initial_segments` on carries `writer: remine` and `mined_after_segment` = the previous one, was committed after rank 0's last record of that previous segment and before the first record that consumed it, and its records name exactly its blocks, none from the base corpus |
 | `check_s8` | one attempt with S1 dealing; at least two time-budget checkpoints; rank 0's `reports` equals the number of checkpoints (plus one final metrics-only report); every ledger is a step boundary and matches its directory name |
@@ -162,7 +164,7 @@ before a failure can still be in flight, so the controller may resume from the o
 | S8 | time-budget policy | B, C, D | `just integration S8` | hello_blocks with `checkpoint.policy: time`, `time_budget_s: 5`, `time_poll_every: 2`, `num_to_keep: null` (rank 0 decides every 2 steps whether 5 s have passed and broadcasts it) | the run finishes (Ray Train v2 would deadlock inside `report` if the ranks disagreed); `check_s8` on the audit trail, rank 0's `reports` metric and the checkpoint directories (per-rank equality is enforced by Ray Train itself: the run cannot finish otherwise) | green |
 | S9 | cold restore | B, C, D + MinIO | `just integration S9` | full run on MinIO with all checkpoints kept, `down`, `wipe-shared` (a no-op under C), `up`, `distrainer resume` from a mid-run checkpoint URI into a new run | `check_resume` from the checkpoint's position | green |
 | S10 | head loss | B, C, D + MinIO | `just integration S10` | `kill-head` once 24 blocks (one segment) are in the audit trail on the bucket (B: `docker kill` of the head container; C: the same over ssh on the head machine, `up` recreates it; D: the head pod force-deleted and recreated by the operator), `up` (workers rejoin), resume from the newest registered checkpoint | `check_resume` | green |
-| S11 | streaming producer | B, D | `just integration S11` | `produce.py` in the head container writes 10 segments 6 s apart into `/shared/blocks_stream`; the runner waits for the log to exist, then starts hello_blocks with `harness-stream.yaml` (`gc: true`, `retention_segments: 2`) | `check_s11` (ranks waited, commit precedes consumption, all 10 segments consumed once, `_END` ended the run) and `check_retention` (the log keeps segments 7..9 and exactly their blocks). The printed segment-start gaps show two phases: about 3 s while the trainer drains the segments the producer committed during Ray's startup, then about 6 s once it has caught up and waits for each commit. `just integration S11s3` runs the same scenario with the log, blocks, audit trail and checkpoints on MinIO (`harness-stream-minio.yaml`, 14 segments instead of 10 so that a trainer that takes 20 s to start over a mesh still catches up and waits; modes B, C, D), the checks executed inside the head: this is the only scenario in which a reader polls a bucket while a segment is being put, so it is the test of the single-put commit on S3 | green |
+| S11 | streaming producer | B, D | `just integration S11` | `produce.py` in the head container writes 10 segments 6 s apart into `/shared/blocks_stream`; the runner waits for the log to exist, then starts hello_blocks with `harness-stream.yaml` (`gc: true`, `retention_segments: 2`) | `check_s11` (ranks waited, commit precedes consumption, all 10 segments consumed once, `_END` ended the run) and `check_retention` (the log keeps segments 7..9 and exactly their blocks). The printed segment-start gaps show two phases: about 3 s while the trainer drains the segments the producer committed during Ray's startup, then about 6 s once it has caught up and waits for each commit. `just integration S11s3` runs the same scenario with the log, blocks, audit trail and checkpoints on the bucket (`harness-stream-minio.yaml` on MinIO, `harness-stream-s3.yaml` on a store outside the cluster, 14 segments instead of 10 so that a trainer that takes 20 s to start over a mesh still catches up and waits; modes B, C, D), the checks executed inside the head: this is the only scenario in which a reader polls a bucket while a segment is being put, so it is the test of the single-put commit on S3 | green |
 
 Modes: A is the laptop (local Ray), B the OrbStack container cluster, C an uncloud cluster of
 OrbStack machines (`DISTRAINER_DRIVER=uncloud`, no shared mount: the bucket scenarios only), D the
@@ -189,8 +191,10 @@ Each cluster scenario brings the cluster to the size it needs, waits until Ray r
 run state and audit trail of an earlier run with the same name (on the shared mount, or on the
 bucket for S9/S10), starts `train.py` inside the head, waits for the audit trail to show a few
 blocks, injects the failure, waits for the run to finish, and applies the check. Under a driver
-without a shared mount (`shared` prints nothing: uncloud), the runner's store is the bucket of
-`harness-minio.yaml`, reached from the Mac through the MinIO URL of the driver's `endpoint`: S2,
+without a shared mount (`shared` prints nothing: uncloud), the runner's store is a bucket reached
+from the Mac at the URL of the driver's `endpoint`: `harness-minio.yaml`'s on MinIO (`minio=`), or
+`harness-s3.yaml`'s outside the cluster (`s3=`, from `S3_ENDPOINT` in `.env`: then no MinIO is
+deployed and no bucket made, and S11s3 runs `harness-stream-s3.yaml`); S2,
 S3, S4 and S8 then run with that config, cleaning and reading on the bucket, while S6 and S11
 (configs storing under `/shared`) print `SKIP` and do not count as failures. The streaming
 scenarios differ in the store: S6 and S11 wipe their own store (`/shared/blocks_toy`,
@@ -239,7 +243,7 @@ bucket (above). "The head container" is the container on the head machine.
 | `kill-head` | `docker kill` of the head | `docker kill` over ssh on the head machine; the next `up` finds it stopped and `uc deploy` recreates it, the workers reconnect | S10 |
 | `down`, `wipe-shared`, `up` | containers go, the MinIO volume stays | the services go (every copy, by id), the MinIO volume on the head machine stays; `wipe-shared` is a no-op | S9 |
 | `exec-head`, `cp-from-head` | `docker compose exec`, `cp` | `uc exec -T head`, a tar stream through it (no `uc cp`) | all |
-| `shared`, `endpoint` | the shared directory; `localhost` URLs | nothing; the head machine's address (ports published inside `DISTRAINER_UNCLOUD_HOST_PREFIX`) | the runner |
+| `shared`, `endpoint` | the shared directory; `localhost` URLs | nothing; the head machine's address (ports published inside `DISTRAINER_UNCLOUD_HOST_PREFIX`; on AWS the private address, reached through an ssh tunnel) and the store, `minio=` (MinIO on the head machine) or `s3=` (a bucket outside the cluster, from `S3_ENDPOINT`: no MinIO is deployed) | the runner |
 
 What differs under the hood is in `docs/running-modes.md` C and, at length, in
 `docs/uncloud-gotchas.md` (duplicate service names, membership flaps, memory caps, the

@@ -22,6 +22,11 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 - [`docs/tutorials/uncloud.md`](docs/tutorials/uncloud.md) — tutorial 4: the same run on a
   cluster of machines (uncloud on OrbStack machines): the mesh, an object store instead of a shared
   mount, kill a worker, scale, lose the head, and what changes on cloud VMs with S3 or R2.
+- [`docs/tutorials/aws.md`](docs/tutorials/aws.md) — tutorial 5: the same cluster on EC2 instances
+  with an S3 bucket as the store: the account prerequisites, the bootstrap, the scenarios, the bill.
+- [`docs/cheatsheets/orbstack.md`](docs/cheatsheets/orbstack.md) and
+  [`docs/cheatsheets/uncloud.md`](docs/cheatsheets/uncloud.md) — app-independent cheat sheets for the
+  two tools the harness runs on.
 - [`docs/uncloud-gotchas.md`](docs/uncloud-gotchas.md) — the running list of what uncloud does
   that the driver works around: membership, names, placement, memory caps, timing.
 - [`docs/retention.md`](docs/retention.md) — the `gc` reference: what is deleted when, why the
@@ -31,9 +36,9 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 - [`docs/running-modes.md`](docs/running-modes.md) — the four ways to run the same code: laptop
   single-node Ray, OrbStack containers as Ray nodes, uncloud machines, KubeRay; where the driver
   runs, which storage works where, how failures are injected, which scenarios each validates.
-- [`docs/handoff-m7.md`](docs/handoff-m7.md) — where development stands after M6 (uncloud),
-  what it taught, and the pointers for the cloud stage, for whoever picks it up next
-  (`docs/handoff-m6.md` and `docs/handoff-m5.md` are the same for M5 -> M6 and M4 -> M5).
+- [`docs/handoff-m8.md`](docs/handoff-m8.md) — where development stands after M7 (the AWS bed),
+  what it taught, and the pointers for what comes next, for whoever picks it up next
+  (`docs/handoff-m7.md`, `docs/handoff-m6.md` and `docs/handoff-m5.md` are the earlier ones).
 - [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
   status; what each driver verb does under KubeRay and under uncloud.
@@ -59,11 +64,12 @@ cluster scenarios with pods as Ray nodes on OrbStack's Kubernetes through a seco
 `deploy/drivers/kuberay.sh` (`DISTRAINER_DRIVER=kuberay`), and M6 (PR #15): the bucket scenarios
 on an uncloud cluster of OrbStack machines through a third driver, `deploy/drivers/uncloud.sh`
 (`DISTRAINER_DRIVER=uncloud`), with the scenario runner reading the audit trail from the object
-store when nothing is shared. Running the same cluster on cloud VMs with S3 is the next stage,
-pointed at in `docs/handoff-m7.md`.
+store when nothing is shared. M7 ran the same cluster on three EC2 instances with an S3 bucket as
+the store (`deploy/uncloud/aws.sh`, tutorial 5); `docs/handoff-m8.md` says what it taught and
+what comes next.
 Milestones are in the spec (section 12);
 development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
-issues #1 to #7 and #14.
+issues #1 to #7, #14 and #16.
 
 ## Quick start
 

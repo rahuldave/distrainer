@@ -158,6 +158,8 @@ COMMON_VERBS = [  # the contract of deploy/driver.sh that every driver implement
     "kill-head", "stop-worker", "cp-from-head", "shared", "endpoint", "mkbucket", "ps", "logs",
 ]  # fmt: skip
 MACHINES_SH = ROOT / "deploy" / "uncloud" / "machines.sh"
+AWS_SH = ROOT / "deploy" / "uncloud" / "aws.sh"
+EXAMPLES = ROOT / "examples" / "hello_blocks"
 INTERPOLATION = re.compile(
     r"\$\{([A-Z0-9_]+)(?::([-?])([^}]*))?\}"
 )  # ${VAR}, ${VAR:-dflt}, ${VAR:?msg}
@@ -262,3 +264,211 @@ def test_uncloud_driver_and_bootstrap_agree_on_their_defaults():
         "DISTRAINER_UNCLOUD_MACHINES:-uc1 uc2 uc3",
     ):
         assert setting in driver and setting in machines, setting
+
+
+def test_uncloud_bootstraps_share_the_verbs_the_driver_dispatches():
+    """machines.sh (OrbStack) and aws.sh (EC2) answer the same verbs, and the driver's machines-*
+    verbs forward exactly those; aws.sh adds the bucket verbs."""
+    base = {"up", "status", "stop", "start", "destroy"}
+    assert case_labels(MACHINES_SH) == base
+    assert case_labels(AWS_SH) == base | {"bucket", "bucket-rm", "env"}
+    driver = UNCLOUD_DRIVER.read_text()
+    (label,) = [
+        lb for lb in re.findall(r"^  ([a-z|-]+)\)", driver, re.MULTILINE) if "machines-" in lb
+    ]
+    assert set(label.split("|")) == {f"machines-{v}" for v in base}
+    assert "DISTRAINER_UNCLOUD_PROVIDER:-orbstack" in driver
+    for script in (MACHINES_SH, AWS_SH):  # the shared helpers come from one place
+        assert "common.sh" in script.read_text()
+    header = (ROOT / "deploy" / "driver.sh").read_text()
+    assert "machines-stop | machines-start" in header
+
+
+def test_uncloud_driver_endpoint_names_the_store_and_reads_the_bootstrap_env():
+    """`endpoint` prints minio= for MinIO in the cluster and s3= for a store outside it (what the
+    runner's store_endpoint parses); the bootstrap's env file and ssh options are honoured."""
+    driver = UNCLOUD_DRIVER.read_text()
+    assert "minio=http://$ip:9000" in driver and "s3=$S3_ENDPOINT" in driver
+    assert (
+        "http://minio:9000)" in driver
+    )  # the compose default means MinIO, anything else is outside
+    assert "DISTRAINER_ENV_FILE" in driver and "DISTRAINER_UNCLOUD_SSH_OPTS" in driver
+    for other in (ROOT / "deploy" / "drivers").glob("*.sh"):  # the caller wins over .env everywhere
+        text = other.read_text()
+        assert 'set -a; . "$root/.env"; set +a; eval "$caller_env"' in text, other.name
+        if other.name != "uncloud.sh":  # the env file belongs to an uncloud bed
+            assert "DISTRAINER_ENV_FILE" not in text.split("caller_env=")[1], other.name
+    runner = (ROOT / "integration_tests" / "cluster" / "run_scenarios.py").read_text()
+    assert 'for kind in ("minio", "s3")' in runner and "DISTRAINER_ENV_FILE" in runner
+    env_example = (ROOT / ".env.example").read_text()
+    for name in (
+        "DISTRAINER_ENV_FILE",
+        "DISTRAINER_UNCLOUD_SSH_OPTS",
+        "DISTRAINER_UNCLOUD_PROVIDER",
+    ):
+        assert name in env_example, name
+
+
+def test_aws_bootstrap_writes_what_the_driver_and_the_runner_read():
+    text = AWS_SH.read_text()
+    for line in (
+        "DISTRAINER_UNCLOUD_PROVIDER=aws",
+        "DISTRAINER_UNCLOUD_CONTEXT=$ctx",
+        "DISTRAINER_UNCLOUD_SSH=%s",
+        'DISTRAINER_UNCLOUD_SSH_OPTS=\\"-F $state/ssh_config\\"',
+        "DISTRAINER_UNCLOUD_HOST_PREFIX=$cidr",
+        "DISTRAINER_UNCLOUD_HEAD_ADDRESS=$head_pub",
+        "S3_ENDPOINT=https://s3.$region.amazonaws.com",
+        "S3_ACCESS_KEY=$ak",
+    ):
+        assert line in text, line
+    assert "--public-ip none" in text and '--wg-endpoint "$priv:$wg_port"' in text  # private peers
+    assert (
+        'allow "$1" udp "$wg_port" "$wg_port" "$1"' in text
+    )  # WireGuard from the group itself only
+    assert "HttpTokens=required" in text
+    assert (
+        "DISTRAINER_UNCLOUD_CONTEXT:-distrainer-aws" in text
+    )  # never the OrbStack context by accident
+
+
+def strip_storage(cfg: dict) -> dict:
+    """A harness config without what names its bucket: storage.endpoint/region, and the bucket in
+    storage_path / store_root (the prefix after the bucket stays)."""
+    out = yaml.safe_load(yaml.safe_dump(cfg))
+    for key in ("storage_path", "store_root"):
+        out[key] = out[key].split("/", 1)[1]
+    out["storage"] = {k: v for k, v in out["storage"].items() if k not in ("endpoint", "region")}
+    return out
+
+
+def test_s3_harness_configs_are_their_minio_twins_on_another_bucket():
+    """harness-s3.yaml and harness-stream-s3.yaml differ from the MinIO configs only in the
+    bucket, the endpoint and the region, and the two S3 configs agree on all three."""
+    pairs = [
+        ("harness-minio.yaml", "harness-s3.yaml"),
+        ("harness-stream-minio.yaml", "harness-stream-s3.yaml"),
+    ]
+    buckets, endpoints = set(), set()
+    for minio, s3 in pairs:
+        m, x = (yaml.safe_load((EXAMPLES / f).read_text()) for f in (minio, s3))
+        assert strip_storage(m) == strip_storage(x), (minio, s3)
+        assert m["storage"]["endpoint"] == "http://minio:9000" and x["storage"][
+            "endpoint"
+        ].startswith("https://")
+        assert x["storage"]["region"] not in (None, "auto")  # a real region for SigV4
+        buckets.add(x["store_root"].split("/")[0])
+        buckets.add(x["storage_path"].split("/")[0])
+        endpoints.add((x["storage"]["endpoint"], x["storage"]["region"]))
+    assert len(buckets) == 1 and len(endpoints) == 1
+    aws = AWS_SH.read_text()  # the bootstrap's bucket default is read from harness-s3.yaml
+    assert "harness-s3.yaml" in aws and "store_root:" in aws
+
+
+def run_uncloud_driver(tmp_path, verb: str, env: dict, dotenv: str = "", env_file: str = "") -> str:
+    """The real uncloud driver in a scratch tree (its .env and .harness/aws/env), for verbs that
+    need no cluster: `endpoint` with DISTRAINER_UNCLOUD_HEAD_ADDRESS set calls neither uc nor
+    orb."""
+    import os
+    import shutil
+    import subprocess
+
+    root = tmp_path / "repo"
+    (root / "deploy" / "drivers").mkdir(parents=True, exist_ok=True)
+    (root / "deploy" / "uncloud").mkdir(exist_ok=True)
+    (root / ".harness" / "aws").mkdir(parents=True, exist_ok=True)
+    shutil.copy(UNCLOUD_DRIVER, root / "deploy" / "drivers" / "uncloud.sh")
+    shutil.copy(MACHINES_SH, root / "deploy" / "uncloud" / "machines.sh")
+    for path, text in ((root / ".env", dotenv), (root / ".harness" / "aws" / "env", env_file)):
+        if text:
+            path.write_text(text)
+        else:
+            path.unlink(missing_ok=True)
+    base = {"PATH": os.environ["PATH"], "HOME": os.environ.get("HOME", "/tmp")}
+    base.update(
+        {
+            "DISTRAINER_UNCLOUD_HEAD_ADDRESS": "1.2.3.4",
+            "DISTRAINER_UNCLOUD_HOST_PREFIX": "10.0.0.0/8",
+        }
+    )
+    proc = subprocess.run(
+        ["bash", str(root / "deploy" / "drivers" / "uncloud.sh"), verb],
+        env={**base, **env}, capture_output=True, text=True,
+    )  # fmt: skip
+    assert proc.returncode == 0, proc.stderr
+    return proc.stdout
+
+
+def test_uncloud_driver_endpoint_prints_minio_or_the_external_store(tmp_path):
+    for value in ("", "http://minio:9000", "http://minio:9000/", "http://minio.internal:9000"):
+        env = {"S3_ENDPOINT": value} if value else {}
+        out = run_uncloud_driver(tmp_path, "endpoint", env)
+        assert (
+            out
+            == "dashboard=http://1.2.3.4:8265\nminio=http://1.2.3.4:9000 console=http://1.2.3.4:9001\n"
+        ), value
+    out = run_uncloud_driver(
+        tmp_path, "endpoint", {"S3_ENDPOINT": "https://s3.us-east-1.amazonaws.com"}
+    )
+    assert out == "dashboard=http://1.2.3.4:8265\ns3=https://s3.us-east-1.amazonaws.com\n"
+
+
+def test_uncloud_driver_env_precedence_is_caller_then_env_file_then_dotenv(tmp_path):
+    """.env names the bootstrap's env file, which wins over .env; what the caller's environment
+    sets wins over both (so an OrbStack command stays OrbStack while .env points at AWS)."""
+    dotenv = "S3_ENDPOINT=http://minio:9000\nDISTRAINER_ENV_FILE=.harness/aws/env\n"
+    env_file = (
+        "S3_ENDPOINT=https://s3.us-east-1.amazonaws.com\nDISTRAINER_UNCLOUD_HEAD_ADDRESS=5.6.7.8\n"
+    )
+    out = run_uncloud_driver(tmp_path, "endpoint", {}, dotenv, env_file)
+    assert out.splitlines() == [
+        "dashboard=http://1.2.3.4:8265",
+        "s3=https://s3.us-east-1.amazonaws.com",
+    ]
+    out = run_uncloud_driver(
+        tmp_path, "endpoint", {"S3_ENDPOINT": "http://minio:9000"}, dotenv, env_file
+    )
+    assert "minio=http://1.2.3.4:9000" in out  # the caller said MinIO
+    aws_file = "DISTRAINER_UNCLOUD_PROVIDER=aws\n" + env_file
+    out = run_uncloud_driver(tmp_path, "endpoint", {}, dotenv, aws_file)
+    assert "s3=https://s3.us-east-1.amazonaws.com" in out
+    out = run_uncloud_driver(  # another bed pinned by the caller: the AWS file is not read
+        tmp_path, "endpoint", {"DISTRAINER_UNCLOUD_PROVIDER": "orbstack"}, dotenv, aws_file
+    )
+    assert "minio=http://1.2.3.4:9000" in out
+    import subprocess
+
+    proc = subprocess.run(  # a pointer to nothing is an error, not a fallback
+        ["bash", str(tmp_path / "repo" / "deploy" / "drivers" / "uncloud.sh"), "endpoint"],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "DISTRAINER_ENV_FILE": "nowhere",
+            "DISTRAINER_UNCLOUD_HOST_PREFIX": "10.0.0.0/8",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 2 and "DISTRAINER_ENV_FILE=nowhere" in proc.stderr
+
+
+def test_aws_bootstrap_admits_ssh_only_and_deletes_only_what_it_tagged():
+    """The gpa findings of the cloud stage: no dashboard rule (an ssh tunnel instead), stale rules
+    revoked on up and start, the allowed CIDR a narrow IPv4 prefix, the bucket tagged at creation
+    or adopted explicitly and bucket-rm refusing anything else, credential files at mode 600."""
+    text = AWS_SH.read_text()
+    rules = [ln for ln in text.splitlines() if ln.strip().startswith('allow "$1"')]
+    assert rules == [
+        '  allow "$1" tcp 22 22 "$2" "from this Mac"',
+        '  allow "$1" udp "$wg_port" "$wg_port" "$1" "WireGuard between the members"',
+    ]
+    assert "$2 != c || $3 != 22" in text  # another address or another port: revoked
+    assert text.count('ensure_rules "$sg"') == 2  # up and start
+    assert "2[4-9]|3[0-2])" in text and "*[!0-9.]*" in text  # /24 at the widest, dotted quads only
+    assert text.count("put-bucket-tagging") == 2  # the adopt branch and the create branch
+    exists_branch = text.split('echo "bucket $bucket exists')[0].rsplit(
+        "if awsc s3api head-bucket", 1
+    )[1]
+    assert "DISTRAINER_AWS_ADOPT_BUCKET" in text and 'owner="$(bucket_owner' in exists_branch
+    assert 'owner="$(bucket_owner "$bucket")"' in text.split("bucket-rm)")[1]  # the guard
+    assert text.count("chmod 600") >= 3
+    assert "S3_SECRET_KEY=\\).*/\\1<in the file>" in text  # `env` masks the secret

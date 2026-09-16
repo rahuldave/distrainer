@@ -21,7 +21,11 @@
 # Worker index I (kill-worker, stop-worker) counts worker pods in creation order, 1-based.
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; fi
+# .env, with what the caller's environment sets winning over it (docker compose's own
+# precedence; the exported variables are restored after the file). A DISTRAINER_ENV_FILE in
+# .env belongs to an uncloud bed and is read by that driver only.
+caller_env="$(export -p)"
+if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; eval "$caller_env"; fi
 ns="${DISTRAINER_K8S_NAMESPACE:-distrainer}"
 ctx="${DISTRAINER_K8S_CONTEXT:-orbstack}"   # never the current context by accident: down/nuke delete things
 cluster="distrainer"

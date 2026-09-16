@@ -406,17 +406,20 @@ def check_recovery(
     expected_world_sizes: Sequence[int] | None = None,
     min_attempts: int = 2,
     expected_segments: int | None = None,
+    lag_intervals: int = 0,
 ) -> list[str]:
     """Failure / resize scenarios (S2, S3, S4): several attempts, one log.
 
     Per attempt the dealing rule holds for that attempt's world size. Attempt ``i`` starts at a
     position that is ``<=`` the position after the last one attempt ``i-1`` consumed (no gap),
     lies on a step boundary of the new world size, and the replayed tail is bounded by
-    ``2 * every_k * n_old + n_new`` blocks: one checkpoint interval since the last checkpoint the
-    controller registered, plus one more that may still have been in flight (ASYNC upload and
-    the controller's poll) when the group died, plus the round-down remainder. Over all attempts
-    the union of positions covers every segment touched, from position 0 to the end of the last
-    segment, with no gaps.
+    ``(2 + lag_intervals) * every_k * n_old + n_new`` blocks: one checkpoint interval since the
+    last checkpoint the controller registered, plus one more that may still have been in flight
+    (ASYNC upload and the controller's poll) when the group died, plus the round-down remainder;
+    ``lag_intervals`` more when the controller is known to register checkpoints behind the
+    workers (a store outside the cluster: every registration is S3 round trips). Over all
+    attempts the union of positions covers every segment touched, from position 0 to the end of
+    the last segment, with no gaps.
     """
     if not records:
         return ["no audit records"]
@@ -451,7 +454,7 @@ def check_recovery(
                 f"attempt {cur} starts at {first_cur}: not a step boundary for n={n_new}"
             )
         replayed = sum(1 for r in p_recs if r.position >= first_cur)
-        bound = 2 * (every_k or 1) * n_old + n_new
+        bound = (2 + lag_intervals) * (every_k or 1) * n_old + n_new
         if replayed > bound:
             problems.append(f"attempt {cur} replays {replayed} positions (> {bound})")
     positions = sorted({r.position for r in records})

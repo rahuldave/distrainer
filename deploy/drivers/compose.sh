@@ -3,7 +3,11 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # compose interpolates variables from $root/.env; read the same file so host paths agree
-if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; fi
+# .env, with what the caller's environment sets winning over it (docker compose's own
+# precedence; the exported variables are restored after the file). A DISTRAINER_ENV_FILE in
+# .env belongs to an uncloud bed and is read by that driver only.
+caller_env="$(export -p)"
+if [ -f "$root/.env" ]; then set -a; . "$root/.env"; set +a; eval "$caller_env"; fi
 compose=(docker compose --project-directory "$root" -f "$root/deploy/docker-compose.yml")
 profiles=()
 if [ "${DISTRAINER_MINIO:-0}" = "1" ]; then profiles=(--profile minio); fi

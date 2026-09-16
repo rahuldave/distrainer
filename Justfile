@@ -65,7 +65,16 @@ kuberay-operator:
 # uncloud driver (DISTRAINER_DRIVER=uncloud): create the OrbStack machines and the uncloud cluster once
 # (deploy/uncloud/machines.sh; `machines-destroy` removes them), then `just build` pushes the image
 uncloud-machines:
-  DISTRAINER_DRIVER=uncloud deploy/driver.sh machines-up
+  DISTRAINER_DRIVER=uncloud DISTRAINER_UNCLOUD_PROVIDER=orbstack deploy/driver.sh machines-up
+
+# the same cluster on EC2 (deploy/uncloud/aws.sh; `aws-bucket` makes the S3 bucket and its IAM user, and
+# .env needs DISTRAINER_ENV_FILE=.harness/aws/env so the driver reads what the script wrote); `machines-stop`
+# parks the instances, `machines-destroy` removes them
+aws-machines:
+  DISTRAINER_DRIVER=uncloud DISTRAINER_UNCLOUD_PROVIDER=aws deploy/driver.sh machines-up
+
+aws-bucket:
+  deploy/uncloud/aws.sh bucket
 
 mkbucket:
   DISTRAINER_MINIO=1 deploy/driver.sh mkbucket distrainer
