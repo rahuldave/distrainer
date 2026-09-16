@@ -595,9 +595,7 @@ def test_stop_mode_keeps_pre_pulled_pods_and_scale_up_starts_them(bed):
     assert again.actions("start") == ["w3"] and again.posts() == [] and "no pull" in out
     # down in stop mode stops every running pod and terminates nothing
     out = bed.run("down", env={"DISTRAINER_RUNPOD_DOWN": "stop"}).stdout
-    assert (
-        sorted(bed.actions("stop")) == ["headid", "w1", "w2", "w3", "w3"] and bed.terminated() == []
-    )
+    assert sorted(bed.actions("stop")) == ["headid", "w1", "w2", "w3"] and bed.terminated() == []
     assert "keeps its disk" in out
 
 
