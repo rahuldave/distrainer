@@ -277,6 +277,8 @@ exposed; `endpoint` prints the tunnel to open (`ssh -L 8265:127.0.0.1:8265`). `l
 fetches a pod's log from the API; `cost` prints the cluster's hourly total and the account's
 pod billing.
 
+`docs/runpod-gotchas.md` is the running list of what bit on the pods.
+
 The driver is tested against a stub of the API (`tests/test_runpod_driver.py`: a fake `curl`
 answering from canned JSON, so no account is touched): the create bodies, the guard and the
 fall-through on a capacity error, `down` sparing other people's pods, `scale`, `kill-worker`

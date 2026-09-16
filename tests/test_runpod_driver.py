@@ -65,6 +65,7 @@ def pod(name, pid, marker="distrainer", head=None, status="RUNNING", dc="EU-RO-1
             "internalDns": f"{pid}.runpod.internal",
         },
         "ssh": {"direct": {"host": "1.2.3.4", "port": 10341}, "proxy": None},
+        "runtime": {"uptime": 5} if status == "RUNNING" else None,  # null while the image pulls
     }
 
 

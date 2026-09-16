@@ -143,15 +143,18 @@ create_pod() {
   return 1
 }
 
-# wait_running ID [need_ssh]: until the pod is RUNNING with its global-networking address (and, for
-# the head, its published ssh port); DISTRAINER_RUNPOD_START_TIMEOUT seconds at most
+# wait_running ID [need_ssh]: until the pod's container runs (the API says RUNNING from the moment
+# the pod is rented, while the image still pulls: `runtime` appears only once the container is up)
+# with its global-networking address and, for the head, its published ssh port;
+# DISTRAINER_RUNPOD_START_TIMEOUT seconds at most
 wait_running() {
-  local id="$1" need_ssh="${2:-0}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port
+  local id="$1" need_ssh="${2:-0}" budget="${DISTRAINER_RUNPOD_START_TIMEOUT:-1500}" waited=0 pod st port up
   while :; do
     pod="$(api GET "/pods/$id")" || return 1
     st="$(printf '%s' "$pod" | jq -r '.status')"
     port="$(printf '%s' "$pod" | jq -r '.ssh.direct.port // empty')"
-    if [ "$st" = "RUNNING" ] && [ "$(printf '%s' "$pod" | jq -r '.globalNetworking.ip // empty')" != "" ] \
+    up="$(printf '%s' "$pod" | jq -r '.runtime.uptime // empty')"
+    if [ "$st" = "RUNNING" ] && [ -n "$up" ] && [ "$(printf '%s' "$pod" | jq -r '.globalNetworking.ip // empty')" != "" ] \
        && { [ "$need_ssh" = "0" ] || [ -n "$port" ]; }; then
       printf '%s\n' "$pod"; return 0
     fi
