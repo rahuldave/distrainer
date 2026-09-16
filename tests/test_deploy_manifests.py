@@ -465,6 +465,13 @@ def test_aws_bootstrap_admits_ssh_only_and_deletes_only_what_it_tagged():
     assert text.count('ensure_rules "$sg"') == 2  # up and start
     assert "2[4-9]|3[0-2])" in text and "*[!0-9.]*" in text  # /24 at the widest, dotted quads only
     assert text.count("put-bucket-tagging") == 2  # the adopt branch and the create branch
+    ecr_rm = text.split("  ecr-rm)")[1].split("  env)")[0]  # the repository: the same rule
+    assert 'owner="$(repo_owner "$arn")"' in ecr_rm and "refusing to delete it" in ecr_rm
+    assert "need aws" in ecr_rm
+    ecr = text.split("  ecr)")[1].split("  ecr-rm)")[0]
+    assert (
+        "tag-resource" in ecr and "Key=distrainer:cluster,Value=$ctx" in ecr
+    )  # tagged when made or adopted
     exists_branch = text.split('echo "bucket $bucket exists')[0].rsplit(
         "if awsc s3api head-bucket", 1
     )[1]
@@ -574,3 +581,29 @@ def test_uncloud_build_pushes_a_registry_image_once_and_every_machine_pulls(tmp_
             for c in pulls
         ), m
         assert any(f"ubuntu@{m} sudo -n docker pull {image} <<< " in c for c in pulls), m
+
+
+def test_uncloud_build_tells_a_registry_image_by_dockers_rule(tmp_path):
+    """A slash alone does not make a registry image: the first component needs a dot, a colon
+    or `localhost`. A non-ECR registry gets no token and no logins, only the push and the pulls."""
+    calls = run_build(tmp_path, "myorg/distrainer:local")
+    assert calls[0].startswith("docker build -t myorg/distrainer:local") and calls[-1].startswith(
+        "uc image push"
+    )
+    calls = run_build(tmp_path, "ghcr.io/rahuldave/distrainer:latest")
+    assert not any("get-login-password" in c or "docker login" in c for c in calls)
+    assert any(
+        c.startswith("docker buildx build --builder distrainer --platform linux/amd64,linux/arm64")
+        for c in calls
+    )
+    assert (
+        sum(1 for c in calls if "sudo -n docker pull ghcr.io/rahuldave/distrainer:latest" in c) == 2
+    )
+    calls = run_build(
+        tmp_path, "localhost:5000/distrainer:dev", {"DISTRAINER_PLATFORMS": "linux/arm64"}
+    )
+    assert any("--platform linux/arm64 -t localhost:5000/distrainer:dev --push" in c for c in calls)
+    calls = run_build(
+        tmp_path, "distrainer:local", {"DISTRAINER_PLATFORMS": "linux/amd64"}
+    )  # recipe C
+    assert calls[0].startswith("docker build --platform linux/amd64 -t distrainer:local")

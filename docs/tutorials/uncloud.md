@@ -216,7 +216,7 @@ driver: S2 149 s, S3 146 s, S4 210 s, S8 125 s, S9 254 s, S10 205 s, S11s3 161 s
 Everything above is OrbStack-specific only in `deploy/uncloud/machines.sh` (how the machines
 come to exist and how ssh reaches them). [Tutorial 5](aws.md) runs the same driver, compose
 file and scenarios on three EC2 instances with an S3 bucket as the store: `deploy/uncloud/aws.sh`
-is the twin of `machines.sh` (the same verbs plus `bucket` and `bucket-rm`, driven through the
+is the twin of `machines.sh` (the same verbs plus `bucket`, `bucket-rm`, `ecr` and `ecr-rm`, driven through the
 `machines-*` verbs under `DISTRAINER_UNCLOUD_PROVIDER=aws`), it writes one env file with the
 context, the machines, the ssh route and the S3 settings that the driver and the runner read
 through `DISTRAINER_ENV_FILE`, and with `S3_ENDPOINT` naming a store outside the cluster the
@@ -232,9 +232,10 @@ just integration S2
 deploy/driver.sh machines-stop        # or machines-destroy
 ```
 
-Tutorial 5 has the account prerequisites (an IAM user with two policies, the CLI, a default
-VPC, a zone with Graviton), what the bootstrap builds and why, the numbers, the bill, and the
-things that went wrong the first time. Any other S3-compatible store and any other set of
+Tutorial 5 has the account prerequisites (an IAM user with three policies, the CLI, a default
+VPC, a zone with the instance types), the arm64 and the x86 bed, the private image repository
+and the three ways to build and ship the image, what the bootstrap builds and why, the numbers,
+the bill, and the things that went wrong the first time. Any other S3-compatible store and any other set of
 machines work the same way; its last section says how.
 
 ## 10. When something is off

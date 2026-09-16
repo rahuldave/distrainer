@@ -116,8 +116,10 @@ cat .harness/aws/env           # now also DISTRAINER_IMAGE=<account>.dkr.ecr.us-
 The machines need no AWS credentials for it: uncloud has no registry login of its own, so
 `build` takes a twelve-hour token from your CLI (`aws ecr get-login-password`), logs the Mac's
 Docker in, and after the push logs each machine in over the ssh route with the same token and
-pulls. The repository costs 0.10 USD per GB-month, cents here; `deploy/uncloud/aws.sh ecr-rm`
-deletes it with its images. The arm64 bed works without a repository (section 7, recipe A);
+pulls (each machine's Docker keeps that token for its twelve hours, in root's Docker config).
+The repository is tagged like the bucket, and `deploy/uncloud/aws.sh ecr-rm` deletes only a
+tagged one, with its images (`DISTRAINER_AWS_ADOPT=1` adopts an existing untagged bucket or
+repository that is yours). It costs 0.10 USD per GB-month, cents here. The arm64 bed works without a repository (section 7, recipe A);
 the x86 bed wants one (recipe B), because a cross-built image would otherwise have to be
 pushed three times from the Mac (recipe C).
 
@@ -131,9 +133,9 @@ pushed three times from the Mac (recipe C).
 | running cost | about 0.15 USD per hour for the three with their public addresses | about 0.18 USD per hour |
 | why | the cheapest bed; the image is the local one | the architecture of most clouds and of GPU hosts (RunPod); one image for here and there |
 
-Put the settings in `.env` (they win over the env file the bootstrap wrote) before `just
-aws-machines`. One bed at a time: both use the machine names `aws1`, `aws2`, `aws3` and the
-uncloud context `distrainer-aws`. Switching is `deploy/driver.sh machines-destroy`, the new
+Put the settings in `.env` before `just aws-machines` (for the bootstrap, `.env` wins over
+the env file it wrote; the shell wins over both). One bed at a time: both use the machine names
+`aws1`, `aws2`, `aws3` and the uncloud context `distrainer-aws`. Switching is `deploy/driver.sh machines-destroy`, the new
 settings in `.env`, `just aws-machines` again (five minutes), and `just build` unless the image
 is already in the repository for that architecture. Both beds ran in us-east-1b.
 
@@ -173,16 +175,22 @@ find exactly these:
   `endpoint`.
 
 `uc` runs the system `ssh`, so the instances' host keys are accepted into `~/.ssh/known_hosts`
-(a stale entry for a reused address is dropped first). Precedence: what your shell exports wins
-over both files, and the env file wins over `.env`; only the uncloud driver and the scenario
-runner read the env file, and a command that pins another bed (`just uncloud-machines` sets
+(a stale entry for a reused address is dropped first). Precedence, two rules for two readers:
+for the **driver and the scenario runner**, what your shell exports wins, then the env file,
+then `.env` (the env file records what the bootstrap settled, so it overrides your `.env`
+defaults); for the **bootstrap itself**, the shell, then `.env`, then the env file (your
+settings direct what it builds). Only the uncloud driver and the runner read the env file, and
+a command that pins another bed (`just uncloud-machines` sets
 `DISTRAINER_UNCLOUD_PROVIDER=orbstack`) skips it, so the OrbStack bed stays reachable while
-`.env` points at AWS.
+`.env` points at AWS. One consequence: once `just aws-ecr` has run, the env file names the
+registry image, so recipes A and C of section 7 need `DISTRAINER_IMAGE=distrainer:local`
+exported in the shell (or `ecr-rm`).
 
 ## 7. Building and shipping the image
 
 One Dockerfile, three recipes. `just build` runs the right one from `DISTRAINER_IMAGE` (a local
-name, or a registry image) and `DISTRAINER_PLATFORMS`:
+name, or a registry image: by Docker's rule, a first path component with a dot, a colon or
+`localhost`; `myorg/distrainer:local` is still a local name) and `DISTRAINER_PLATFORMS`:
 
 - **A. A local arm64 image for the Graviton bed** (`DISTRAINER_IMAGE=distrainer:local`, the
   default; no repository): `docker build` for the Mac's own architecture, then `uc image push`

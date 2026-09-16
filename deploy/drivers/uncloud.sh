@@ -15,10 +15,13 @@
 #     to every machine with `uc image push`; a registry image (host/name:tag, what the AWS
 #     bootstrap's `ecr` verb records) is built once for DISTRAINER_PLATFORMS (default
 #     linux/amd64,linux/arm64: one manifest, every machine pulls its own architecture) with a
-#     docker-container buildx builder, pushed, and then pulled by every machine in-region over
-#     the ssh route with the Mac's registry token (uncloud has no registry login; an ECR token
-#     lasts twelve hours, `build` obtains a fresh one). No bind mounts: a code edit needs `build`
-#     again either way.
+#     docker-container buildx builder (DISTRAINER_BUILDER, default `distrainer`, created when
+#     missing), pushed, and then pulled by every machine in-region over the ssh route with the
+#     Mac's registry token (uncloud has no registry login; an ECR token lasts twelve hours,
+#     `build` obtains a fresh one, and each machine's Docker keeps it that long). "Registry
+#     image" follows Docker's rule: the first path component holds a dot, a colon or is
+#     `localhost`; `myorg/distrainer:local` is a local name. No bind mounts: a code edit needs
+#     `build` again either way.
 #   - node death is `docker kill` over ssh on the machine that runs the container (uncloud has no
 #     per-container kill); the container is started again after DISTRAINER_RESTART_DELAY seconds
 #     as with compose. The ssh route to a machine is DISTRAINER_UNCLOUD_SSH, a printf template
@@ -180,12 +183,20 @@ need_cluster() {
 verb="${1:-}"; shift || true
 case "$verb" in
   build)
-    case "$image" in
-      */*)   # a registry image: build once for every platform, push, then every machine pulls
+    # Docker's own rule for "the first path component names a registry": a dot, a colon, or
+    # `localhost`; `myorg/distrainer:local` is a local name, `ghcr.io/x/y:t` and `localhost:5000/x` are not
+    kind=local
+    case "$image" in */*) case "${image%%/*}" in *.*|*:*|localhost) kind=registry ;; esac ;; esac
+    case "$kind" in
+      registry)   # build once for every platform, push, then every machine pulls
         registry="${image%%/*}"
         platforms="${DISTRAINER_PLATFORMS:-linux/amd64,linux/arm64}"
         builder="${DISTRAINER_BUILDER:-distrainer}"   # multi-platform pushes need the docker-container driver
-        if ! docker buildx inspect "$builder" >/dev/null 2>&1; then
+        if docker buildx inspect "$builder" >/dev/null 2>&1; then
+          if ! docker buildx inspect "$builder" 2>/dev/null | grep -q "Driver: *docker-container"; then
+            echo "buildx builder '$builder' is not on the docker-container driver: remove it (docker buildx rm $builder) or set DISTRAINER_BUILDER" >&2; exit 2
+          fi
+        else
           docker buildx create --name "$builder" --driver docker-container --bootstrap >/dev/null
         fi
         token=""
@@ -200,6 +211,7 @@ case "$verb" in
         need_cluster
         # every machine pulls in-region (a multi-arch manifest resolves to the machine's architecture)
         pids=(); logs="$(mktemp -d)"
+        trap 'rm -rf "$logs"' EXIT
         for m in "${machines[@]}"; do
           {
             if [ -n "$token" ]; then printf '%s' "$token" | machine_ssh "$m" docker login --username AWS --password-stdin "$registry"; fi

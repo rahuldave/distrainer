@@ -115,6 +115,12 @@ bucket_owner() {   # bucket_owner BUCKET -> the distrainer:cluster tag, empty wh
   out="$(awsc s3api get-bucket-tagging --bucket "$1" --query 'TagSet[?Key==`"distrainer:cluster"`].Value' 2>/dev/null)" || out=""
   printf '%s' "$out" | tr -d '[:space:]'
 }
+repo_owner() {   # repo_owner ARN -> the distrainer:cluster tag of an ECR repository, empty when none; never a failure
+  local out
+  out="$(awsc ecr list-tags-for-resource --resource-arn "$1" --query 'tags[?Key==`"distrainer:cluster"`].Value' 2>/dev/null)" || out=""   # ECR's tag fields are capitalised
+  printf '%s' "$out" | tr -d '[:space:]'
+}
+adopt_allowed() { [ "${DISTRAINER_AWS_ADOPT:-${DISTRAINER_AWS_ADOPT_BUCKET:-0}}" = "1" ]; }   # "an existing one is mine to tag"
 bucket_name() {   # DISTRAINER_AWS_BUCKET, else the bucket harness-s3.yaml stores in
   if [ -n "${DISTRAINER_AWS_BUCKET:-}" ]; then echo "$DISTRAINER_AWS_BUCKET"; return; fi
   awk '$1 == "store_root:" {split($2, a, "/"); print a[1]; exit}' "$root/examples/hello_blocks/harness-s3.yaml"
@@ -446,11 +452,11 @@ case "$verb" in
       # says it is yours to tag): the name comes from an editable config, and bucket-rm deletes by tag
       owner="$(bucket_owner "$bucket")"
       if [ "$owner" = "$ctx" ]; then echo "bucket $bucket exists (tagged distrainer:cluster=$ctx)"
-      elif [ -z "$owner" ] && [ "${DISTRAINER_AWS_ADOPT_BUCKET:-0}" = "1" ]; then
+      elif [ -z "$owner" ] && adopt_allowed; then
         awsc s3api put-bucket-tagging --bucket "$bucket" --tagging "TagSet=[{Key=distrainer:cluster,Value=$ctx}]"
         echo "bucket $bucket exists; adopted (tagged distrainer:cluster=$ctx)"
       else
-        die "bucket $bucket exists and is not tagged distrainer:cluster=$ctx (${owner:-no tag}): name another bucket in harness-s3.yaml, or DISTRAINER_AWS_ADOPT_BUCKET=1 if it is yours"
+        die "bucket $bucket exists and is not tagged distrainer:cluster=$ctx (${owner:-no tag}): name another bucket in harness-s3.yaml, or DISTRAINER_AWS_ADOPT=1 if it is yours"
       fi
     else
       if [ "$region" = "us-east-1" ]; then awsc s3api create-bucket --bucket "$bucket" >/dev/null
@@ -506,9 +512,18 @@ EOP
     write_env ;;
   ecr)
     need aws "install the AWS CLI"
-    uri="$(awsc ecr describe-repositories --repository-names "$ecr_repo" --query 'repositories[0].repositoryUri' 2>/dev/null)" || uri=""
+    out="$(awsc ecr describe-repositories --repository-names "$ecr_repo" --query 'repositories[0].[repositoryUri, repositoryArn]' 2>/dev/null | tr '\t' ' ')" || out=""
+    read -r uri arn <<< "$out"
     if [ -n "$uri" ] && [ "$uri" != "None" ]; then
-      echo "repository $ecr_repo exists ($uri)"
+      # an existing repository is used only when this script tagged it, or DISTRAINER_AWS_ADOPT=1 says it is yours
+      owner="$(repo_owner "$arn")"
+      if [ "$owner" = "$ctx" ]; then echo "repository $ecr_repo exists ($uri, tagged distrainer:cluster=$ctx)"
+      elif [ -z "$owner" ] && adopt_allowed; then
+        awsc ecr tag-resource --resource-arn "$arn" --tags "Key=distrainer:cluster,Value=$ctx"
+        echo "repository $ecr_repo exists; adopted ($uri, tagged distrainer:cluster=$ctx)"
+      else
+        die "repository $ecr_repo exists and is not tagged distrainer:cluster=$ctx (${owner:-no tag}): set DISTRAINER_AWS_ECR_REPOSITORY, or DISTRAINER_AWS_ADOPT=1 if it is yours"
+      fi
     else
       uri="$(awsc ecr create-repository --repository-name "$ecr_repo" --image-tag-mutability MUTABLE \
         --encryption-configuration encryptionType=AES256 --tags "Key=distrainer:cluster,Value=$ctx" --query 'repository.repositoryUri')"
@@ -516,19 +531,25 @@ EOP
     fi
     mkdir -p "$state"
     cat > "$state/ecr-lifecycle.json" <<EOJ
-{"rules": [{"rulePriority": 1, "description": "keep the last 5 images",
-  "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 5}, "action": {"type": "expire"}}]}
+{"rules": [{"rulePriority": 1, "description": "keep the last 12 manifests (a two-platform push is three: the index and its halves)",
+  "selection": {"tagStatus": "any", "countType": "imageCountMoreThan", "countNumber": 12}, "action": {"type": "expire"}}]}
 EOJ
     awsc ecr put-lifecycle-policy --repository-name "$ecr_repo" --lifecycle-policy-text "file://$state/ecr-lifecycle.json" >/dev/null
     echo "$uri" > "$state/ecr"
     write_env
     echo "next: DISTRAINER_DRIVER=uncloud just build (buildx pushes $uri:latest for ${DISTRAINER_PLATFORMS:-linux/amd64,linux/arm64}; the machines pull it)" ;;
   ecr-rm)
-    if awsc ecr describe-repositories --repository-names "$ecr_repo" >/dev/null 2>&1; then
+    need aws "install the AWS CLI"
+    arn="$(awsc ecr describe-repositories --repository-names "$ecr_repo" --query 'repositories[0].repositoryArn' 2>/dev/null)" || arn=""
+    if [ -n "$arn" ] && [ "$arn" != "None" ]; then
+      # only a repository this script made or adopted (tagged): the name is an editable setting
+      owner="$(repo_owner "$arn")"
+      [ "$owner" = "$ctx" ] || die "repository $ecr_repo is not tagged distrainer:cluster=$ctx (${owner:-no tag}): refusing to delete it"
       awsc ecr delete-repository --repository-name "$ecr_repo" --force >/dev/null
       echo "deleted repository $ecr_repo and its images"
     fi
-    rm -f "$state/ecr" "$state/ecr-lifecycle.json"
+    # forget the recorded repository only when it is the one just named (a typo must not drop it)
+    if [ -f "$state/ecr" ] && [ "$(basename "$(cat "$state/ecr")")" = "$ecr_repo" ]; then rm -f "$state/ecr" "$state/ecr-lifecycle.json"; fi
     write_env ;;
   env)
     [ -f "$state/env" ] || write_env >/dev/null

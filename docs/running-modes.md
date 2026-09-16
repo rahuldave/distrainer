@@ -168,7 +168,7 @@ What is where:
   the `DISTRAINER_UNCLOUD_SSH` template, `%s@orb` by default); the container is started again
   after `DISTRAINER_RESTART_DELAY` seconds as in mode B. `stop-worker` is `docker stop`. `up`
   after `kill-head` finds the head stopped and `uc deploy` recreates it; the workers reconnect.
-- The image is pushed, not pulled: `build` is `docker build` plus `uc image push` (the 1.36 GB
+- The image is pushed, not pulled, on the OrbStack bed: `build` is `docker build` plus `uc image push` (the 1.36 GB
   dependency layer takes about three minutes to reach three machines, a code change seconds);
   no source tree is mounted, so a code edit needs `build` again.
 - `endpoint` prints the dashboard and MinIO at the head machine's address, published only inside
