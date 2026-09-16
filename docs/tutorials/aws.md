@@ -1,29 +1,47 @@
-# Tutorial 5: the cluster on AWS, with S3 as the store
+# Tutorial 5: the cluster on AWS, an arm64 bed and an x86 bed, S3, a private registry
 
 [Tutorial 4](uncloud.md) ran `hello_blocks` on three OrbStack machines joined by uncloud. This
-one runs the same driver, the same compose file, the same configs and the same scenario checks on
-**EC2 instances**, with an **S3 bucket** as the store instead of MinIO. Nothing in the training
-code changes; what changes is how the machines come to exist (`deploy/uncloud/aws.sh` instead of
-`deploy/uncloud/machines.sh`), where the store is, and how the Mac reaches both. Budget: about
-0.15 USD per hour while the instances run; the whole set of scenarios cost well under a dollar.
+one runs the same driver, the same compose file, the same configs and the same scenario checks
+on **EC2 instances**, with an **S3 bucket** as the store and, optionally, a **private image
+repository** (ECR) the machines pull from. Nothing in the training code changes. Two beds are
+described, because they are what you choose between: **Graviton (arm64)**, the cheapest, running
+the image an Apple Silicon Mac builds natively; and **x86 (amd64)**, the architecture of most
+clouds and of GPU hosts such as RunPod's, running an image built for it. Both live in the same
+region and zone here (us-east-1b); the scripts are the same, only settings differ.
 
-Sections 1 and 2 are the one-time account work (an IAM user with the right permissions, the CLI).
-Sections 3 to 8 are the run. Section 9 is the bill. Section 10 is what went wrong the first time.
+Sections 1 and 2 are the one-time account work. Sections 3 to 9 are the bed and the runs.
+Section 10 is day-to-day operation, 11 the bill, 12 what went wrong the first times, 13 which
+image to build for which machine.
 
-## 1. Once: the account, a user, the CLI
+## 1. The scripts, the verbs, the files
 
-You need an AWS account and a way for the CLI on this Mac to act in it. Do not use the root
-user's credentials for that; make (or reuse) an **IAM user** with an access key:
+Everything is driven by three things you already know from Tutorial 4 plus one new script:
 
-1. Sign in to the console as the root user (the account email). Open IAM, Users, and either pick
-   an existing user or "Create user" (a name such as `distrainer-admin`, no console access).
-2. On the user's "Permissions" tab, "Add permissions", "Attach policies directly":
-   `AmazonEC2FullAccess` (instances, key pairs, security groups, VPCs) and, if the user has no
-   S3 rights yet, `AmazonS3FullAccess` (or a policy on your bucket only).
-3. "Add permissions" again, "Create inline policy", JSON tab: the block below, named
-   `distrainer-harness-iam`. It lets the user create the *second* IAM user the script makes for
-   the containers, `distrainer-harness`, and nothing else in IAM. (`IAMFullAccess` works too and
-   is broad.) Replace the account id.
+| what | where | verbs |
+|---|---|---|
+| the AWS bootstrap | `deploy/uncloud/aws.sh` | `up`, `status`, `stop`, `start`, `destroy`, `bucket`, `bucket-rm`, `ecr`, `ecr-rm`, `env` |
+| the driver | `deploy/driver.sh` with `DISTRAINER_DRIVER=uncloud` | the cluster verbs of every bed (`build`, `up N`, `down`, `scale N`, `exec-head`, `kill-worker I`, `kill-head`, `endpoint`, `ps`, `logs`) and `machines-up`, `machines-status`, `machines-stop`, `machines-start`, `machines-destroy`, which call the bootstrap when `DISTRAINER_UNCLOUD_PROVIDER=aws` |
+| the Just targets | `Justfile` | `just aws-bucket`, `just aws-ecr`, `just aws-machines` (the bootstrap), `just build`, `just up 2`, `just blocks CFG`, `just train CFG`, `just integration S`, `just down` (the driver) |
+
+The bootstrap keeps its state under `.harness/aws/` (gitignored): `env` (everything the driver
+needs, read through `DISTRAINER_ENV_FILE`), `ssh_config` (a `Host` per machine) and
+`known_hosts`, `instances`, `vpc`, `ecr`, `s3-credentials` (mode 600), `bucket-policy.json`; and
+the key pair's private key at `~/.ssh/distrainer-aws.pem`. Its settings are environment
+variables (or lines in `.env`), all listed at the top of the script; the ones you will touch
+are in section 5.
+
+## 2. Once: the account, a user, the CLI, the network
+
+You need an AWS account and an **IAM user** whose access key the CLI on this Mac uses (never the
+root user's). Sign in to the console as root, open IAM, Users, pick or create the user (no
+console access needed), and on its "Permissions" tab attach, via "Attach policies directly":
+
+- `AmazonEC2FullAccess`: instances, key pairs, security groups, VPCs;
+- `AmazonEC2ContainerRegistryFullAccess`: the image repository and the push (section 4);
+- S3 on your bucket, or `AmazonS3FullAccess` if the user has none;
+- and, as an inline policy (JSON tab, named `distrainer-harness-iam`), the right to create the
+  *second* IAM user the script makes for the containers, `distrainer-harness`, and nothing else
+  in IAM. Replace the account id:
 
 ```json
 {
@@ -42,135 +60,158 @@ user's credentials for that; make (or reuse) an **IAM user** with an access key:
 }
 ```
 
-4. "Security credentials" tab, "Access keys", "Create access key", use case "Command Line
-   Interface", and copy the key id and the secret (shown once).
-
-On the Mac, install the CLI from Homebrew (the pkg installer ships an x86_64 build that runs
-under Rosetta at about nine seconds per call) and give it the key:
+Then "Security credentials", "Access keys", "Create access key" (use case "Command Line
+Interface"); copy both values. On the Mac, install the CLI from Homebrew (the pkg installer ships
+an x86_64 build that runs under Rosetta at nine seconds per call) and give it the key:
 
 ```bash
-brew install awscli
-aws configure                  # the key id, the secret, region us-east-1, output json -> the default profile
-aws iam get-user               # answers with the user; `aws sts get-caller-identity` hung on this Mac, skip it
+brew install awscli psviderski/tap/uncloud   # the CLI, and uc 0.20
+aws configure                                 # the key id, the secret, region us-east-1, output json -> the default profile
+aws iam get-user                              # answers with the user (`aws sts get-caller-identity` hung on this Mac; skip it)
 aws ec2 describe-vpcs --query 'Vpcs[].[VpcId,CidrBlock,IsDefault]' --output text
 ```
 
-If you keep several profiles, set `DISTRAINER_AWS_PROFILE` (in `.env` or the shell) instead of
-making this one the default. Also needed: the `uc` CLI (`brew install psviderski/tap/uncloud`),
-`ssh`, `uv` (the repository's), and Docker on the Mac (OrbStack) to build the image.
+Several profiles: `DISTRAINER_AWS_PROFILE` selects one. Also needed: `ssh`, `uv` (the
+repository's), and Docker on the Mac (OrbStack) to build the image.
 
-## 2. The account's network: a default VPC, a zone with the instance types
+The script launches into the region's **default VPC** (the private network AWS gives a new
+account: an address range such as `172.31.0.0/16`, a subnet per availability zone, an internet
+gateway, public addresses on). An old account may have none; the last command above shows
+`IsDefault` `True` for at most one VPC. If none: `aws ec2 create-default-vpc` (configuration
+only, no cost). Not every zone offers every instance type; the script picks the first default
+subnet whose zone lists both of yours (`aws ec2 describe-instance-type-offerings
+--location-type availability-zone`), says which, and keeps it for later `up`s. Another region
+is `DISTRAINER_AWS_REGION`.
 
-The script launches into the region's **default VPC**, the private network AWS gives a new
-account (an address range such as `172.31.0.0/16`, a subnet in every availability zone, an
-internet gateway, public addresses on). An old account may have none; the last command above
-shows `IsDefault` `True` for at most one VPC. If none:
-
-```bash
-aws ec2 create-default-vpc    # network configuration only, no cost
-```
-
-The instance types default to `t3` (x86). Graviton (`t4g`, AWS's own arm64 processors) is a
-quarter cheaper and runs the image an arm64 Mac builds natively: `DISTRAINER_AWS_ARCH=arm64`,
-`DISTRAINER_AWS_HEAD_TYPE=t4g.large`, `DISTRAINER_AWS_WORKER_TYPE=t4g.medium`. Not every zone
-offers every type; the script picks the first default subnet whose zone lists both types in
-`aws ec2 describe-instance-type-offerings --location-type availability-zone`, and says which.
-Another region is `DISTRAINER_AWS_REGION` in `.env`.
-
-## 3. The bucket and its user
+## 3. The store: the bucket and its user
 
 Bucket names are global to all of S3, so first name yours in the two harness configs (the
 `storage_path` and `store_root` lines of `examples/hello_blocks/harness-s3.yaml` and
 `harness-stream-s3.yaml`; the region and the endpoint too if not `us-east-1`), then:
 
 ```bash
-just aws-bucket               # deploy/uncloud/aws.sh bucket
+just aws-bucket                # deploy/uncloud/aws.sh bucket
+echo 'DISTRAINER_ENV_FILE=.harness/aws/env' >> .env   # the driver and the runner read the env file after .env
 ```
 
-It creates the bucket with public access blocked and a tag `distrainer:cluster=distrainer-aws` (what
-`bucket-rm` looks for; a bucket that exists already must carry it, or `DISTRAINER_AWS_ADOPT_BUCKET=1`
-says it is yours to tag), an IAM user `distrainer-harness` whose only
-policy is that bucket (list, get, put, delete, and the multipart calls), and one access key for
-it, kept at `.harness/aws/s3-credentials` (mode 600; a fresh key takes about ten seconds to
-work). Then it writes `.harness/aws/env`, the file every driver and the scenario runner read
-after `.env` when `.env` says so:
-
-```bash
-echo 'DISTRAINER_ENV_FILE=.harness/aws/env' >> .env
-cat .harness/aws/env          # S3_ENDPOINT, S3_REGION, the key; the machine lines appear after `up`
-```
+It creates the bucket with public access blocked and a tag `distrainer:cluster=distrainer-aws`
+(what `bucket-rm` looks for; a bucket that exists already must carry it, or
+`DISTRAINER_AWS_ADOPT_BUCKET=1` says it is yours to tag), an IAM user `distrainer-harness` whose
+only policy is that bucket, and one access key for it, kept at `.harness/aws/s3-credentials`
+(a fresh key takes about ten seconds to work). Then it writes `.harness/aws/env`: the
+`S3_ENDPOINT`, `S3_REGION` and the key that the containers and the scenario runner use.
 
 ## 4. The image repository
 
-The image can reach the machines two ways. Without a registry, `just build` builds the Mac's
+The image can reach the machines two ways. Without a repository, `just build` builds the Mac's
 own architecture and copies the image to every machine with `uc image push`: about ten minutes
-for 1.4 GB over a home uplink, three times. With a private repository on ECR, `build` pushes
-once and the machines pull in-region in seconds, and the image survives a `destroy`:
+for 1.4 GB over a home uplink, three times, and again after every `destroy`. With a private
+repository on ECR, `build` pushes once and the machines pull in-region in seconds:
 
 ```bash
-just aws-ecr                  # deploy/uncloud/aws.sh ecr: the repository `distrainer`, tagged, a lifecycle policy keeping the last five images
-cat .harness/aws/env          # now also DISTRAINER_IMAGE=<account>.dkr.ecr.us-east-1.amazonaws.com/distrainer:latest and DISTRAINER_PLATFORMS
+just aws-ecr                   # deploy/uncloud/aws.sh ecr: the repository `distrainer`, tagged, a lifecycle policy keeping the last five images
+cat .harness/aws/env           # now also DISTRAINER_IMAGE=<account>.dkr.ecr.us-east-1.amazonaws.com/distrainer:latest, DISTRAINER_PLATFORMS=linux/amd64,linux/arm64
 ```
 
-The IAM user of section 1 needs `AmazonEC2ContainerRegistryFullAccess` for this (the repository,
-the push). The machines themselves need no AWS credentials: uncloud has no registry login of its
-own, so `build` takes a twelve-hour token from your CLI (`aws ecr get-login-password`), logs the
-Mac's Docker in, and after the push logs each machine in over the ssh route with the same token
-and pulls. A repository costs 0.10 USD per GB-month, cents here. `deploy/uncloud/aws.sh ecr-rm`
-deletes it with its images.
+The machines need no AWS credentials for it: uncloud has no registry login of its own, so
+`build` takes a twelve-hour token from your CLI (`aws ecr get-login-password`), logs the Mac's
+Docker in, and after the push logs each machine in over the ssh route with the same token and
+pulls. The repository costs 0.10 USD per GB-month, cents here; `deploy/uncloud/aws.sh ecr-rm`
+deletes it with its images. The arm64 bed works without a repository (section 7, recipe A);
+the x86 bed wants one (recipe B), because a cross-built image would otherwise have to be
+pushed three times from the Mac (recipe C).
 
-## 5. The machines
+## 5. Choosing a bed: arm64 or x86
+
+| | arm64 (Graviton) | x86 (amd64), the default |
+|---|---|---|
+| instance types | `t4g.large` head (2 vCPUs, 8 GB), `t4g.medium` workers (4 GB) | `t3.large` head, `t3.medium` workers |
+| settings | `DISTRAINER_AWS_ARCH=arm64`, `DISTRAINER_AWS_HEAD_TYPE=t4g.large`, `DISTRAINER_AWS_WORKER_TYPE=t4g.medium` | the script's defaults |
+| the image | what an Apple Silicon Mac builds natively; pushed with `uc image push` or pulled from ECR | built for `linux/amd64` (under Rosetta on the Mac) and pulled from ECR, or cross-built and pushed |
+| running cost | about 0.15 USD per hour for the three with their public addresses | about 0.18 USD per hour |
+| why | the cheapest bed; the image is the local one | the architecture of most clouds and of GPU hosts (RunPod); one image for here and there |
+
+Put the settings in `.env` (they win over the env file the bootstrap wrote) before `just
+aws-machines`. One bed at a time: both use the machine names `aws1`, `aws2`, `aws3` and the
+uncloud context `distrainer-aws`. Switching is `deploy/driver.sh machines-destroy`, the new
+settings in `.env`, `just aws-machines` again (five minutes), and `just build` unless the image
+is already in the repository for that architecture. Both beds ran in us-east-1b.
+
+## 6. Bringing the bed up
 
 ```bash
-just aws-machines             # deploy/uncloud/aws.sh up, about five minutes
+just aws-machines              # deploy/uncloud/aws.sh up, about five minutes
+export DISTRAINER_DRIVER=uncloud
+deploy/driver.sh machines-status     # the instances as AWS and uncloud see them, and the address ssh is admitted from
+ssh -F .harness/aws/ssh_config aws1  # a shell on the head machine
 ```
 
-What it creates, all tagged `distrainer:cluster=distrainer-aws` so `status` and `destroy` find
-exactly these:
+What `up` creates, all tagged `distrainer:cluster=distrainer-aws` so `status` and `destroy`
+find exactly these:
 
-- a key pair `distrainer`, saved as `~/.ssh/distrainer-aws.pem`;
+- a key pair, `distrainer`, saved as `~/.ssh/distrainer-aws.pem`;
 - a security group `distrainer-uncloud`: ssh (22) admitted from this Mac's public address only
   (asked of checkip.amazonaws.com; `DISTRAINER_AWS_ALLOW_CIDR` to choose, `/24` at the widest;
   `up` and `start` replace the rule when the Mac has moved networks), and UDP 51820 from the
   group itself, so WireGuard runs between the members and nobody else. Nothing else is open:
   the Ray dashboard accepts job submissions from anyone who reaches it and a Mac's public
-  address is often a shared NAT, so the dashboard is reached through an ssh tunnel (section 6);
-- three instances, `aws1` (the head machine, `t3.large`, 2 vCPUs and 8 GB: the Ray head, the
-  Train controller and the driver need it) and `aws2`, `aws3` (`t3.medium`, 4 GB), Ubuntu 24.04
-  amd64 (x86, the architecture of RunPod's GPU hosts and of most clouds; `DISTRAINER_AWS_ARCH=arm64`
-  with `t4g` types is a quarter cheaper, what the first M7 run used), a 16 GB gp3 disk each,
-  IMDSv2 only, unlimited CPU credits so a busy hour never throttles the step pacing the
-  scenarios measure. The names are not `head` and `worker`: those are service names, which
-  uncloud's DNS resolves cluster-wide;
+  address is often a shared NAT, so the dashboard is reached through an ssh tunnel (section 8);
+- three instances, `aws1` (the head machine: the Ray head, the Train controller and the driver
+  need its 8 GB) and `aws2`, `aws3` (the workers), Ubuntu 24.04 of the chosen architecture, a
+  16 GB gp3 disk each, IMDSv2 only, unlimited CPU credits so a busy hour never throttles the
+  step pacing the scenarios measure. The names are not `head` and `worker`: those are service
+  names, which uncloud's DNS resolves cluster-wide;
 - the uncloud cluster, context `distrainer-aws`: `uc machine init` on `aws1` and `uc machine
   add` for the others, over the public addresses, with each instance's **private** address as its
   WireGuard endpoint (stable across a stop and a start, inside the group's rule), ingress off,
   the cluster network `10.210.0.0/16` checked against the VPC's;
-- `.harness/aws/ssh_config`, a `Host` per machine with the key and its own known-hosts file,
-  which the driver uses for `docker kill` on a machine and you can use too; and the machine lines
-  of `.harness/aws/env`: the context, the machine names, `DISTRAINER_UNCLOUD_SSH=%s` with
+- `.harness/aws/ssh_config` (a `Host` per machine with the key and its own known-hosts file,
+  what the driver uses for `docker kill` and the pulls), and the machine lines of
+  `.harness/aws/env`: the context, the machine names, `DISTRAINER_UNCLOUD_SSH=%s` with
   `DISTRAINER_UNCLOUD_SSH_OPTS="-F .harness/aws/ssh_config"`, the VPC's CIDR as the host prefix
-  (the dashboard binds to the head's private address, which AWS maps to its public one), and
-  the head's public address for `endpoint`.
-
-```bash
-export DISTRAINER_DRIVER=uncloud
-deploy/driver.sh machines-status          # the instances as AWS and uncloud see them, and the admitted address
-ssh -F .harness/aws/ssh_config aws1       # a shell on the head machine
-```
+  (the dashboard binds to the head's private address), and the head's public address for
+  `endpoint`.
 
 `uc` runs the system `ssh`, so the instances' host keys are accepted into `~/.ssh/known_hosts`
 (a stale entry for a reused address is dropped first). Precedence: what your shell exports wins
 over both files, and the env file wins over `.env`; only the uncloud driver and the scenario
-runner read the env file (it belongs to an uncloud bed; the compose and KubeRay drivers never
-see it), and a command that pins another bed (`just uncloud-machines` sets
+runner read the env file, and a command that pins another bed (`just uncloud-machines` sets
 `DISTRAINER_UNCLOUD_PROVIDER=orbstack`) skips it, so the OrbStack bed stays reachable while
 `.env` points at AWS.
 
-## 6. The image, the cluster, a run
+## 7. Building and shipping the image
+
+One Dockerfile, three recipes. `just build` runs the right one from `DISTRAINER_IMAGE` (a local
+name, or a registry image) and `DISTRAINER_PLATFORMS`:
+
+- **A. A local arm64 image for the Graviton bed** (`DISTRAINER_IMAGE=distrainer:local`, the
+  default; no repository): `docker build` for the Mac's own architecture, then `uc image push`
+  to every machine. About a minute to build (cached afterwards), ten minutes to push the
+  1.36 GB dependency layer three times over a home uplink, seconds for a code change afterwards
+  (only the small layer moves).
+- **B. One image for both architectures, through the repository** (after `just aws-ecr`,
+  `DISTRAINER_IMAGE` names it): `docker buildx build --platform linux/amd64,linux/arm64 --push`
+  on a BuildKit builder the driver creates once (`docker-container` driver: the plain `docker`
+  driver cannot push a multi-platform image), the amd64 half under Rosetta, then a login and a
+  `docker pull` on every machine over the ssh route. About four minutes to build both halves
+  the first time, then the push once from the Mac (ten minutes on 2026-09-16 for about one
+  gigabyte of compressed layers, both halves), the three pulls in-region in seconds; after a
+  code change, only the changed layer is rebuilt and pushed. Works for either bed: each machine
+  pulls its own half of the manifest. The repository then holds one `latest` index with an
+  amd64 manifest (about 530 MB compressed) and an arm64 one (about 490 MB).
+- **C. A cross-built local image for an x86 bed without a repository**
+  (`DISTRAINER_PLATFORMS=linux/amd64`, `DISTRAINER_IMAGE=distrainer:local`): `docker build
+  --platform linux/amd64` under Rosetta, then `uc image push` three times. Slower to build and
+  the push is still three copies; recipe B is the better x86 path.
+
+The builder's cache is separate from Docker's (`docker buildx ls`; `docker buildx rm distrainer`
+drops it). A GPU image (CUDA torch, an x86 CUDA base image) is a separate Dockerfile, not a
+platform of this one; section 13 has the table.
+
+## 8. A run
 
 ```bash
-just build                                             # a registry image: buildx builds both platforms and pushes once, the machines pull; otherwise docker build + uc image push
+just build                                             # recipe A, B or C by the settings
 just up 2                                              # head + two workers, no MinIO: the store is the bucket
 just blocks examples/hello_blocks/harness-s3.yaml      # log and blocks on s3://<bucket>/blocks
 just train  examples/hello_blocks/harness-s3.yaml      # hello_s3 on s3://<bucket>/runs; S1 PASS
@@ -178,100 +219,115 @@ deploy/driver.sh endpoint                              # dashboard=http://<publi
 ssh -F .harness/aws/ssh_config -L 8265:172.31.x.y:8265 aws1   # the dashboard at http://localhost:8265 (the head's private address is in .harness/aws/instances)
 ```
 
-The dashboard line of `endpoint` names where the port is published, on the head's private
-address; the security group does not admit it from outside, hence the tunnel. With the
-repository of section 4, `build` is `docker buildx build --platform linux/amd64,linux/arm64
---push` on a BuildKit builder the driver creates once (`docker-container` driver: the plain
-`docker` driver cannot push a multi-platform image), then three in-region pulls; without it,
-the push carries the 1.36 GB dependency layer once per instance from the Mac's uplink. A code
-change afterwards moves only the small layer on top. With `S3_ENDPOINT` naming a store outside
-the cluster, `endpoint` prints `s3=` instead of `minio=`: the runner deploys no MinIO, makes no
-bucket, and runs `harness-s3.yaml` and `harness-stream-s3.yaml`. Sections 4 to 6 of Tutorial 4
-work as written: `just kill-worker 2` is `docker kill` over the generated ssh config, `just
-scale 3` lands the third worker on a worker instance, `kill-head` and `up 2` recreate the head.
+With `S3_ENDPOINT` naming a store outside the cluster, `endpoint` prints `s3=` instead of
+`minio=`: the runner deploys no MinIO, makes no bucket, and runs `harness-s3.yaml` and
+`harness-stream-s3.yaml` (the MinIO configs with the bucket, the endpoint and the region
+changed; the tests pin them together). The containers carry the config in the image, so a
+change to the bucket name needs `just build`. Sections 4 to 6 of Tutorial 4 work as written:
+`just kill-worker 2` is `docker kill` over the generated ssh config, `just scale 3` lands the
+third worker on a worker instance, `kill-head` and `up 2` recreate the head.
 
-## 7. The scenarios
+## 9. The scenarios and the numbers
 
 ```bash
 just integration S2                                    # S3, S4, S8, S9, S10, S11s3 likewise; S6 and S11 skip (no shared mount)
 ```
 
-On 2026-09-16, three `t4g` instances in us-east-1b with the bucket in us-east-1, every cluster
-scenario passed; the OrbStack column is the M6 bed (MinIO on the head machine) for comparison:
+On 2026-09-16 every cluster scenario passed on both beds, the bucket in us-east-1; the
+OrbStack column is the M6 bed (MinIO on the head machine) for comparison:
 
-| scenario | AWS bed, S3 | OrbStack bed, MinIO |
-|---|---|---|
-| S2 worker kill mid-run | 100 s | 149 s |
-| S3 scale up 2 to 3 | 103 s | 146 s |
-| S4 scale down 3 to 2 | 179 s | 210 s |
-| S8 time-budget policy | 87 s | 125 s |
-| S9 cold restore | 197 s | 254 s |
-| S10 head loss | 163 s | 205 s |
-| S11s3 streaming producer | 220 s | 161 s |
+| scenario | arm64 bed (`t4g`, recipe A) | x86 bed (`t3`, recipe B) | OrbStack bed, MinIO |
+|---|---|---|---|
+| S2 worker kill mid-run | 100 s | 107 s | 149 s |
+| S3 scale up 2 to 3 | 103 s | 118 s | 146 s |
+| S4 scale down 3 to 2 | 179 s | 193 s | 210 s |
+| S8 time-budget policy | 87 s | 98 s | 125 s |
+| S9 cold restore | 197 s | 212 s | 254 s |
+| S10 head loss | 163 s | 161 s | 205 s |
+| S11s3 streaming producer | 220 s | 222 s | 161 s |
 
-`up` took 78 s, the 240 blocks 71 s to write, the plain run 80 s. The scenarios are faster
-than on the Mac because `uc deploy` and the restarts are faster on real machines (the OrbStack
-VM was sharing 8 GB with everything else), while the steps themselves are slower: 0.67 s per
-step against 0.25 s, because every checkpoint (one per two steps) is an upload of about a
-second from the worker to S3. That is why S11s3 is the one scenario slower than on the Mac:
-a segment takes about 13 s against the producer's 6.7 s cadence, so the trainer never catches
-the producer and the pacing premise of `docs/uncloud-gotchas.md` ("a streaming trainer starts late") inverts (the checks still hold:
-commit precedes consumption, the ranks wait for the end marker). Checkpoint less often on a
-real object store when pace matters. Two things had to change in the runner for this table:
-the Mac-side client must sign with the bucket's region (MinIO never cared), and the replay
-bound of S3 and S4 takes an allowance on a store outside the cluster, because the Train
+On the arm64 bed `up` took 78 s, the 240 blocks 71 s to write, the plain run 80 s; on the x86
+bed `up` took 42 s, the block step two seconds (the log was already in the bucket from the
+arm64 run) and the plain run 32 s, which is not a training time: the run name `hello_s3`
+existed in the bucket, so Ray Train restored the finished run (Tutorial 4 section 3 explains;
+give a new run a new name). The two beds are within ten percent of each other on every
+scenario: the `t3` and `t4g` types pace alike, and the store, not the CPU, sets the step.
+The scenarios are faster than on the Mac because `uc deploy` and the restarts are faster on
+real machines, while the steps themselves are slower: 0.67 s per step against 0.25 s, because
+every checkpoint (one per two steps) is an upload of about a second from the worker to S3.
+That is why S11s3 is the one scenario slower than on the Mac: a segment takes about 13 s
+against the producer's 6.7 s cadence, so the trainer never catches the producer and the pacing
+premise of `docs/uncloud-gotchas.md` ("a streaming trainer starts late") inverts (the checks
+still hold: commit precedes consumption, the ranks wait for the end marker). Checkpoint less
+often on a real object store when pace matters. Two things had to change in the runner for
+this table: the Mac-side client must sign with the bucket's region (MinIO never cared), and the
+replay bound of S3 and S4 takes an allowance on a store outside the cluster, because the Train
 controller registers checkpoints a couple of reports behind the workers there (its bookkeeping
-is S3 round trips) and restores one 24 and 18 positions back in S3 and S4 instead of at most 11 and 14; the
-ledger keeps every position trained either way.
+is S3 round trips) and restores one 24 and 18 positions back in S3 and S4 instead of at most 11
+and 14; the ledger keeps every position trained either way.
 
-
-## 8. Park, resume, remove
+## 10. Day to day
 
 ```bash
-deploy/driver.sh machines-stop            # aws.sh stop: only the disks are billed; the public addresses are released
-deploy/driver.sh machines-start           # aws.sh start: new addresses; ssh config, known hosts and the uc context's connections rewritten
-deploy/driver.sh machines-destroy         # aws.sh destroy: terminate, delete the group and the key pair, drop the context
-deploy/uncloud/aws.sh bucket-rm           # empty and delete the bucket, delete the IAM user and its key
+deploy/driver.sh machines-stop        # park: only the disks are billed; the public addresses are released
+deploy/driver.sh machines-start       # resume: new addresses; ssh config, known hosts, the uc context and the ssh rule rewritten
+deploy/driver.sh machines-status      # the instances, the admitted address, uc machine ls (skipped while parked)
+just build                            # after a code edit: the image carries the code (recipe A pushes the small layer only, B pushes and pulls it)
+just down                             # the services go; the machines stay
+deploy/driver.sh logs head            # uc logs; `.harness/logs/<scenario>.log` on the Mac holds a scenario's driver output
 ```
 
-`destroy` leaves the bucket and its user (the data); `bucket-rm` removes those. Neither touches
-the default VPC or the admin user of section 1. A parked bed costs its disks only (about 4 USD
-a month for three 16 GB volumes); the bucket after a full set of scenarios held 897 objects and
-1.9 MB (the block log, the streaming store, the runs), a fraction of a cent a month, and keeping
-it saves the block build next time.
+Resuming a parked bed changes the public addresses; the bootstrap rewrites everything that
+named them, the image and the containers on the machines are untouched. Switching between the
+arm64 and the x86 bed is section 5. A machine that must be replaced (a partial `destroy`) is
+relaunched by `up` in the same zone.
 
-## 9. What it costs
+```bash
+deploy/driver.sh machines-destroy     # aws.sh destroy: terminate, delete the group and the key pair, drop the context
+deploy/uncloud/aws.sh bucket-rm       # empty and delete the bucket, delete the IAM user and its key
+deploy/uncloud/aws.sh ecr-rm          # delete the repository and its images
+```
 
-On-demand in us-east-1 (2026): `t4g.large` 0.067 USD per hour, `t4g.medium` 0.034, a public
-IPv4 address 0.005 per hour each, so about 0.15 USD per hour for the three while they run;
-16 GB gp3 disks 0.13 USD per day for the three while stopped; the bucket a few cents a month for
-this much data; data into AWS free, the audit trails the Mac reads out negligible. A `t4g`
-vCPU busy beyond its baseline (30% on the large, 20% on the medium) adds 0.04 USD per hour under
-the unlimited credit setting; the harness workload sleeps most of the time. `up` prints the
-running rate.
+`destroy` leaves the bucket, its user and the repository (the data and the image); the other
+two remove those. None of them touches the default VPC or the admin user of section 2.
 
-## 10. When something is off
+## 11. What it costs
 
-- **`RunInstances ... Unsupported ... in your requested Availability Zone`**: that zone has no
-  Graviton. The script picks a zone that offers the types; if none does, change
-  `DISTRAINER_AWS_HEAD_TYPE` / `DISTRAINER_AWS_WORKER_TYPE` or the region.
+On-demand in us-east-1 (2026): `t3.large` 0.083 USD per hour, `t3.medium` 0.042; `t4g.large`
+0.067, `t4g.medium` 0.034; a public IPv4 address 0.005 per hour each; so about 0.18 USD per hour
+for the x86 three while they run, 0.15 for the arm64 three. 16 GB gp3 disks 0.13 USD per day
+for the three while stopped (about 4 USD a month for a parked bed). The bucket after a full set
+of scenarios held 897 objects and 1.9 MB, a fraction of a cent a month; the repository holds a
+few images at 0.10 USD per GB-month. A `t` vCPU busy beyond its baseline (30% on the large, 20%
+on the medium) adds 0.04 to 0.05 USD per hour under the unlimited credit setting; the harness
+workload sleeps most of the time. `up` prints the running rate. The whole M7 work, two beds and
+two full sets of scenarios, stayed under two dollars.
+
+## 12. When something is off
+
+- **`RunInstances ... Unsupported ... in your requested Availability Zone`**: that zone lacks
+  the type. The script picks a zone that offers both types; if none does, change the types or
+  the region.
 - **`no default VPC`**: section 2.
-- **`not authorized to perform: ec2:...` or `iam:...`**: section 1, the two policies.
+- **`not authorized to perform: ec2:...`, `iam:...` or `ecr:...`**: section 2, the policies.
 - **`InvalidClientTokenId` or `SignatureDoesNotMatch` inside the containers** right after
   `aws-bucket`: the new key needs about ten seconds; run `up` and the blocks a little later.
 - **ssh refused after moving to another network**: the security group admits the address `up`
   or `start` last saw; either one replaces the rule for the current address (the parked bed
   needs `start` anyway).
+- **`pull failed` from `build`**: the ECR token is twelve hours old at most, `build` takes a
+  fresh one; a machine that cannot reach ECR has no route out (the default VPC's internet
+  gateway) or `ecr:GetAuthorizationToken` was denied to your user.
 - **The script stops with no message** after an `aws` call that was allowed to fail: macOS bash
-  3.2 and the `command` builtin (`docs/uncloud-gotchas.md`); the script avoids it, keep it so.
+  3.2 and the `command` builtin, or a failing command substitution in an assignment
+  (`docs/uncloud-gotchas.md`); the script avoids both, keep it so.
 - **Machines `Suspect` in `uc machine ls`** for a minute after a join or a start: wait; the
   bootstrap waits up to five minutes for `Up`.
 - **`S3 FAIL: attempt 1 replays 24 positions (> 11)`** or an `HTTP status 400 ... HeadObject`
-  from the runner: the two S3 behaviours of section 7, both handled by the current runner
-  (the replay allowance, the region in the Mac-side environment; section 7).
+  from the runner: the two S3 behaviours of section 9, both handled by the current runner.
 - The rest of the cluster behaviour is Tutorial 4 section 10 and `docs/uncloud-gotchas.md`.
 
-## 11. Which image for which machine
+## 13. Which image for which machine
 
 The Dockerfile is the same for every architecture; what differs is what you build and where it
 runs:
@@ -279,22 +335,18 @@ runs:
 | machines | build | how it gets there |
 |---|---|---|
 | OrbStack machines (arm64) | `just build` with `DISTRAINER_IMAGE=distrainer:local`: `docker build`, the Mac's own architecture | `uc image push` |
-| Graviton EC2 (`DISTRAINER_AWS_ARCH=arm64`, `t4g`) | the same local build, or the registry image below | `uc image push`, or a pull of the arm64 half of the manifest |
-| x86 EC2 (the default, `t3`) | a registry image: `docker buildx build --platform linux/amd64,linux/arm64 --push` (what `build` runs when `DISTRAINER_IMAGE` names a registry) | every machine pulls its own architecture |
-| x86 without a registry | `DISTRAINER_PLATFORMS=linux/amd64 just build`: a cross-build under Rosetta, then `uc image push` | slower to build (emulated), and the push is still three copies |
+| Graviton EC2 (`DISTRAINER_AWS_ARCH=arm64`, `t4g`) | the same local build (recipe A), or the registry image (recipe B) | `uc image push`, or a pull of the arm64 half of the manifest |
+| x86 EC2 (the default, `t3`) | the registry image (recipe B): `docker buildx build --platform linux/amd64,linux/arm64 --push` | every machine pulls its own architecture |
+| x86 without a repository | recipe C: `DISTRAINER_PLATFORMS=linux/amd64 just build`, a cross-build under Rosetta | `uc image push`, three copies |
 | GPU hosts (RunPod, x86 with NVIDIA) | not this image: CPU torch from the CPU wheel index; a CUDA base image and a CUDA torch wheel are a second Dockerfile, the next stage | a registry RunPod can log in to |
 
-`DISTRAINER_PLATFORMS` sets the platforms of a registry build (default both); the amd64 half
-builds under Rosetta on an Apple Silicon Mac in a few minutes, the arm64 half natively. The
-`docker-container` builder the driver creates (`docker buildx ls`) keeps its own cache; `docker
-buildx rm distrainer` drops it.
-
-## 12. Elsewhere than AWS
+## 14. Elsewhere than AWS
 
 Any S3-compatible service (R2, Backblaze, MinIO on a machine of yours) is the same `.env` lines
 (`S3_ENDPOINT`, `S3_REGION`, `S3_ACCESS_KEY`, `S3_SECRET_KEY`) and a copy of `harness-s3.yaml`
-with its endpoint and bucket; the machines come from wherever, joined with `uc machine init`
-and `uc machine add` as `aws.sh` does, with `DISTRAINER_UNCLOUD_MACHINES`,
-`DISTRAINER_UNCLOUD_CONTEXT`, the ssh route and `DISTRAINER_UNCLOUD_HOST_PREFIX` set by hand
-in `.env`. Azure Blob Storage is not S3-compatible: MinIO on a VM there, or an S3 gateway. An
-amd64 cluster needs the image built for it (`docker buildx build --platform linux/amd64`).
+with its endpoint and bucket; any registry the machines can log in to works the same way as ECR
+once `DISTRAINER_IMAGE` names it (the token step is ECR-specific; elsewhere log the machines
+in yourself); the machines come from wherever, joined with `uc machine init` and `uc machine
+add` as `aws.sh` does, with `DISTRAINER_UNCLOUD_MACHINES`, `DISTRAINER_UNCLOUD_CONTEXT`, the ssh
+route and `DISTRAINER_UNCLOUD_HOST_PREFIX` set by hand in `.env`. Azure Blob Storage is not
+S3-compatible: MinIO on a VM there, or an S3 gateway.

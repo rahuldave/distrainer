@@ -151,3 +151,9 @@ What `deploy/uncloud/aws.sh` and the cloud run of 2026-09-16 taught, on top of t
   driver builds either platform under Rosetta but refuses `--platform a,b --push`; the driver
   creates the builder `distrainer` once. Its cache is separate from Docker's: the first build
   redoes the dependency layer for both architectures (a few minutes, the amd64 half emulated).
+- **The push is the uplink-bound step, once.** Pushing both halves of the image (about one
+  gigabyte compressed) to ECR took ten minutes from a home uplink; the three in-region pulls
+  took seconds. Before the repository the same ten minutes went into every bed, three times.
+- **A run name that exists in the bucket is restored, not rerun.** `just train` after a bed
+  swap restored the finished `hello_s3` in 32 s and printed `S1 PASS` on its old trail; the
+  scenarios clean their run state, a manual run needs a new name (`--set run_name=...`).

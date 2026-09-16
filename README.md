@@ -22,8 +22,10 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 - [`docs/tutorials/uncloud.md`](docs/tutorials/uncloud.md) — tutorial 4: the same run on a
   cluster of machines (uncloud on OrbStack machines): the mesh, an object store instead of a shared
   mount, kill a worker, scale, lose the head, and what changes on cloud VMs with S3 or R2.
-- [`docs/tutorials/aws.md`](docs/tutorials/aws.md) — tutorial 5: the same cluster on EC2 instances
-  with an S3 bucket as the store: the account prerequisites, the bootstrap, the scenarios, the bill.
+- [`docs/tutorials/aws.md`](docs/tutorials/aws.md) — tutorial 5: the same cluster on EC2 instances,
+  an arm64 bed and an x86 bed, with an S3 bucket as the store and a private image repository: the
+  account prerequisites, the scripts and their verbs, building and shipping the image for each
+  architecture, the scenarios, day-to-day operation, the bill.
 - [`docs/cheatsheets/orbstack.md`](docs/cheatsheets/orbstack.md) and
   [`docs/cheatsheets/uncloud.md`](docs/cheatsheets/uncloud.md) — app-independent cheat sheets for the
   two tools the harness runs on.
