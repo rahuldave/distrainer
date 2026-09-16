@@ -13,8 +13,10 @@
 #   - a worker dials RAY_HEAD_ADDRESS=<head pod id>.runpod.internal:6379; a new head has a new id,
 #     so `up` after `kill-head` recreates the workers as well
 #   - exec-head is ssh to the head's published 22/tcp (a login shell: `bash -lc "cd /app && ..."`)
-#   - pods are terminated, never stopped (a stopped pod's disk bills by the month); `stop-worker`
-#     is the exception, modelling a preemption notice
+#   - node death is RunPod's stop (the container is killed, the pod keeps its host, its disk and
+#     its id, so the image is not pulled again and the head's address stays valid): kill-worker
+#     stops and restarts a worker, kill-head stops the head and `up` starts it again; `down`
+#     terminates everything (a stopped pod's disk bills by the month, cents for a session)
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 caller_env="$(export -p)"
@@ -165,6 +167,7 @@ wait_running() {
 }
 
 terminate() { api POST "/pods/$1/action" '{"action":"terminate"}' >/dev/null; }
+pod_action() { api POST "/pods/$1/action" "{\"action\":\"$2\"}" >/dev/null; }
 
 # terminate_all "JSON LINES": every pod given, going on after a failure; non-zero if any failed
 terminate_all() {
@@ -235,10 +238,17 @@ case "$verb" in
     if [ -z "${S3_ENDPOINT:-}" ] || [ -z "${S3_ACCESS_KEY:-}" ] || [ -z "${S3_SECRET_KEY:-}" ]; then
       echo "runpod: S3_ENDPOINT, S3_ACCESS_KEY and S3_SECRET_KEY must name the bucket (.env)" >&2; exit 2
     fi
-    # dead nodes first: a stopped or errored pod of the cluster is replaced, never revived
+    # stopped pods (a killed head or worker) start again on their host with the image in place;
+    # errored ones are replaced
     all="$(cluster_pods)" || exit 1
-    dead="$(printf '%s\n' "$all" | jq -c 'select(.status == "EXITED" or .status == "ERROR")')"
-    if [ -n "$dead" ]; then terminate_all "$dead" || exit 1; fi
+    errored="$(printf '%s\n' "$all" | jq -c 'select(.status == "ERROR")')"
+    if [ -n "$errored" ]; then terminate_all "$errored" || exit 1; fi
+    while read -r p; do
+      [ -n "$p" ] || continue
+      id="$(printf '%s' "$p" | jq -r '.id')"
+      echo "starting $(printf '%s' "$p" | jq -r '.name') ($id) again"
+      pod_action "$id" start || { echo "runpod: $id would not start (its host may be full); terminating it for a new pod" >&2; terminate "$id"; }
+    done <<< "$(printf '%s\n' "$all" | jq -c 'select(.status == "EXITED")')"
     head="$(head_pod)" || exit 1
     if [ -z "$head" ]; then
       head="$(create_pod "$cluster-head" head "$(gn_data_centers)")" || exit 1
@@ -281,30 +291,35 @@ case "$verb" in
   exec-head)
     exec_head "$@" ;;
   kill-worker)
-    # terminate = node death; a new pod with the same name after DISTRAINER_RESTART_DELAY s (0 = stays dead)
+    # stop = node death (the container is killed); the pod starts again on its host after
+    # DISTRAINER_RESTART_DELAY s (0 = stays dead) as a new Ray node, no image pull; should the host
+    # refuse the start, a new pod of the same name is created instead
     i="${1:?worker index (1-based)}"
     w="$(pod_named "$cluster-worker-$i")" || exit 1; [ -n "$w" ] || { echo "runpod: no worker $i" >&2; exit 1; }
     head="$(head_pod)" || exit 1; [ -n "$head" ] || { echo "runpod: no head pod; the worker would dial nothing" >&2; exit 1; }
     head_id="$(printf '%s' "$head" | jq -r '.id')"; dc="$(printf '%s' "$head" | jq -r '.dataCenterId')"
-    terminate "$(printf '%s' "$w" | jq -r '.id')"
+    wid="$(printf '%s' "$w" | jq -r '.id')"
+    pod_action "$wid" stop
     delay="${DISTRAINER_RESTART_DELAY:-5}"
     if [ "$delay" != "0" ]; then
-      (sleep "$delay" && create_pod "$cluster-worker-$i" worker "$dc" "$head_id") >"$state/$cluster-worker-$i.restart.log" 2>&1 &
+      (sleep "$delay" && { pod_action "$wid" start || { terminate "$wid"; create_pod "$cluster-worker-$i" worker "$dc" "$head_id"; }; }) \
+        >"$state/$cluster-worker-$i.restart.log" 2>&1 &
       disown
-      echo "worker $i killed; a new pod of that name is created in ${delay}s (a new Ray node)"
+      echo "worker $i ($wid) killed; it starts again in ${delay}s as a new Ray node"
     else
-      echo "worker $i killed"
+      echo "worker $i ($wid) killed (stopped; 'up' starts it again)"
     fi ;;
   kill-head)
+    # stop the head: Ray head, Train controller and driver die; `up` starts the same pod again (S10)
     head="$(head_pod)" || exit 1; [ -n "$head" ] || { echo "runpod: no head pod" >&2; exit 1; }
-    terminate "$(printf '%s' "$head" | jq -r '.id')"
+    pod_action "$(printf '%s' "$head" | jq -r '.id')" stop
     rm -f "$state/$cluster-head.ssh"
-    echo "head killed; 'up' makes a new head and new workers (the workers dialled the old head's name)" ;;
+    echo "head killed (stopped); 'up' starts it again on its host, the workers keep its address" ;;
   stop-worker)
     i="${1:?worker index (1-based)}"
     w="$(pod_named "$cluster-worker-$i")" || exit 1; [ -n "$w" ] || { echo "runpod: no worker $i" >&2; exit 1; }
-    api POST "/pods/$(printf '%s' "$w" | jq -r '.id')/action" '{"action":"stop"}' >/dev/null
-    echo "worker $i stopped (a stopped pod keeps its disk; the next 'up' or 'down' terminates it)" ;;
+    pod_action "$(printf '%s' "$w" | jq -r '.id')" stop
+    echo "worker $i stopped (a preemption notice; 'up' starts it again, 'down' terminates it)" ;;
   cp-from-head)
     read -r host port <<< "$(ssh_target)"
     opts=(-P "$port" -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR)

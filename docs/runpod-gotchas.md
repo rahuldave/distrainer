@@ -45,6 +45,9 @@ on RunPod pods (M8, tutorial 6). Dates are when it was seen.
   GPU type per create, has no name filter on the pod list (the driver filters client-side by
   name prefix and the `DISTRAINER_CLUSTER` marker), streams a pod's log as server-sent events,
   and reports a terminated pod as `TERMINATED` for a while: the driver never counts those.
+- **A stopped pod restarts without a pull**, on the same host with the same id and internal
+  name; the driver's `kill-worker` and `kill-head` are therefore stop and start, and only
+  `down`, `scale` down and an errored pod terminate. A stopped pod's disk bills by the month.
 - **The CIFAR-10 download is slow from anywhere** (the Toronto server served 72 KB/s on
   2026-09-16, 40 minutes for 170 MB). The tarball is staged in the bucket under `datasets/`;
   fetch it into the pod's `data_root` through a presigned URL before `make_blocks` (torchvision

@@ -256,14 +256,16 @@ address, not the container's default one, or the other pods cannot reach the por
 out. `catalog` prints the configured types' prices and their availability in the
 global-networking data centers, the thing to check before `up`.
 
-**Breaking things.** `kill-worker I` terminates worker I's pod (node death) and, after
-`DISTRAINER_RESTART_DELAY` seconds (default 5, 0 = stays dead), creates a new pod of the same
-name in the background: a new Ray node, as under the other drivers. `kill-head` terminates the
-head; the next `up` makes a new head *and* new workers, because a worker dials the head by
-its pod id and a new head has a new id. `scale N` creates the missing workers or terminates
-the highest-numbered ones. `stop-worker I` is RunPod's stop (a preemption notice; the pod
-keeps its disk until `down`). `down` and `nuke` terminate every pod of the cluster: pods are
-terminated, never left stopped, since a stopped pod's disk bills by the month.
+**Breaking things.** Node death is RunPod's *stop*: the container is killed and the pod keeps
+its host, its disk and its id, so a restart pulls no image (the pull is the slow part, section
+6) and the head's address stays valid for the workers. `kill-worker I` stops worker I and,
+after `DISTRAINER_RESTART_DELAY` seconds (default 5, 0 = stays dead), starts it again in the
+background as a new Ray node; if the host refuses the start, a new pod of the same name is
+created instead. `kill-head` stops the head; the next `up` starts every stopped pod of the
+cluster again (an errored one is replaced). `scale N` creates the missing workers or
+terminates the highest-numbered ones. `stop-worker I` is the same stop without the restart (a
+preemption notice). `down` and `nuke` terminate every pod of the cluster; a stopped pod's disk
+bills by the month (cents for a session), which is why `down` ends every session.
 
 **Reaching the head.** `exec-head CMD...` is ssh to the head's published `22/tcp` port
 (cached under `.harness/runpod/` by `up`), as `bash -lc "cd /app && CMD"`: a login shell

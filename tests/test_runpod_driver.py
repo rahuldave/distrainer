@@ -177,12 +177,15 @@ class Bed:
     def posts(self, path: str = "/pods") -> list[dict]:
         return [b for m, p, b in self.calls() if m == "POST" and p == path]
 
-    def terminated(self) -> list[str]:
+    def actions(self, action: str) -> list[str]:
         return [
             p.split("/")[2]
             for m, p, b in self.calls()
-            if m == "POST" and p.endswith("/action") and b == {"action": "terminate"}
+            if m == "POST" and p.endswith("/action") and b == {"action": action}
         ]
+
+    def terminated(self) -> list[str]:
+        return self.actions("terminate")
 
 
 @pytest.fixture
@@ -329,34 +332,46 @@ def test_scale_adds_or_removes_the_highest_workers(bed):
     assert all(p["env"]["RAY_HEAD_ADDRESS"] == "headid.runpod.internal:6379" for p in bed.posts())
 
 
-def test_kill_worker_terminates_and_recreates_the_same_name_kill_head_terminates_the_head(bed):
+def test_kill_worker_stops_and_restarts_the_pod_kill_head_stops_the_head(bed):
     bed.pods(
         pod("distrainer-head", "headid"),
         pod("distrainer-worker-1", "w1", head="headid"),
         pod("distrainer-worker-2", "w2", head="headid"),
     )
     out = bed.run("kill-worker", "2", env={"DISTRAINER_RESTART_DELAY": "0"}).stdout
-    assert bed.terminated() == ["w2"] and "worker 2 killed" in out and bed.posts() == []
-    bed.respond("POST", "/pods", pod("distrainer-worker-2", "w2b", head="headid"), n=1)
+    assert bed.actions("stop") == ["w2"] and "worker 2 (w2) killed" in out
+    assert bed.posts() == [] and bed.terminated() == []
     out = bed.run("kill-worker", "2", env={"DISTRAINER_RESTART_DELAY": "1"}).stdout
-    assert "created in 1s" in out
+    assert "starts again in 1s" in out
     deadline = time.monotonic() + 10
-    while time.monotonic() < deadline and not bed.posts():
+    while time.monotonic() < deadline and "w2" not in bed.actions("start"):
         time.sleep(0.5)
-    (created,) = bed.posts()
-    assert (
-        created["name"] == "distrainer-worker-2"
-        and created["env"]["RAY_HEAD_ADDRESS"] == "headid.runpod.internal:6379"
-    )
-    assert created["dataCenterIds"] == ["EU-RO-1"]
+    assert bed.actions("start") == ["w2"] and bed.posts() == []  # no new pod, no pull
+    # the host refuses the start: a new pod of the same name instead
+    refused = Bed(bed.root.parent / "refused")
+    refused.pods(pod("distrainer-head", "headid"), pod("distrainer-worker-1", "w1", head="headid"))
+    refused.respond(
+        "POST", "/pods/w1/action", {"title": "full"}, n=2, code=400
+    )  # stop ok, start refused
+    refused.respond("POST", "/pods", pod("distrainer-worker-1", "w1b", head="headid"), n=1)
+    refused.run("kill-worker", "1", env={"DISTRAINER_RESTART_DELAY": "1"})
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline and not refused.posts():
+        time.sleep(0.5)
+    (created,) = refused.posts()
+    assert created["name"] == "distrainer-worker-1"
+    assert created["env"]["RAY_HEAD_ADDRESS"] == "headid.runpod.internal:6379"
+    assert refused.terminated() == ["w1"]
+    # the head: stopped, the ssh cache dropped
     (bed.root / ".harness" / "runpod" / "distrainer-head.ssh").write_text("1.2.3.4 10341\n")
     out = bed.run("kill-head").stdout
+    assert bed.actions("stop")[-1] == "headid" and "starts it again" in out
+    assert bed.terminated() == []
+    assert not (bed.root / ".harness" / "runpod" / "distrainer-head.ssh").exists()
     headless = Bed(bed.root.parent / "headless")
     headless.pods(pod("distrainer-worker-1", "w1", head="gone"))
     proc = headless.run("kill-worker", "1", ok=False)
-    assert proc.returncode == 1 and "no head pod" in proc.stderr and headless.terminated() == []
-    assert bed.terminated()[-1] == "headid" and "new workers" in out
-    assert not (bed.root / ".harness" / "runpod" / "distrainer-head.ssh").exists()
+    assert proc.returncode == 1 and "no head pod" in proc.stderr and headless.actions("stop") == []
     bed.run("stop-worker", "1")
     assert ("POST", "/pods/w1/action", {"action": "stop"}) in bed.calls()
 
@@ -445,18 +460,37 @@ def test_build_needs_nothing_and_the_key_is_required_for_the_api(bed):
     assert proc.returncode != 0 and "RUNPOD_KEY" in proc.stderr
 
 
-def test_up_replaces_dead_pods_first_and_a_failed_listing_never_looks_empty(bed):
-    # a stopped worker and an errored head are dead nodes: terminated, then made anew
-    bed.pods(
-        pod("distrainer-head", "oldhead", status="ERROR"),
-        pod("distrainer-worker-1", "w1", head="oldhead", status="EXITED"),
+def test_up_starts_stopped_pods_replaces_errored_ones_and_a_failed_listing_never_looks_empty(bed):
+    # a stopped head starts again (same id: the worker keeps its address); an errored worker is
+    # replaced; a stopped worker of another head is started and then replaced as stale
+    bed.respond(  # the first listing: a stopped head, an errored worker
+        "GET",
+        "/pods",
+        {
+            "pods": [
+                *OTHERS,
+                pod("distrainer-head", "headid", status="EXITED"),
+                pod("distrainer-worker-1", "w1", head="headid", status="ERROR"),
+            ]
+        },
+        n=1,
     )
-    bed.respond("POST", "/pods", pod("distrainer-head", "newhead"), n=1)
-    bed.respond("GET", "/pods/newhead", pod("distrainer-head", "newhead"))
-    bed.respond("POST", "/pods", pod("distrainer-worker-1", "w1b", head="newhead"), n=2)
+    bed.pods(pod("distrainer-head", "headid"))  # every later listing: the head running again
+    bed.respond("POST", "/pods", pod("distrainer-worker-1", "w1b", head="headid"), n=1)
     out = bed.run("up", "1").stdout
-    assert sorted(bed.terminated()) == ["oldhead", "w1"] and "(oldhead, ERROR)" in out
-    assert [p["name"] for p in bed.posts()] == ["distrainer-head", "distrainer-worker-1"]
+    assert bed.actions("start") == ["headid"] and "starting distrainer-head (headid) again" in out
+    assert bed.terminated() == ["w1"] and [p["name"] for p in bed.posts()] == [
+        "distrainer-worker-1"
+    ]
+    # a stopped pod whose host refuses the start is terminated (and, being the head, made anew)
+    full = Bed(bed.root.parent / "full")
+    full.pods(pod("distrainer-head", "oldhead", status="EXITED"))
+    full.respond("POST", "/pods/oldhead/action", {"title": "full"}, n=1, code=400)
+    full.respond("POST", "/pods", pod("distrainer-head", "newhead"), n=1)
+    full.respond("GET", "/pods/newhead", pod("distrainer-head", "newhead"))
+    proc = full.run("up", "0")
+    assert full.terminated() == ["oldhead"] and "would not start" in proc.stderr
+    assert [p["name"] for p in full.posts()] == ["distrainer-head"]
     # the listing fails: down must not pretend the cluster is empty
     broken = Bed(bed.root.parent / "broken")
     broken.respond("GET", "/pods", {"title": "boom"}, code=500)
