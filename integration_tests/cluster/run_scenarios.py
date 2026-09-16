@@ -220,8 +220,12 @@ class Store:
         per report) and the teardown lets them run a few more steps; measured on AWS: 24 and 18
         positions against bounds of 11 and 14, so 4 (bounds 27 and 38) is the smallest value
         that passes with some headroom. The same mechanism applies to every restart there (S2
-        passed within the base bound once). Zero when the store is in the cluster."""
-        return 4 if self.external else 0
+        passed within the base bound once). Zero when the store is in the cluster;
+        ``DISTRAINER_LAG_INTERVALS`` overrides the external value (RunPod pods in Europe
+        against a bucket in us-east-1 replayed 49 positions, bound 27 at 4)."""
+        if not self.external:
+            return 0
+        return int(os.environ.get("DISTRAINER_LAG_INTERVALS", "4"))
 
     @property
     def on_bucket(self) -> bool:
