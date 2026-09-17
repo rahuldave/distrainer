@@ -1,0 +1,50 @@
+site_name: distrainer
+site_description: block-native distributed training on Ray Train
+site_url: https://rahuldave.com/distrainer/
+repo_url: https://github.com/rahuldave/distrainer
+docs_dir: docs
+theme:
+  name: material
+  features: [navigation.sections, navigation.top, toc.integrate, content.code.copy]
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle: { icon: material/brightness-7, name: dark }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle: { icon: material/brightness-4, name: light }
+markdown_extensions:
+  - tables
+  - toc: { permalink: true }
+  - admonition
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+nav:
+  - Home: index.md
+  - Start here:
+      - Introduction: introduction.md
+      - Ways to run: running-modes.md
+      - Command line: cli.md
+  - Tutorials:
+      - 1. Batch training: tutorials/batch.md
+      - 2. Streaming, hooks, retention: tutorials/streaming.md
+      - 3. Kubernetes (KubeRay): tutorials/kuberay.md
+      - 4. A cluster of machines (uncloud): tutorials/uncloud.md
+      - 5. AWS beds, S3, a registry: tutorials/aws.md
+      - 6. A GPU example on RunPod: tutorials/runpod.md
+      - 7. The parallel kinds: tutorials/parallel.md
+  - Concepts:
+      - Collectives: collectives.md
+      - Parallel training: parallelism.md
+      - Retention and gc: retention.md
+      - Examples and scenarios: examples-and-scenarios.md
+  - Reference:
+      - Specification v0.1: distrainer-spec.md
+      - Design sketch: distrainer-design.md
+      - Research report: ray-sub-epoch-training-report.md
+  - Field notes:
+      - RunPod gotchas: runpod-gotchas.md
+      - uncloud gotchas: uncloud-gotchas.md
