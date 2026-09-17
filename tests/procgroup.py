@@ -4,9 +4,10 @@ The fake-Ray fixture in ``test_train_loop.py`` drives ``train_loop`` rank by ran
 with the collectives stubbed out, which cannot test anything *about* collectives. ``run_world``
 here spawns ``n`` processes; each joins a Gloo group on a free localhost port, patches the
 ``ray.train`` entry points the loop uses onto the group (``prepare_model`` becomes the real DDP
-wrap, ``barrier`` and ``broadcast_from_rank_zero`` become ``torch.distributed`` calls, ``report``
-records), runs ``train_loop`` and hands its reports back through a file. The block stores are
-the ones ``test_train_loop.make_store`` builds; the audit facts must be the same.
+wrap when the config's ``parallel.kind`` asks for it, ``barrier`` and ``broadcast_from_rank_zero``
+become ``torch.distributed`` calls, ``report`` records), runs ``train_loop`` and hands its
+reports back through a file. The block stores are the ones ``test_train_loop.make_store``
+builds; the audit facts must be the same.
 
 Every callable that crosses into a child (``train_step``, ``build_model``, hooks) has to be
 picklable, so module-level functions and classes only.
@@ -91,9 +92,7 @@ class _Context:
         return self.n
 
 
-def _patch_ray(
-    rank: int, n: int, checkpoint_path: str | None, reports: list, prepare: bool
-) -> None:
+def _patch_ray(rank: int, n: int, checkpoint_path: str | None, reports: list) -> None:
     """Point the ``ray.train`` names ``train_loop`` looks up at call time onto the Gloo group."""
     import ray.train
     import ray.train.collective
@@ -106,8 +105,8 @@ def _patch_ray(
             (rank, dict(metrics), checkpoint_dir_name, checkpoint.path if checkpoint else None)
         )
 
-    def prepare_model(model, **kw):
-        if prepare and n > 1:
+    def prepare_model(model, parallel_strategy="ddp", **kw):
+        if parallel_strategy == "ddp" and n > 1:
             return torch.nn.parallel.DistributedDataParallel(model)
         return model
 
@@ -134,7 +133,6 @@ def _worker(
     loop_config: dict[str, Any],
     checkpoint_path: str | None,
     out_dir: str,
-    prepare: bool,
 ) -> None:
     import faulthandler
 
@@ -156,7 +154,7 @@ def _worker(
     _log(rank, "process group up")
     reports: list = []
     try:
-        _patch_ray(rank, n, checkpoint_path, reports, prepare)
+        _patch_ray(rank, n, checkpoint_path, reports)
         _log(rank, "ray.train patched")
         from distrainer.trainer import train_loop
 
@@ -180,18 +178,17 @@ def run_world(
     out_dir: str,
     checkpoint: str | None = None,
     loop_extra: dict[str, Any] | None = None,
-    prepare: bool = True,
 ) -> World:
     """Run ``train_loop`` on ``n`` ranks over a Gloo group; ``checkpoint`` is a saved directory.
 
-    ``prepare=False`` leaves the model unwrapped (no all-reduce), which is how a test shows what
-    DDP does. ``out_dir`` receives the ranks' report files and the checkpoint scratch.
+    ``out_dir`` receives the ranks' report files and the checkpoint scratch. The wrap follows
+    ``cfg.parallel.kind`` as in the loop (``ddp`` is the real DistributedDataParallel).
     """
     os.makedirs(out_dir, exist_ok=True)
     loop_config = {**DistTrainer(step, build_model, cfg).loop_config(), **(loop_extra or {})}
     ctx = mp.start_processes(
         _worker,
-        args=(n, free_port(), loop_config, checkpoint, out_dir, prepare),
+        args=(n, free_port(), loop_config, checkpoint, out_dir),
         nprocs=n,
         join=False,
         start_method="spawn",

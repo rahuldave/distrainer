@@ -310,7 +310,7 @@ Note on `resume_start`: `done = cursor * n_old` positions are complete. Because 
 
 ```
 ctx      = ray.train.get_context(); rank, n = ctx.get_world_rank(), ctx.get_world_size()
-model, opt = build_model(ctx); wrap with ray.train.torch.prepare_model
+model, opt = build_model(ctx); wrap per cfg.parallel.kind: prepare_model(parallel_strategy="ddp") or no wrap ("none")
 log      = BlockLog(fs, cfg.store_root); W = log.meta().W; assert W % n == 0
 ledger   = Ledger()
 ckpt     = ray.train.get_checkpoint()
@@ -440,6 +440,8 @@ scaling:
   elastic_resize_monitor_interval_s: 15
 failure:
   max_failures: 3
+parallel:
+  kind: ddp                 # ddp (the gradients all-reduced in every backward) | none (no wrap, no collective per step)
 hooks:                         # name -> {entry: "pkg.module:factory", ...args}; factory(cfg, **args)
   remine: {entry: examples.toy_contrastive.remine:RemineHook, segments: 12, initial_segments: 1}
 ```

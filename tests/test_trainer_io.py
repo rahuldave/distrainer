@@ -48,6 +48,7 @@ def test_unwrap_and_train_info_defaults():
     assert unwrap(Wrapped()) is m and unwrap(m) is m
     info = TrainInfo(rank=1, world_size=2, config=DistrainerConfig.from_dict({"train": {"lr": 1}}))
     assert info.train == {"lr": 1} and info.position == 0 and info.device.type == "cpu"
+    assert info.parallel.kind == "ddp"
 
 
 def test_lanes_from_resumes_and_stops(store):

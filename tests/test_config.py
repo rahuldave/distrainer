@@ -152,3 +152,18 @@ def test_overrides_are_dotted_yaml_values(tmp_path):
         apply_overrides({}, ["novalue"])
     with pytest.raises(ValueError):
         apply_overrides({"run_name": "x"}, ["run_name.sub=1"])
+
+
+# ---- M9: the parallel: section ----
+
+
+def test_parallel_section_defaults_validates_and_round_trips():
+    cfg = DistrainerConfig.from_dict({})
+    assert cfg.parallel.kind == "ddp"
+    cfg2 = DistrainerConfig.from_dict({"parallel": {"kind": "none"}})
+    assert cfg2.parallel.kind == "none"
+    assert DistrainerConfig.from_dict(cfg2.asdict()).parallel.kind == "none"
+    with pytest.raises(ValueError, match="parallel.kind"):
+        DistrainerConfig.from_dict({"parallel": {"kind": "tensor"}})
+    with pytest.raises(ValueError, match="unknown keys in parallel"):
+        DistrainerConfig.from_dict({"parallel": {"kind": "ddp", "buckets": 3}})

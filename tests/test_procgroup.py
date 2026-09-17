@@ -64,11 +64,15 @@ def test_ddp_averages_the_gradients_so_the_replicas_stay_identical(tmp_path):
     assert sorted(w) == [(0, 0), (0, 2), (0, 4), (0, 6), (1, 1), (1, 3), (1, 5), (1, 7)]
     for step in range(4):
         assert torch.allclose(w[(0, 2 * step)], w[(1, 2 * step + 1)], atol=0, rtol=0)
-    # without the wrap the different blocks drive the replicas apart from the first step
+    # parallel.kind none: no wrap, and the different blocks drive the replicas apart at once
     cfg2 = make_store(
-        tmp_path / "plain", W=8, segments=1, train={"record_dir": str(tmp_path / "w2")}
+        tmp_path / "plain",
+        W=8,
+        segments=1,
+        train={"record_dir": str(tmp_path / "w2")},
+        parallel={"kind": "none"},
     )
-    run_world(cfg2, 2, recording_step, build_model, str(tmp_path / "out2"), prepare=False)
+    run_world(cfg2, 2, recording_step, build_model, str(tmp_path / "out2"))
     w2 = load_weights(tmp_path / "w2")
     assert not torch.equal(w2[(0, 0)], w2[(1, 1)])
     assert not torch.equal(w2[(0, 0)], w[(0, 0)])  # and DDP's first step is neither replica's own

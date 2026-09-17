@@ -83,6 +83,18 @@ class FailureSpec:
     max_failures: int = 3
 
 
+PARALLEL_KINDS = ("ddp", "none")
+
+
+@dataclass
+class ParallelConfig:
+    """How the replicas agree (spec section 5): ``ddp`` wraps in DistributedDataParallel (the
+    gradients all-reduced inside every ``backward``); ``none`` leaves the module unwrapped, so
+    the ranks train independently (no collective per step)."""
+
+    kind: str = "ddp"
+
+
 @dataclass
 class DistrainerConfig:
     run_name: str = "run"
@@ -97,6 +109,7 @@ class DistrainerConfig:
     loader: LoaderConfig = field(default_factory=LoaderConfig)
     scaling: ScalingSpec = field(default_factory=ScalingSpec)
     failure: FailureSpec = field(default_factory=FailureSpec)
+    parallel: ParallelConfig = field(default_factory=ParallelConfig)
     hooks: dict[str, Any] = field(default_factory=dict)
     train: dict[str, Any] = field(default_factory=dict)
 
@@ -112,6 +125,7 @@ class DistrainerConfig:
             "loader": LoaderConfig,
             "scaling": ScalingSpec,
             "failure": FailureSpec,
+            "parallel": ParallelConfig,
         }
         kwargs: dict[str, Any] = {}
         for key, value in d.items():
@@ -205,6 +219,10 @@ class DistrainerConfig:
             raise ValueError("loader.prefetch and loader.threads must be positive")
         if self.failure.max_failures < 0:
             raise ValueError("failure.max_failures must be >= 0")
+        if self.parallel.kind not in PARALLEL_KINDS:
+            raise ValueError(
+                f"parallel.kind must be one of {list(PARALLEL_KINDS)}, got {self.parallel.kind!r}"
+            )
         if not self.run_name or "/" in self.run_name:
             raise ValueError("run_name must be non-empty and contain no '/'")
         hook_specs(self.hooks)  # every hook names an entry of the form pkg.module:attr

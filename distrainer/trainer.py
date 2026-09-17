@@ -24,7 +24,7 @@ import torch
 
 from distrainer import __version__
 from distrainer.audit import AuditWriter, next_attempt
-from distrainer.config import DistrainerConfig
+from distrainer.config import DistrainerConfig, ParallelConfig
 from distrainer.hooks import SegmentHook, build_hooks, hook_specs, load_entry
 from distrainer.ledger import Ledger
 from distrainer.loader import LaneLoader
@@ -59,6 +59,11 @@ class TrainInfo:
         """The free-form ``train:`` section of the config."""
         return self.config.train
 
+    @property
+    def parallel(self) -> ParallelConfig:
+        """The ``parallel:`` section: which kind of wrap the model got (``kind``)."""
+        return self.config.parallel
+
 
 BuildModel = Callable[[TrainInfo], tuple[torch.nn.Module, torch.optim.Optimizer]]
 TrainStep = Callable[
@@ -69,6 +74,11 @@ TrainStep = Callable[
 def unwrap(model: torch.nn.Module) -> torch.nn.Module:
     """The user's module inside a DDP wrapper (or the module itself)."""
     return getattr(model, "module", model)
+
+
+def parallel_strategy(parallel: ParallelConfig) -> str | None:
+    """Ray Train's ``prepare_model(parallel_strategy=...)`` argument for a ``parallel:`` kind."""
+    return {"ddp": "ddp", "none": None}[parallel.kind]
 
 
 def init_ray(cfg: DistrainerConfig, **kwargs: Any) -> None:
@@ -270,7 +280,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
 
     info = TrainInfo(rank=rank, world_size=n, config=cfg, device=device)
     model, optimizer = build_model(info)
-    model = ray.train.torch.prepare_model(model)
+    model = ray.train.torch.prepare_model(model, parallel_strategy=parallel_strategy(cfg.parallel))
 
     # hooks and gc are writers and run on rank 0 only; they get a BlockLog of their own rather
     # than the reader instance the loader's producer thread polls
