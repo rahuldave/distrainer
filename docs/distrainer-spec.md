@@ -296,7 +296,7 @@ DiLoCo(model, outer_lr, outer_momentum, nesterov)   # anchor - params averaged -
 def build_sync(cfg, model) -> SegmentSync | None   # CheckpointIO saves state_dict() as parallel.pt, load restores it
 # a segment-end checkpoint resumes exactly under these kinds; a mid-segment one holds rank 0's drifted replica,
 # and a resume restarts every rank from it (positions exact, the other replicas' drift lost)
-def wrap_fsdp(model, parallel, device) -> Module   # parallel.kind fsdp: fully_shard (FSDP2) per direct child, then the root
+def wrap_fsdp(model, parallel, device, optimizer=None) -> Module   # fsdp: fully_shard (FSDP2) per direct child, then the root; the optimizer re-pointed at the shards
 class CheckpointIO:                                # two shapes (section 6.2): full from rank 0; sharded, every rank's DCP shard
     def save(self, model, optimizer, ledger, extra=None, sync=None, sharded=False, rank=0) -> Checkpoint
     @staticmethod def load(checkpoint, model=None, optimizer=None, sync=None) -> Ledger   # detects the shape; reshards
@@ -349,7 +349,7 @@ for segment, (position, ref, table) in loader:
     if segment_end and sync: sync.on_segment_sync(model, opt, ctx)   # local_sgd / diloco: every rank, before the checkpoint
     pass_end    = segment_end and log.next_pass_differs(segment)    # or ended()
     if policy.should_checkpoint(StepContext(position, ledger.cursor, segment_end, pass_end, ...)):
-        report(metrics, checkpoint=save(model, opt, ledger) if rank == 0 else None,
+        report(metrics, checkpoint=save(model, opt, ledger) if rank == 0 or sharded else None,   # fsdp: every rank its shard
                checkpoint_upload_mode=ASYNC)
     else:
         report(metrics)                                    # keeps report counts aligned

@@ -4,6 +4,7 @@ waiting at a segment end) is asserted here."""
 
 import os
 
+import pytest
 import torch
 from conftest import AppendNextSegments
 from procgroup import run_world
@@ -143,6 +144,10 @@ def test_segment_hook_appends_on_rank_zero_while_the_other_rank_waits(tmp_path):
 
 
 # ---- M9: the segment-end sync (local SGD, DiLoCo) ----
+# these stores keep checkpoint.policy any on purpose (the mid-segment assertions), which the
+# config warns about under the drifting kinds
+
+pytestmark = pytest.mark.filterwarnings("ignore:parallel.kind:UserWarning")
 
 
 def test_local_sgd_trains_alone_and_averages_at_the_segment_end(tmp_path):

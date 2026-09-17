@@ -27,5 +27,12 @@ def test_inspect_export_log_ls_gc(store, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "'segment': 1" in out and "done positions in segment 1: 2" in out
     assert "shape: full" in out
+    # a file where a checkpoint directory is expected: one line on stderr, exit 1
+    snap = tmp_path / "checkpoint_manager_snapshot.json"
+    snap.write_text("{}")
+    assert main(["inspect", str(snap)]) == 1
+    err = capsys.readouterr().err
+    assert err.startswith("distrainer inspect:") and "not a checkpoint directory" in err
+    assert "Traceback" not in err
     assert main(["export", ckpt.path, str(tmp_path / "exported")]) == 0
     assert (tmp_path / "exported" / "ledger.json").exists()

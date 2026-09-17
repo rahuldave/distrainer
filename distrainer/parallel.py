@@ -172,6 +172,8 @@ def wrap_fsdp(
     from torch.distributed.device_mesh import init_device_mesh
     from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 
+    # keyed by identity: fully_shard replaces every parameter object, and the originals stay
+    # alive only because the optimizer's param groups still hold them until re-pointed below
     names = {id(p): n for n, p in model.named_parameters()}
     mesh = init_device_mesh(device.type, (dist.get_world_size(),))
     policy = MixedPrecisionPolicy(

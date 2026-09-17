@@ -30,7 +30,7 @@ from distrainer import __version__
 from distrainer.audit import AuditWriter, next_attempt
 from distrainer.config import DistrainerConfig, ParallelConfig
 from distrainer.hooks import SegmentHook, build_hooks, hook_specs, load_entry
-from distrainer.ledger import Ledger
+from distrainer.ledger import LEDGER_FILENAME, Ledger
 from distrainer.loader import LaneLoader
 from distrainer.log import BlockLog, Segment
 from distrainer.parallel import SegmentSync, build_sync, is_sharded, wrap_fsdp
@@ -246,12 +246,11 @@ class CheckpointIO:
         """Restore what is given; a ``sync`` takes its saved state, or resets to the loaded model
         when the checkpoint has none (a run under another kind)."""
         with checkpoint.as_directory() as path:
-            if os.path.exists(os.path.join(path, CheckpointIO.MODEL)):
+            kind, _ = CheckpointIO._shape_of(set(os.listdir(path)), path)
+            if kind == "full":
                 CheckpointIO._load_full(path, model, optimizer)
-            elif os.path.exists(os.path.join(path, CheckpointIO.DCP_METADATA)):
+            else:
                 CheckpointIO._load_sharded(path, model, optimizer)
-            elif model is not None:
-                raise FileNotFoundError(f"no model.pt and no sharded checkpoint under {path}")
             if sync is not None:
                 sync_path = os.path.join(path, CheckpointIO.PARALLEL)
                 if os.path.exists(sync_path):
@@ -292,6 +291,8 @@ class CheckpointIO:
         """DCP re-cuts the saved shards for this model's layout: another world size, or a plain
         module on a driver without a process group."""
         if model is None:
+            if optimizer is not None:
+                raise ValueError("a sharded checkpoint's optimizer state loads only with its model")
             return
         import torch.distributed.checkpoint as dcp
         from torch.distributed.checkpoint.state_dict import (
@@ -312,26 +313,46 @@ class CheckpointIO:
             set_optimizer_state_dict(m, optimizer, state["optim"])
 
     @staticmethod
-    def shape(checkpoint: Any) -> tuple[str, int]:
-        """``("full", 1)`` or ``("sharded", k)`` from the directory listing (nothing downloaded)."""
-        import pyarrow.fs as pafs
-
-        infos = checkpoint.filesystem.get_file_info(pafs.FileSelector(checkpoint.path))
-        names = {os.path.basename(i.path) for i in infos}
+    def _shape_of(names: set[str], where: str) -> tuple[str, int]:
+        """The one predicate ``load`` and ``shape`` share: ``model.pt`` is the full shape; the
+        sharded shape needs DCP's ``.metadata`` *and* at least one ``__<rank>_0.distcp``."""
         if CheckpointIO.MODEL in names:
             return "full", 1
         shards = [n for n in names if n.startswith("__") and n.endswith(".distcp")]
-        if shards:
+        if shards and CheckpointIO.DCP_METADATA in names:
             return "sharded", len(shards)
-        raise FileNotFoundError(f"no checkpoint under {checkpoint.path}")
+        if shards:
+            raise FileNotFoundError(
+                f"{len(shards)} checkpoint shard(s) under {where} but no "
+                f"{CheckpointIO.DCP_METADATA} (an incomplete upload, or an export that skipped "
+                "dotfiles)"
+            )
+        raise FileNotFoundError(f"no model.pt and no sharded checkpoint under {where}")
+
+    @staticmethod
+    def _listing(checkpoint: Any) -> set[str]:
+        import pyarrow.fs as pafs
+
+        info = checkpoint.filesystem.get_file_info(checkpoint.path)
+        if info.type != pafs.FileType.Directory:
+            raise NotADirectoryError(f"{checkpoint.path} is not a checkpoint directory")
+        infos = checkpoint.filesystem.get_file_info(pafs.FileSelector(checkpoint.path))
+        return {os.path.basename(i.path) for i in infos}
+
+    @staticmethod
+    def shape(checkpoint: Any) -> tuple[str, int]:
+        """``("full", 1)`` or ``("sharded", k)`` from the directory listing (nothing downloaded)."""
+        return CheckpointIO._shape_of(CheckpointIO._listing(checkpoint), checkpoint.path)
 
     @staticmethod
     def read_ledger(checkpoint: Any) -> Ledger:
+        """The ledger from the metadata, else from ``ledger.json`` alone (never the weights)."""
         meta = checkpoint.get_metadata()
         if "ledger" in meta:
             return Ledger.from_dict(meta["ledger"])
-        with checkpoint.as_directory() as path:
-            return Ledger.load(path)
+        CheckpointIO._listing(checkpoint)  # a clear error for a path that is no directory
+        with checkpoint.filesystem.open_input_stream(f"{checkpoint.path}/{LEDGER_FILENAME}") as f:
+            return Ledger.from_json(f.read().decode("utf-8"))
 
     def cleanup(self) -> None:
         shutil.rmtree(self.scratch_dir, ignore_errors=True)

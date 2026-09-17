@@ -99,7 +99,17 @@ the image example on the synthetic set: fsdp equal to ddp in loss and probe (kNN
   example's `all_gather` path with no unit test (now possible: run `info_nce` on two ranks of
   the process-group harness), the personal bucket names, `wipe-shared` a no-op, the account
   key in every pod.
-- From M9: the encoder view (section 4); the `inspect` message; the fsdp shard-unit policy is
+- From the post-merge `gpa` of PRs #24 to #26 (the review ran after the merges; the rest of
+  its findings were fixed in the review-fixes PR): `parallel.average_` issues one blocking
+  all-reduce per tensor, about 160 transatlantic round trips per sync for a ResNet, which eats
+  the win DiLoCo exists for -> coalesce into one flat buffer per sync
+  (`torch.distributed.all_reduce_coalesced` or `_flatten_dense_tensors`) before the pod runs;
+  the fsdp checkpoint assertions run through the harness's `merge_checkpoint`, so Ray's real
+  merge of the ranks' directories and the ASYNC per-rank upload have no automated coverage ->
+  one `integration_tests/single_node` scenario under `parallel.kind: fsdp` asserting
+  `CheckpointIO.shape` on the stored checkpoint; `free_port()` in the harness can collide
+  under concurrent runs.
+- From M9: the encoder view (section 4); the `inspect` message (fixed in the review-fixes PR); the fsdp shard-unit policy is
   fixed at "every direct child" with no knob; a per-rank checkpoint shape (the DCP machinery)
   would make mid-segment resumes exact under local_sgd/diloco; `examples/*/harness*.yaml`
   carry no `parallel:` section yet (the default applies).

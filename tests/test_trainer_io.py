@@ -1,5 +1,6 @@
 import os
 
+import pytest
 import torch
 
 from distrainer.ledger import Ledger
@@ -123,3 +124,33 @@ def test_sharded_checkpoint_without_a_group_round_trips_and_reports_its_shape(tm
     assert fresh_opt.state_dict()["state"][0]["step"] == opt.state_dict()["state"][0]["step"]
     assert CheckpointIO.read_ledger(sharded) == ledger
     assert CheckpointIO.load(Checkpoint.from_directory(sharded.path)) == ledger  # ledger only
+
+
+def test_shape_and_load_agree_and_inspect_style_reads_never_download(tmp_path):
+    from ray.train import Checkpoint
+
+    model = torch.nn.Linear(2, 1)
+    ledger = Ledger(segment=0, cursor=1, world_size=1)
+    io = CheckpointIO(scratch_dir=str(tmp_path / "s"), run_name="t")
+    sharded = io.save(model, None, ledger, sharded=True)
+    # shards without DCP's .metadata: one clear error from both shape and load, not two answers
+    os.remove(os.path.join(sharded.path, CheckpointIO.DCP_METADATA))
+    with pytest.raises(FileNotFoundError, match="no .metadata"):
+        CheckpointIO.shape(sharded)
+    with pytest.raises(FileNotFoundError, match="no .metadata"):
+        CheckpointIO.load(sharded, torch.nn.Linear(2, 1))
+    # the ledger of a checkpoint without metadata comes from ledger.json alone
+    plain = Checkpoint.from_directory(sharded.path)
+    assert CheckpointIO.read_ledger(plain) == ledger
+    # a file, not a directory (checkpoint_manager_snapshot.json sorts next to the checkpoints)
+    snap = tmp_path / "checkpoint_manager_snapshot.json"
+    snap.write_text("{}")
+    with pytest.raises(NotADirectoryError, match="not a checkpoint directory"):
+        CheckpointIO.read_ledger(Checkpoint.from_directory(str(snap)))
+    # a sharded checkpoint's optimizer state needs its model
+    with pytest.raises(ValueError, match="only with its model"):
+        CheckpointIO.load(
+            io.save(model, None, ledger, sharded=True),
+            None,
+            torch.optim.SGD(model.parameters(), lr=1),
+        )
