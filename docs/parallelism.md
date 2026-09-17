@@ -7,6 +7,26 @@ head node and rank 0 are for, shows how PyTorch's DDP and FSDP are built on the 
 how they sit inside distrainer, and ends with what makes the block log a good data layer for
 some of these trainings and not for others.
 
+## 0. The map
+
+Every kind of parallel training answers two questions: is the model *replicated* on every
+device or *split* across them, and how often do the devices agree.
+
+```mermaid
+flowchart TB
+  ONE["one machine: no ranks"] --> Q{"several devices: replicate the model, or split it?"}
+  Q -- replicate --> DP["data parallel: every rank a full replica, a different batch each"]
+  DP -- "agree every step" --> DDP["DDP: all-reduce the gradients each step"]
+  DP -- "agree every step, shard the memory" --> FSDP["FSDP / ZeRO: all-gather to use, reduce-scatter after"]
+  DP -- "agree every H steps" --> LSGD["local SGD / DiLoCo: average the weights now and then"]
+  Q -- split --> MP["model parallel: one replica across several devices"]
+  MP --> TP["tensor parallel: a layer split, a collective per layer"]
+  MP --> PP["pipeline parallel: layers in stages, send and receive between them"]
+  DDP -. "distrainer today" .-> DDP
+  FSDP -. "a wrapping and a checkpoint change" .-> FSDP
+  LSGD -. "the segment end is the sync" .-> LSGD
+```
+
 ## 1. Who is who: the head, the driver, the ranks, and rank 0
 
 ```mermaid
@@ -51,6 +71,41 @@ flowchart TB
   the same forward and backward as everyone. Checkpoints do not happen on the head because
   the weights are not there.
 
+The checkpoint, step by step:
+
+```mermaid
+sequenceDiagram
+  participant R0 as rank 0
+  participant R1 as rank 1
+  participant S as the store (bucket)
+  participant TC as Train controller (head)
+  Note over R0,R1: the policy says "checkpoint at this step", on every rank identically
+  R0->>R0: save model.pt, optimizer.pt, ledger.json to local scratch
+  R0->>TC: report(metrics, checkpoint)
+  R1->>TC: report(metrics), no checkpoint attached
+  Note over R0,R1: report is a barrier: both wait until both have reported
+  R0-->>S: upload of the directory, asynchronous, training continues
+  TC->>S: register the checkpoint, delete the oldest beyond num_to_keep
+```
+
+And a restart after a node dies:
+
+```mermaid
+sequenceDiagram
+  participant TC as Train controller (head)
+  participant S as the store
+  participant R0 as rank 0 (new)
+  participant R1 as rank 1 (new)
+  Note over TC: a worker's heartbeat stops; the group is torn down
+  TC->>R0: start a new worker group, same or a different world size
+  TC->>R1: ...
+  R0->>S: fetch the newest registered checkpoint
+  R1->>S: fetch the same
+  Note over R0,R1: restore model and optimizer; read the ledger (segment, cursor, world size, pass)
+  Note over R0,R1: positions done = cursor x old world size; the rest is dealt over the new world size
+  R0->>R1: broadcast the new attempt id from rank 0
+```
+
 ## 2. Five kinds of training
 
 Each kind is one step of the loop drawn with its collectives, then what a checkpoint holds
@@ -80,6 +135,44 @@ block `p` to rank `p mod n`, so a step consumes `n` blocks. The one collective p
 all-reduce of the gradients; after it the replicas are identical again, so the optimizer step
 needs no communication.
 
+The dealer, for one segment of `W = 12` blocks at world size 2, and the same segment resumed
+at world size 3 after a checkpoint at position 5:
+
+```mermaid
+flowchart LR
+  subgraph n2["world size 2: step s takes positions 2s and 2s+1"]
+    direction TB
+    a0["step 0: rank 0 gets p0, rank 1 gets p1"] --> a1["step 1: p2, p3"] --> a2["step 2: p4, p5"] --> a3["checkpoint: cursor 3, world 2, so 6 positions done"]
+  end
+  subgraph n3["resumed at world size 3: positions 6..11 re-dealt"]
+    direction TB
+    b0["step 2: rank 0 p6, rank 1 p7, rank 2 p8"] --> b1["step 3: p9, p10, p11"] --> b2["segment end: a barrier on every rank"]
+  end
+  a3 --> b0
+```
+
+What a step looks like in time under DDP: the ranks compute at slightly different speeds,
+the all-reduce inside `backward` makes them wait for the slowest, and `report` is a second
+wait:
+
+```mermaid
+gantt
+  dateFormat X
+  axisFormat %s
+  section rank 0
+  forward and backward   :r0a, 0, 4
+  all-reduce, waiting    :r0b, 4, 6
+  optimizer step, report :r0c, 6, 7
+  section rank 1
+  forward and backward   :r1a, 0, 5
+  all-reduce             :r1b, 5, 6
+  optimizer step, report :r1c, 6, 7
+  section rank 2
+  forward and backward   :r2a, 0, 6
+  all-reduce             :r2b, 6, 6
+  optimizer step, report :r2c, 6, 7
+```
+
 **How PyTorch's `DistributedDataParallel` does it.** Wrapping the model registers an autograd
 hook on every parameter. During `backward()`, as soon as a bucket of parameters (a few
 megabytes) has its gradients, DDP launches an asynchronous all-reduce of that bucket while the
@@ -90,6 +183,26 @@ sets the group up: rank 0's address as the rendezvous (Ray Train fills it in), t
 (NCCL for GPUs, Gloo for CPUs), the rank and world size. Ray Train's `prepare_model` is the
 wrap; distrainer calls it after `build_model` and never touches DDP again. `torch.no_sync()`
 skips the all-reduce for a step, which is the hook local SGD uses (2.5).
+
+The overlap, for a three-layer model whose gradients are ready last layer first:
+
+```mermaid
+sequenceDiagram
+  participant AG as autograd (one rank)
+  participant DDP as DDP hooks
+  participant NET as the network (all ranks)
+  AG->>AG: gradients of layer 3
+  AG->>DDP: bucket 1 ready
+  DDP-)NET: all-reduce bucket 1, asynchronous
+  AG->>AG: gradients of layer 2
+  AG->>DDP: bucket 2 ready
+  DDP-)NET: all-reduce bucket 2
+  AG->>AG: gradients of layer 1
+  AG->>DDP: bucket 3 ready
+  DDP-)NET: all-reduce bucket 3
+  NET-->>DDP: all three done
+  DDP-->>AG: backward() returns with averaged gradients
+```
 
 **Checkpoint.** `unwrap(model).state_dict()` plus the optimizer state, from rank 0, plus the
 ledger. **Restart** with the same `n`: every rank loads the same file. **Resize**: the ledger's
@@ -112,6 +225,26 @@ sequenceDiagram
   Note over R0,R2: compute the gradients
   R2->>R0: reduce-scatter the gradients (each rank keeps the slice of its shard)
   Note over R0,R2: optimizer.step on the shard only
+```
+
+What each rank holds, DDP against FSDP, for a model of parameters `P` with an Adam optimizer
+(two moments per parameter):
+
+```mermaid
+flowchart LR
+  subgraph ddp["DDP: every rank"]
+    d1["parameters: P"]
+    d2["gradients: P"]
+    d3["optimizer state: 2P"]
+    d4["activations of its batch"]
+  end
+  subgraph fsdp["FSDP, 4 ranks: every rank"]
+    f1["parameters: P/4, plus one layer gathered at a time"]
+    f2["gradients: P/4"]
+    f3["optimizer state: 2P/4"]
+    f4["activations of its batch"]
+  end
+  ddp -- "same batches, same effective weights" --- fsdp
 ```
 
 Same data flow as DDP (a different batch per rank, the same weights in effect), but each rank
@@ -161,6 +294,20 @@ sequenceDiagram
   Note over S0,S2: several micro-batches in flight to keep every stage busy
 ```
 
+```mermaid
+sequenceDiagram
+  participant G0 as GPU 0 (half of every layer)
+  participant G1 as GPU 1 (the other half)
+  Note over G0,G1: the same input on both
+  G0->>G0: layer 1, its half
+  G1->>G1: layer 1, its half
+  G0->>G1: all-reduce the partial outputs of layer 1
+  G0->>G0: layer 2, its half
+  G1->>G1: layer 2, its half
+  G0->>G1: all-reduce again
+  Note over G0,G1: and the same in backward: a collective per layer, both ways
+```
+
 **Tensor parallelism** splits the matrices of one layer across GPUs; every layer's forward and
 backward ends with an all-reduce (or all-gather) of activations, so it is a collective *per
 layer per micro-batch* and only makes sense over NVLink inside a machine. **Pipeline
@@ -189,6 +336,34 @@ sequenceDiagram
   Note over R0,R2: H more steps ...
 ```
 
+The same ranks in time, under DDP and under local SGD with `H = 4`: the slow link costs
+every step in one and every fourth step in the other.
+
+```mermaid
+gantt
+  dateFormat X
+  axisFormat %s
+  section DDP rank 0
+  step, all-reduce :d0a, 0, 3
+  step, all-reduce :d0b, 3, 6
+  step, all-reduce :d0c, 6, 9
+  step, all-reduce :d0d, 9, 12
+  section local SGD rank 0
+  4 local steps            :l0a, 0, 4
+  average, one collective  :l0b, 4, 6
+  4 local steps            :l0c, 6, 10
+  average                  :l0d, 10, 12
+```
+
+In distrainer the natural `H` is a segment: `W / n` steps between two segment ends, which are
+already barriers on every rank.
+
+```mermaid
+flowchart LR
+  S0["segment 0: W blocks dealt, no collective per step"] --> B0["segment end: all-reduce of the weights or the change; rank 0 writes the checkpoint"]
+  B0 --> S1["segment 1"] --> B1["segment end: sync"] --> S2["segment 2 ..."]
+```
+
 Each rank trains alone for `H` steps (hundreds), then the ranks average their weights, or,
 in DiLoCo, average the *change* since the last sync and apply it with an outer optimizer
 (Nesterov momentum) on every rank. One collective every `H` steps instead of one per step:
@@ -215,6 +390,27 @@ distrainer owns the *data axis* of training and nothing inside the model:
   loop may run retention gc;
 - the **audit trail**: every rank appends `(attempt, world size, segment, cursor, position,
   block)` per step, so a checker can prove what was consumed after any kill or resize.
+
+Which piece of distrainer each training leans on:
+
+```mermaid
+flowchart LR
+  DEAL["the dealer and the ledger: positions, resume, resize"]
+  SEG["the segment end: a barrier on every rank, hooks on rank 0"]
+  CK["CheckpointIO: rank 0 writes, every rank loads"]
+  AUD["the audit trail"]
+  DDP2["DDP"] --> DEAL
+  DDP2 --> CK
+  DDP2 --> AUD
+  FSDP2["FSDP"] --> DEAL
+  FSDP2 -- "one shard per rank, reshard on resize" --> CK
+  FSDP2 --> AUD
+  L2["local SGD / DiLoCo"] --> DEAL
+  L2 -- "the sync point" --> SEG
+  L2 --> CK
+  L2 --> AUD
+  TP2["tensor / pipeline"] -. "a rank would have to be a group; per-slice checkpoints; no re-deal of a split" .-> DEAL
+```
 
 | training | fit | why, and what would be better |
 |---|---|---|
