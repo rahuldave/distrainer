@@ -1,4 +1,7 @@
-"""Drive distrainer.trainer.train_loop rank by rank with a fake ray.train (no cluster)."""
+"""Drive distrainer.trainer.train_loop rank by rank with a fake ray.train (no cluster).
+
+The collectives are stubbed out here; ``test_procgroup.py`` runs the same loop on real ranks over
+a Gloo group (``procgroup.py``) for what is *about* the collectives."""
 
 import threading
 
@@ -68,7 +71,7 @@ def fake_ray(monkeypatch):
     monkeypatch.setattr(ray.train, "get_context", lambda: FakeContext(state["rank"], state["n"]))
     monkeypatch.setattr(ray.train, "get_checkpoint", lambda: state["checkpoint"])
     monkeypatch.setattr(ray.train, "report", report)
-    monkeypatch.setattr(ray.train.torch, "prepare_model", lambda m: m)
+    monkeypatch.setattr(ray.train.torch, "prepare_model", lambda m, **kw: m)
     monkeypatch.setattr(ray.train.torch, "get_device", lambda: torch.device("cpu"))
     monkeypatch.setattr(
         ray.train.collective,

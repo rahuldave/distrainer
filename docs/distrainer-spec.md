@@ -144,6 +144,7 @@ examples/
     probe.py           # the weighted kNN accuracy of the backbone at the end of a run
     train.py           # DistTrainer entrypoint plus the probe
 tests/                 # focused unit tests: log commit/discover, dealer determinism, ledger arithmetic, policy, loader
+                       # (tests/procgroup.py runs n ranks as processes over a Gloo group for the collectives)
 regression_tests/      # bug / API regression tests (added as bugs are found)
 integration_tests/
   cluster/             # scenario runner that drives the cluster through deploy/driver.sh verbs and checks audit logs (S1–S11)
@@ -285,6 +286,22 @@ def build_hooks(cfg: DistrainerConfig) -> list[SegmentHook]
     # factory(cfg, **args) -> SegmentHook, called on rank 0 inside the worker, config order
 def load_entry(entry: str) -> Any                             # "pkg.module:attr", also used by the CLI
 
+# parallel.py  (parallel.kind local_sgd | diloco; ddp and none are prepare_model wraps)
+class SegmentSync(Protocol):
+    def on_segment_sync(self, model, optimizer, info: TrainInfo) -> None
+    # every rank, after the last step of a segment, before the policy's checkpoint and rank 0's hooks
+    def state_dict(self) -> dict; def load_state_dict(self, state) -> None; def reset(self, model) -> None
+LocalSGD()                      # all-reduce average of the parameters and float buffers
+DiLoCo(model, outer_lr, outer_momentum, nesterov)   # anchor - params averaged -> outer Nesterov SGD over the anchor
+def build_sync(cfg, model) -> SegmentSync | None   # CheckpointIO saves state_dict() as parallel.pt, load restores it
+# a segment-end checkpoint resumes exactly under these kinds; a mid-segment one holds rank 0's drifted replica,
+# and a resume restarts every rank from it (positions exact, the other replicas' drift lost)
+def wrap_fsdp(model, parallel, device) -> Module   # parallel.kind fsdp: fully_shard (FSDP2) per direct child, then the root
+class CheckpointIO:                                # two shapes (section 6.2): full from rank 0; sharded, every rank's DCP shard
+    def save(self, model, optimizer, ledger, extra=None, sync=None, sharded=False, rank=0) -> Checkpoint
+    @staticmethod def load(checkpoint, model=None, optimizer=None, sync=None) -> Ledger   # detects the shape; reshards
+    @staticmethod def shape(checkpoint) -> tuple[str, int]                                # ("full", 1) | ("sharded", k)
+
 # writer.py
 class BatchWriter:
     """Turn a finished corpus of blocks into a log. For each pass p: globally permute all N blocks with
@@ -309,7 +326,7 @@ Note on `resume_start`: `done = cursor * n_old` positions are complete. Because 
 
 ```
 ctx      = ray.train.get_context(); rank, n = ctx.get_world_rank(), ctx.get_world_size()
-model, opt = build_model(ctx); wrap with ray.train.torch.prepare_model
+model, opt = build_model(ctx); wrap per cfg.parallel.kind: prepare_model(parallel_strategy="ddp") or no wrap ("none")
 log      = BlockLog(fs, cfg.store_root); W = log.meta().W; assert W % n == 0
 ledger   = Ledger()
 ckpt     = ray.train.get_checkpoint()
@@ -329,6 +346,7 @@ for segment, (position, ref, table) in loader:
     audit.append(rank, n, segment.seq, ledger.cursor, position, ref.block_id)
     ledger.cursor += 1; ledger.world_size = n
     segment_end = (ledger.cursor == W // n)
+    if segment_end and sync: sync.on_segment_sync(model, opt, ctx)   # local_sgd / diloco: every rank, before the checkpoint
     pass_end    = segment_end and log.next_pass_differs(segment)    # or ended()
     if policy.should_checkpoint(StepContext(position, ledger.cursor, segment_end, pass_end, ...)):
         report(metrics, checkpoint=save(model, opt, ledger) if rank == 0 else None,
@@ -361,8 +379,10 @@ Head container role: it hosts the Ray head, the Train controller, the driver (`t
 <storage_path>/<run_name>/
   checkpoint_manager_snapshot.json         # Train's own bookkeeping (controller restarts)
   checkpoint_g{segment:06d}_p{positions:06d}_n{world_size:02d}_a{attempt:02d}/  # checkpoint_dir_name set by distrainer; positions = cursor*world_size, unique across resizes and attempts
-    model.pt                               # state_dict (rank 0) or model_rank{r}.pt shards
+    model.pt                               # full shape (every kind but fsdp): the unwrapped state_dict, from rank 0
     optimizer.pt
+    .metadata, __{rank}_0.distcp           # sharded shape (fsdp): torch.distributed.checkpoint, one shard per rank, merged by Train
+    parallel.pt                            # the segment-end sync's state when it has one (diloco: the anchor and the outer optimizer)
     ledger.json                            # {"segment","cursor","world_size","pass_idx","run_attempt"}
     .metadata.json                         # Checkpoint.set_metadata: ledger + distrainer version (cheap to read)
 ```
@@ -439,6 +459,15 @@ scaling:
   elastic_resize_monitor_interval_s: 15
 failure:
   max_failures: 3
+parallel:
+  kind: ddp                 # ddp (gradients all-reduced every backward) | none (no wrap) | local_sgd | diloco (sync at the
+                            # segment end) | fsdp (fully_shard; one checkpoint shard per rank)
+  outer_lr: 0.7             # diloco: the outer Nesterov SGD over the anchor (Douillard et al. 2023)
+  outer_momentum: 0.9
+  outer_nesterov: true
+  reshard_after_forward: true   # fsdp: free the gathered parameters after each forward (memory over speed)
+  param_dtype: null         # fsdp mixed precision: fp32 | bf16 | fp16 | null (the gathered copy's dtype)
+  reduce_dtype: null        # fsdp: the gradient reduce-scatter's dtype
 hooks:                         # name -> {entry: "pkg.module:factory", ...args}; factory(cfg, **args)
   remine: {entry: examples.toy_contrastive.remine:RemineHook, segments: 12, initial_segments: 1}
 ```

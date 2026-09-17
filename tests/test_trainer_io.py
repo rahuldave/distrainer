@@ -1,3 +1,5 @@
+import os
+
 import torch
 
 from distrainer.ledger import Ledger
@@ -48,6 +50,7 @@ def test_unwrap_and_train_info_defaults():
     assert unwrap(Wrapped()) is m and unwrap(m) is m
     info = TrainInfo(rank=1, world_size=2, config=DistrainerConfig.from_dict({"train": {"lr": 1}}))
     assert info.train == {"lr": 1} and info.position == 0 and info.device.type == "cpu"
+    assert info.parallel.kind == "ddp"
 
 
 def test_lanes_from_resumes_and_stops(store):
@@ -92,3 +95,31 @@ def test_config_report_and_poll_fields():
 
     with pytest.raises(ValueError):
         DistrainerConfig.from_dict({"ray_health_check_interval_s": 0})
+
+
+def test_sharded_checkpoint_without_a_group_round_trips_and_reports_its_shape(tmp_path):
+    from ray.train import Checkpoint
+
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.Linear(4, 1))
+    opt = torch.optim.Adam(model.parameters(), lr=0.1)
+    (model(torch.ones(2, 3)) ** 2).mean().backward()
+    opt.step()  # Adam has state now
+    ledger = Ledger(segment=1, cursor=2, world_size=1, run_attempt=0)
+    io = CheckpointIO(scratch_dir=str(tmp_path / "scratch"), run_name="t")
+    full = io.save(model, opt, ledger)
+    assert CheckpointIO.shape(full) == ("full", 1)
+    sharded = io.save(model, opt, ledger, sharded=True)
+    assert CheckpointIO.shape(sharded) == ("sharded", 1)
+    assert sorted(f for f in os.listdir(sharded.path) if not f.startswith(".metadata")) == [
+        "__0_0.distcp",
+        "ledger.json",
+    ]
+    fresh = torch.nn.Sequential(torch.nn.Linear(3, 4), torch.nn.Linear(4, 1))
+    fresh_opt = torch.optim.Adam(fresh.parameters(), lr=0.1)
+    assert CheckpointIO.load(sharded, fresh, fresh_opt) == ledger
+    assert all(
+        torch.equal(a, b) for a, b in zip(fresh.parameters(), model.parameters(), strict=True)
+    )
+    assert fresh_opt.state_dict()["state"][0]["step"] == opt.state_dict()["state"][0]["step"]
+    assert CheckpointIO.read_ledger(sharded) == ledger
+    assert CheckpointIO.load(Checkpoint.from_directory(sharded.path)) == ledger  # ledger only
