@@ -260,16 +260,41 @@ What is where:
   MinIO's ClusterIP; OrbStack routes pod and service IPs from the Mac, elsewhere use
   `kubectl port-forward svc/distrainer-head-svc 8265`.
 
-## E. RunPod pods (M8, in progress)
+## E. RunPod GPU pods (M8)
 
-Tutorial 6 (`docs/tutorials/runpod.md`) is the guide: the GPU image (`deploy/Dockerfile.gpu`,
-built by GitHub Actions into GHCR), the driver (`deploy/drivers/runpod.sh` on the REST v2 API:
-one GPU pod per Ray node on the secure cloud with global networking, the head a GPU pod too,
-pods found by a name prefix and a `DISTRAINER_CLUSTER` marker, a spend guard on the GPU
-type's hourly price, pods terminated rather than stopped), and the run. Nothing spans pods,
-so the store is the S3 bucket and the runner reads it as under C's AWS bed; `kill-worker`
-terminates a pod and makes a new one of the same name; `kill-head` needs the next `up` to
-replace the workers as well, since they dial the head by its pod id.
+Tutorial 6 (`docs/tutorials/runpod.md`) is the guide; its section 5.1 lists the setup (an
+API key as `RUNPOD_KEY` in `.env`, an ssh key the driver injects, the public GPU image on
+GHCR, the bucket's `S3_*` lines exported in the shell, the `DISTRAINER_RUNPOD_*` settings)
+and its section 5.2 the wiring. In this mode:
+
+- **Ray nodes**: one GPU pod per node on RunPod's secure cloud, created from
+  `deploy/Dockerfile.gpu` (the CUDA wheels of the locked torch, sshd from the injected key)
+  through the REST v2 API by `deploy/drivers/runpod.sh` (`DISTRAINER_DRIVER=runpod`). The
+  head is a GPU pod too, because global networking is only offered to NVIDIA GPU pods; it
+  advertises no `trainer` and runs no training worker.
+- **Networking**: RunPod's global networking, not uncloud (a pod is not a Docker host, and
+  there is no UDP for a WireGuard mesh): a private `10.x` address per pod on `podnet1`, the
+  name `<pod id>.runpod.internal`, TCP at about 100 Mbps, across data centers. The head
+  advertises that address, the workers dial the head's name on 6379, NCCL and Gloo are
+  pinned to the interface. The driver's `exec-head` is ssh over the pod's published 22/tcp
+  port.
+- **Storage**: S3 only, nothing spans pods: the AWS bucket of tutorial 5 for the blocks,
+  the log, the audit trail and the checkpoints; the runner reads it through `endpoint`'s
+  `s3=` line; `shared` prints nothing. The dataset tarball is staged in the bucket too.
+- **Break things**: `kill-worker` is RunPod's stop and start (the pod keeps its host and its
+  image), `kill-head` the same for the head; in the session mode
+  (`DISTRAINER_RUNPOD_DOWN=stop`) `down` stops the pods instead of terminating them and a
+  resize drains or undrains a worker's Ray node over ssh, because a stopped pod's card is
+  rented away within minutes and a new pod costs an image pull of 1 to 35 minutes. `down`
+  with the default terminates everything.
+- **Scenarios**: S2, S3, S4, S9 and S10 on the bucket with hello_blocks (S6 and S11 need a
+  mount and skip), and the image example at world size 1 and 2 and with a worker lost
+  mid-run. The runner needs `DISTRAINER_WAIT_TRAINERS_S` and `DISTRAINER_LAG_INTERVALS`
+  widened (pods restart and reconnect in minutes; the controller's checkpoint bookkeeping
+  lags further from Europe to us-east-1).
+- **Cost and capacity**: 0.24 to 0.74 USD per GPU-hour on the cards used; the cheap types
+  show `LOW` and vanish before the create, so the driver tries an ordered list under a spend
+  guard and can be pinned to a data center. `docs/runpod-gotchas.md` is the running list.
 
 ## What is the same everywhere
 

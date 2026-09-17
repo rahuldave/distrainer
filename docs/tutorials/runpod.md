@@ -214,6 +214,50 @@ pod. Remove the local image afterwards (`docker rmi distrainer-gpu:local`); it i
 
 ## 5. The RunPod driver
 
+### 5.1 Setup: what you need before the first `up`
+
+| item | what | where it goes |
+|---|---|---|
+| a RunPod account with credit | the pods bill by the hour while they exist; the ceiling for the whole M8 exercise was 30 USD and the day cost about 6 | RunPod's console |
+| an API key | made in the console's settings; the driver talks to `https://api.runpod.io/v2` with it | `.env`: `RUNPOD_KEY=...` (this name, not `RUNPOD_API_KEY`) |
+| an ssh key on this machine | the driver injects its public half into every pod it creates, so the account's registered keys are not needed (a shared account stays untouched) | `.env`: `DISTRAINER_RUNPOD_SSH_KEY=~/.ssh/id_rsa` |
+| the GPU image | public on GHCR, built by the workflow (section 4); a pod pulls it with no credentials | `DISTRAINER_IMAGE=ghcr.io/rahuldave/distrainer-gpu:latest` (a branch tag while a branch is unmerged) |
+| the bucket | the S3 endpoint, region and keys of a bucket the pods and the laptop both reach; the same bucket as tutorial 5 | exported in the shell (`export $(grep '^S3_' .harness/aws/env \| xargs)`), not in `.env`, which the compose harness also reads |
+| the settings | which cards, where, at what price, and the session mode | `.env.example` lists every `DISTRAINER_RUNPOD_*` variable with its default; `catalog` shows what is rentable now |
+| the runner's budgets | pods restart and reconnect in minutes and the controller lags on a distant bucket | `DISTRAINER_WAIT_TRAINERS_S=900`, `DISTRAINER_LAG_INTERVALS=12` |
+
+The driver itself needs `curl`, `jq`, `ssh` and `python3` on the machine that runs it (the
+laptop); nothing is installed on the pods beyond the image.
+
+### 5.2 How the pods are wired
+
+No uncloud here, and no WireGuard mesh: uncloud joins Docker *hosts* you own, and a RunPod pod
+is one container on a host you do not own, with no UDP promise. The pods find each other
+through RunPod's **global networking**, requested per pod at creation
+(`globalNetworking: true`, secure-cloud NVIDIA GPU pods only, so the head is a GPU pod too):
+
+- every pod gets a private `10.x` address on a second interface (`podnet1`) and a name
+  `<pod id>.runpod.internal` that every pod of the account resolves; TCP only, about 100
+  Mbps, across data centers;
+- the **Ray head** advertises that address (`ray-head.sh --node-ip-address`, found by the
+  entrypoint once the interface is attached), the **workers** dial the head by its name on
+  port 6379 (`RAY_HEAD_ADDRESS=<head pod id>.runpod.internal:6379`), and Ray's other ports are
+  reachable because every node advertises a `10.x` address;
+- the **collectives** (NCCL for DDP on GPUs, Gloo otherwise) are pinned to the same interface
+  (`NCCL_SOCKET_IFNAME`, `GLOO_SOCKET_IFNAME`), or their setup hangs on the container's default
+  one;
+- the **driver** reaches the head over the pod's published `22/tcp` port (RunPod maps it to a
+  public address and port, printed in the pod's `ssh.direct` block) with the injected key;
+  the workers are reached the same way when a resize drains or undrains their Ray node;
+- **nothing else is shared**: the blocks, the log, the audit trail and the checkpoints go
+  through the S3 bucket, as on the AWS bed; pod-local disk holds only the dataset cache and
+  Ray's checkpoint staging; the dashboard is not exposed (`endpoint` prints the ssh tunnel).
+
+`docs/running-modes.md` places this next to the laptop, the containers, the uncloud machines
+and KubeRay.
+
+### 5.3 The verbs under RunPod
+
 `deploy/drivers/runpod.sh`, selected with `DISTRAINER_DRIVER=runpod`, implements the verbs of
 `deploy/driver.sh` on RunPod's REST v2 API (`https://api.runpod.io/v2`; v1 is retired on
 2026-11-15) with `curl` and `jq`, so `just up 2`, `just integration S2`, `just kill-worker 1`
