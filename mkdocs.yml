@@ -28,6 +28,7 @@ plugins:
             show_signature_annotations: true
             separate_signature: true
             filters: ["!^_"]
+            show_if_no_docstring: true   # a public callable without a docstring shows its signature
 markdown_extensions:
   - tables
   - toc: { permalink: true }
@@ -58,8 +59,8 @@ nav:
       - Examples and scenarios: examples-and-scenarios.md
   - Reference:
       - Specification v0.1: distrainer-spec.md
-      - Design sketch: distrainer-design.md
       - API reference: api.md
+      - Design sketch: distrainer-design.md
       - Research report: ray-sub-epoch-training-report.md
   - Field notes:
       - RunPod gotchas: runpod-gotchas.md

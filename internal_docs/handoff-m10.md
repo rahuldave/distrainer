@@ -178,8 +178,8 @@ docstring should name the surface (the torch-free core re-exported; `distrainer.
 `distrainer.parallel` imported directly because they pull in Ray and torch). The other
 example modules are accurate.
 
-**Docstrings missing on public callables** (they render empty on `docs/api.md`; 84 of 162
-have one). User-facing: `trainer.py` (`MetricAggregator.__init__` / `add`,
+**Docstrings missing on public callables** (they show a bare signature on `docs/api.md`;
+about half of the surface). User-facing: `trainer.py` (`MetricAggregator.__init__` / `add`,
 `CheckpointIO.__init__` / `cleanup`, `DistTrainer.__init__` / `scaling_config` /
 `run_config` / `loop_config` / `trainer` / `fit`); `config.py` (every section dataclass but
 `ParallelConfig`, `as_policy_dict`, `min_workers` / `max_workers` / `elastic`,
