@@ -9,10 +9,12 @@ state with `gest task show` and `git status` before relying on them.
 
 - M0 to M9 are merged to `main`. M9, the parallel kinds proven on the CPU: PR #24, issue #23,
   squash `94aea7e` (Gest parent `nsqzpzxv`, iteration `zrtkpqzm`); the docs split and the site
-  followed in the next PR. The docs are a GitHub Pages site built by Jekyll from `main:/docs`
-  (`docs/index.md` the home, `docs/_config.yml`, `docs/_layouts/default.html` with the Mermaid
-  renderer); `internal_docs/` holds the handoffs, the workflow docs and the cheat sheets and is
-  not on the site.
+  followed in the next PR. The docs are a GitHub Pages site built by MkDocs (Material) from `docs/`
+  by `.github/workflows/docs.yml` on every push to `main` that touches them (`mkdocs.yml` holds
+  the nav; `docs/index.md` is the home; Mermaid renders through superfences; GitHub's own
+  Jekyll build was tried first and fails on the Mermaid `{{"..."}}` node syntax, which Liquid
+  parses); `uvx --with mkdocs-material mkdocs build` builds it locally. `internal_docs/` holds
+  the handoffs, the workflow docs and the cheat sheets and is not on the site.
 - **M9 was re-scoped mid-session** (Rahul: no pod runs while Fable's weekly quota was at 99%
   and the session billed the API). The GPU runs and the driver's per-pod GPU count are M10;
   their Gest leaves `rslyvvkq` (the runs) and `sxytmvrk` (the GPU count) still sit under the M9

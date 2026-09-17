@@ -60,3 +60,5 @@ Claude outputs/
 
 # multi-node harness shared storage (bind mount for the containers)
 .harness/
+_site/
+.cache/

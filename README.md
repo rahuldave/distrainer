@@ -10,7 +10,7 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 
 ## Read first
 
-The docs are also a site: <https://rahuldave.github.io/distrainer/> (`docs/`); `internal_docs/` holds
+The docs are also a site: <https://rahuldave.com/distrainer/> (`docs/`, built by MkDocs); `internal_docs/` holds
 the handoffs, the agent workflow and the cheat sheets, which stay out of it.
 
 - [`docs/introduction.md`](docs/introduction.md) — a from-zero introduction to distributed

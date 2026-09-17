@@ -98,7 +98,9 @@ then this file for the rules that are specific to Claude Code sessions.
   behaviours learned, open follow-ups, and M10 (the GPU runs on RunPod, the driver's per-pod
   GPU count, the M8 follow-ups). `internal_docs/handoff-m9.md` is the M8 -> M9 one; earlier
   handoffs go back to M5.
-- `docs/` is the public site (GitHub Pages from `main:/docs`, `docs/index.md` the home);
+- `docs/` is the public site (MkDocs from `mkdocs.yml`, deployed to GitHub Pages by
+  `.github/workflows/docs.yml`; `docs/index.md` the home; build locally with
+  `uvx --with mkdocs-material mkdocs build`);
   `internal_docs/` holds the handoffs, the workflow docs and the cheat sheets. New handoffs
   and agent-facing notes go to `internal_docs/`.
 - `docs/examples-and-scenarios.md` says how every scenario is driven and checked;
