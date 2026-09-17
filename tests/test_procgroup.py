@@ -211,3 +211,100 @@ def test_diloco_outer_state_round_trips_through_a_checkpoint(tmp_path):
     with_state = load_weight(world3.checkpoints()["checkpoint_g000001_p000008_n02_a02"])
     without = load_weight(world4.checkpoints()["checkpoint_g000001_p000008_n02_a03"])
     assert not torch.equal(with_state, without)
+
+
+# ---- M9: fsdp and the sharded checkpoint shape ----
+
+
+def mlp_model(info):
+    """A model with enough parameters to shard, and an optimizer with state."""
+    torch.manual_seed(0)
+    m = torch.nn.Sequential(torch.nn.Linear(1, 8), torch.nn.Tanh(), torch.nn.Linear(8, 1))
+    return m, torch.optim.Adam(m.parameters(), lr=0.01)
+
+
+def load_mlp(checkpoint_dir: str) -> torch.nn.Module:
+    """A driver-side load (no process group) of either checkpoint shape into a plain MLP."""
+    from ray.train import Checkpoint
+
+    m, _ = mlp_model(None)
+    CheckpointIO.load(Checkpoint.from_directory(checkpoint_dir), m)
+    return m
+
+
+def flat(m: torch.nn.Module) -> torch.Tensor:
+    return torch.cat([p.detach().flatten() for p in m.parameters()])
+
+
+def test_fsdp_shards_the_model_and_every_rank_writes_its_shard(tmp_path):
+    finals = {}
+    for kind in ("ddp", "fsdp"):
+        cfg = make_store(tmp_path / kind, W=8, segments=2, parallel={"kind": kind})
+        world = run_world(cfg, 2, train_step, mlp_model, str(tmp_path / kind / "out"))
+        name = "checkpoint_g000001_p000008_n02_a00"
+        if kind == "ddp":
+            assert [r.has_checkpoint for r in world.by_rank(1)] == [False] * 4
+            finals[kind] = flat(load_mlp(world.checkpoints()[name].checkpoint_path))
+        else:
+            assert all(r.has_checkpoint for r in world.reports)  # every rank reports its shard
+            merged = world.merge_checkpoint(name, str(tmp_path / kind / "merged"))
+            files = sorted(os.listdir(merged))
+            assert "__0_0.distcp" in files and "__1_0.distcp" in files and ".metadata" in files
+            assert "ledger.json" in files and "model.pt" not in files
+            from ray.train import Checkpoint
+
+            assert CheckpointIO.shape(Checkpoint.from_directory(merged)) == ("sharded", 2)
+            assert CheckpointIO.read_ledger(Checkpoint.from_directory(merged)) == Ledger(
+                1, 4, 2, 0, 0
+            )
+            finals[kind] = flat(load_mlp(merged))
+        fs, root = cfg.store_fs()
+        assert check_s1(read_audit(fs, root, "fake"), 8) == []
+    # the same batches and the same effective weights: fsdp trains like ddp
+    assert torch.allclose(finals["ddp"], finals["fsdp"], atol=1e-5)
+
+
+def test_sharded_checkpoint_resumes_exactly_at_the_same_world_size_and_reshards_at_another(
+    tmp_path,
+):
+    cfg = make_store(tmp_path, W=8, segments=3, parallel={"kind": "fsdp"})
+    world = run_world(cfg, 2, train_step, mlp_model, str(tmp_path / "out"))
+    end0 = world.merge_checkpoint("checkpoint_g000000_p000008_n02_a00", str(tmp_path / "m0"))
+    mid1 = world.merge_checkpoint("checkpoint_g000001_p000004_n02_a00", str(tmp_path / "m1"))
+    final = world.merge_checkpoint("checkpoint_g000002_p000008_n02_a00", str(tmp_path / "m2"))
+    # the same world size, from a mid-segment checkpoint (the replicas agree under fsdp): exact,
+    # the optimizer's moments included
+    world2 = run_world(cfg, 2, train_step, mlp_model, str(tmp_path / "out2"), checkpoint=mid1)
+    resumed = world2.merge_checkpoint("checkpoint_g000002_p000008_n02_a01", str(tmp_path / "r2"))
+    assert torch.allclose(flat(load_mlp(resumed)), flat(load_mlp(final)), atol=1e-6)
+    # four ranks from the two-rank segment-end checkpoint: the shards are re-cut on load
+    world4 = run_world(cfg, 4, train_step, mlp_model, str(tmp_path / "out4"), checkpoint=end0)
+    fs, root = cfg.store_fs()
+    records = [r for r in read_audit(fs, root, "fake") if r.attempt == 2]
+    assert sorted(r.position for r in records) == list(range(8, 24))
+    assert check_dealing(records, 8) == []
+    r4 = world4.merge_checkpoint("checkpoint_g000002_p000008_n04_a02", str(tmp_path / "r4"))
+    from ray.train import Checkpoint
+
+    assert CheckpointIO.shape(Checkpoint.from_directory(r4)) == ("sharded", 4)
+    assert torch.isfinite(flat(load_mlp(r4))).all()
+    # and one rank from the same checkpoint (a shrink): one shard
+    world1 = run_world(cfg, 1, train_step, mlp_model, str(tmp_path / "out1"), checkpoint=end0)
+    r1 = world1.merge_checkpoint("checkpoint_g000002_p000008_n01_a03", str(tmp_path / "r1"))
+    assert CheckpointIO.shape(Checkpoint.from_directory(r1)) == ("sharded", 1)
+
+
+def test_a_full_checkpoint_resumes_under_fsdp(tmp_path):
+    cfg = make_store(tmp_path, W=8, segments=2, parallel={"kind": "ddp"})
+    world = run_world(cfg, 2, train_step, mlp_model, str(tmp_path / "out"))
+    end0 = world.checkpoints()["checkpoint_g000000_p000008_n02_a00"]
+    assert end0.checkpoint_path is not None
+    cfg2 = make_store(tmp_path / "f", W=8, segments=2, parallel={"kind": "fsdp"})
+    world2 = run_world(
+        cfg2, 2, train_step, mlp_model, str(tmp_path / "out2"), checkpoint=end0.checkpoint_path
+    )
+    fs, root = cfg2.store_fs()
+    records = read_audit(fs, root, "fake")
+    assert sorted(r.position for r in records) == list(range(8, 16))  # segment 1 only
+    merged = world2.merge_checkpoint("checkpoint_g000001_p000008_n02_a00", str(tmp_path / "m"))
+    assert torch.isfinite(flat(load_mlp(merged))).all()

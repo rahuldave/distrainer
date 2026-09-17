@@ -12,11 +12,13 @@ then retention ``gc`` if ``log.gc`` is set, then a collective barrier. Under ``p
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import tempfile
 import time
 import uuid
+import warnings
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -31,7 +33,7 @@ from distrainer.hooks import SegmentHook, build_hooks, hook_specs, load_entry
 from distrainer.ledger import Ledger
 from distrainer.loader import LaneLoader
 from distrainer.log import BlockLog, Segment
-from distrainer.parallel import SegmentSync, build_sync
+from distrainer.parallel import SegmentSync, build_sync, is_sharded, wrap_fsdp
 from distrainer.planner import lane, resume_start, steps_per_segment
 from distrainer.policy import CheckpointPolicy, StepContext, build_policy, notify_checkpoint
 
@@ -81,7 +83,9 @@ def unwrap(model: torch.nn.Module) -> torch.nn.Module:
 
 def parallel_strategy(parallel: ParallelConfig) -> str | None:
     """Ray Train's ``prepare_model(parallel_strategy=...)`` argument for a ``parallel:`` kind."""
-    return {"ddp": "ddp", "none": None, "local_sgd": None, "diloco": None}[parallel.kind]
+    return {"ddp": "ddp", "none": None, "local_sgd": None, "diloco": None, "fsdp": None}[
+        parallel.kind
+    ]
 
 
 def init_ray(cfg: DistrainerConfig, **kwargs: Any) -> None:
@@ -140,6 +144,15 @@ class MetricAggregator:
 # ---- checkpoint files ----
 
 
+@contextlib.contextmanager
+def _single_process_dcp_quiet() -> Iterator[None]:
+    """DCP warns that it assumes a single process when no group is initialized; that is the
+    intent on a driver (the probe, the CLI) and in the fake fixture."""
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message=".*assuming the intent is to.*")
+        yield
+
+
 def checkpoint_dir_name(ledger: Ledger) -> str:
     """Unique per data position, world size and attempt: ``cursor`` alone is ambiguous across
     resizes (cursor 2 at n=4 is 8 positions, at n=2 it is 4) and Ray trims checkpoints by path."""
@@ -150,17 +163,26 @@ def checkpoint_dir_name(ledger: Ledger) -> str:
 
 
 class CheckpointIO:
-    """Write and read distrainer checkpoints: ``model.pt``, ``optimizer.pt``, ``ledger.json``, and
-    ``parallel.pt`` when the segment-end sync has state (DiLoCo's anchor and outer optimizer).
+    """Write and read distrainer checkpoints in two shapes, the ledger the same four integers.
+
+    *Full* (every kind but fsdp): rank 0 writes ``model.pt``, ``optimizer.pt``, ``ledger.json``
+    and ``parallel.pt`` when the segment-end sync has state (DiLoCo's anchor and outer
+    optimizer). *Sharded* (fsdp): every rank writes its shard of the model and optimizer state
+    with ``torch.distributed.checkpoint`` (``__<rank>_0.distcp`` plus rank 0's ``.metadata``)
+    into a directory of the same name, and Ray Train merges the ranks' directories under one
+    ``checkpoint_dir_name``; rank 0 alone adds the ledger, the sync state and the metadata.
 
     ``save`` writes into a non-temporary worker-local directory (required for ASYNC upload) and
-    attaches the ledger as cheap ``Checkpoint`` metadata; ``load`` restores states and returns
-    the ledger; ``read_ledger`` reads only the metadata.
+    attaches the ledger as cheap ``Checkpoint`` metadata; ``load`` detects the shape, restores
+    what is given (a sharded checkpoint is re-cut for the current world size, and loads into a
+    plain module on a driver with no process group) and returns the ledger; ``read_ledger``
+    reads only the metadata; ``shape`` lists the directory without downloading it.
     """
 
     MODEL = "model.pt"
     OPTIMIZER = "optimizer.pt"
     PARALLEL = "parallel.pt"
+    DCP_METADATA = ".metadata"
 
     def __init__(self, scratch_dir: str | None = None, run_name: str = "run"):
         base = scratch_dir or os.path.join(tempfile.gettempdir(), "distrainer", run_name)
@@ -174,21 +196,41 @@ class CheckpointIO:
         ledger: Ledger,
         extra: dict[str, Any] | None = None,
         sync: SegmentSync | None = None,
+        sharded: bool = False,
+        rank: int = 0,
     ) -> Any:
+        """The full shape from rank 0, or with ``sharded`` this rank's shard (every rank calls it
+        and reports the result under the same ``checkpoint_dir_name``)."""
         from ray.train import Checkpoint
 
         path = os.path.join(
             self.scratch_dir, checkpoint_dir_name(ledger) + "_" + uuid.uuid4().hex[:6]
         )
         os.makedirs(path, exist_ok=True)
-        torch.save(unwrap(model).state_dict(), os.path.join(path, self.MODEL))
-        if optimizer is not None:
-            torch.save(optimizer.state_dict(), os.path.join(path, self.OPTIMIZER))
+        m = unwrap(model)
+        if sharded:
+            import torch.distributed.checkpoint as dcp
+            from torch.distributed.checkpoint.state_dict import (
+                get_model_state_dict,
+                get_optimizer_state_dict,
+            )
+
+            state: dict[str, Any] = {"model": get_model_state_dict(m)}
+            if optimizer is not None:
+                state["optim"] = get_optimizer_state_dict(m, optimizer)
+            with _single_process_dcp_quiet():
+                dcp.save(state, checkpoint_id=path)
+        else:
+            torch.save(m.state_dict(), os.path.join(path, self.MODEL))
+            if optimizer is not None:
+                torch.save(optimizer.state_dict(), os.path.join(path, self.OPTIMIZER))
+        checkpoint = Checkpoint.from_directory(path)
+        if rank != 0:
+            return checkpoint  # the ledger, the sync state and the metadata are rank 0's
         sync_state = sync.state_dict() if sync is not None else {}
         if sync_state:
             torch.save(sync_state, os.path.join(path, self.PARALLEL))
         ledger.save(path)
-        checkpoint = Checkpoint.from_directory(path)
         checkpoint.set_metadata(
             {"ledger": ledger.asdict(), "distrainer": __version__, **(extra or {})}
         )
@@ -204,12 +246,12 @@ class CheckpointIO:
         """Restore what is given; a ``sync`` takes its saved state, or resets to the loaded model
         when the checkpoint has none (a run under another kind)."""
         with checkpoint.as_directory() as path:
-            if model is not None:
-                state = torch.load(os.path.join(path, CheckpointIO.MODEL), map_location="cpu")
-                unwrap(model).load_state_dict(state)
-            opt_path = os.path.join(path, CheckpointIO.OPTIMIZER)
-            if optimizer is not None and os.path.exists(opt_path):
-                optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+            if os.path.exists(os.path.join(path, CheckpointIO.MODEL)):
+                CheckpointIO._load_full(path, model, optimizer)
+            elif os.path.exists(os.path.join(path, CheckpointIO.DCP_METADATA)):
+                CheckpointIO._load_sharded(path, model, optimizer)
+            elif model is not None:
+                raise FileNotFoundError(f"no model.pt and no sharded checkpoint under {path}")
             if sync is not None:
                 sync_path = os.path.join(path, CheckpointIO.PARALLEL)
                 if os.path.exists(sync_path):
@@ -217,6 +259,71 @@ class CheckpointIO:
                 elif model is not None:
                     sync.reset(model)
             return Ledger.load(path)
+
+    @staticmethod
+    def _load_full(path: str, model: Any, optimizer: Any) -> None:
+        if model is not None:
+            state = torch.load(os.path.join(path, CheckpointIO.MODEL), map_location="cpu")
+            if is_sharded(model):  # a full checkpoint into a fully_shard'ed model
+                from torch.distributed.checkpoint.state_dict import (
+                    StateDictOptions,
+                    set_model_state_dict,
+                )
+
+                set_model_state_dict(
+                    unwrap(model), state, options=StateDictOptions(full_state_dict=True)
+                )
+                if optimizer is not None:
+                    import warnings
+
+                    warnings.warn(
+                        "a full checkpoint's optimizer state is not carried into a sharded "
+                        "model; the optimizer starts afresh",
+                        stacklevel=3,
+                    )
+                return
+            unwrap(model).load_state_dict(state)
+        opt_path = os.path.join(path, CheckpointIO.OPTIMIZER)
+        if optimizer is not None and os.path.exists(opt_path):
+            optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+
+    @staticmethod
+    def _load_sharded(path: str, model: Any, optimizer: Any) -> None:
+        """DCP re-cuts the saved shards for this model's layout: another world size, or a plain
+        module on a driver without a process group."""
+        if model is None:
+            return
+        import torch.distributed.checkpoint as dcp
+        from torch.distributed.checkpoint.state_dict import (
+            get_model_state_dict,
+            get_optimizer_state_dict,
+            set_model_state_dict,
+            set_optimizer_state_dict,
+        )
+
+        m = unwrap(model)
+        state: dict[str, Any] = {"model": get_model_state_dict(m)}
+        if optimizer is not None:
+            state["optim"] = get_optimizer_state_dict(m, optimizer)
+        with _single_process_dcp_quiet():
+            dcp.load(state, checkpoint_id=path)
+        set_model_state_dict(m, state["model"])
+        if optimizer is not None:
+            set_optimizer_state_dict(m, optimizer, state["optim"])
+
+    @staticmethod
+    def shape(checkpoint: Any) -> tuple[str, int]:
+        """``("full", 1)`` or ``("sharded", k)`` from the directory listing (nothing downloaded)."""
+        import pyarrow.fs as pafs
+
+        infos = checkpoint.filesystem.get_file_info(pafs.FileSelector(checkpoint.path))
+        names = {os.path.basename(i.path) for i in infos}
+        if CheckpointIO.MODEL in names:
+            return "full", 1
+        shards = [n for n in names if n.startswith("__") and n.endswith(".distcp")]
+        if shards:
+            return "sharded", len(shards)
+        raise FileNotFoundError(f"no checkpoint under {checkpoint.path}")
 
     @staticmethod
     def read_ledger(checkpoint: Any) -> Ledger:
@@ -299,6 +406,9 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     info = TrainInfo(rank=rank, world_size=n, config=cfg, device=device)
     model, optimizer = build_model(info)
     model = ray.train.torch.prepare_model(model, parallel_strategy=parallel_strategy(cfg.parallel))
+    sharded = cfg.parallel.kind == "fsdp"
+    if sharded:
+        model = wrap_fsdp(model, cfg.parallel, device, optimizer)
     sync = build_sync(cfg, model)  # every rank's segment-end agreement (local SGD, DiLoCo), or None
 
     # hooks and gc are writers and run on rank 0 only; they get a BlockLog of their own rather
@@ -409,7 +519,12 @@ def train_loop(loop_config: dict[str, Any]) -> None:
             # decides identically on every rank) and metrics are averaged in between
             if policy.should_checkpoint(sctx):
                 notify_checkpoint(policy, sctx)
-                ckpt = io.save(model, optimizer, ledger, sync=sync) if rank == 0 else None
+                # rank 0 writes the full checkpoint; under fsdp every rank writes its shard
+                ckpt = (
+                    io.save(model, optimizer, ledger, sync=sync, sharded=sharded, rank=rank)
+                    if rank == 0 or sharded
+                    else None
+                )
                 last_ckpt_segment = ledger.segment
                 n_reports += 1
                 ray.train.report(

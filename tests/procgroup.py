@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import pickle
+import shutil
 import socket
 import sys
 import time
@@ -68,8 +69,22 @@ class World:
         return [r for r in self.reports if r.rank == rank]
 
     def checkpoints(self) -> dict[str, Report]:
-        """The reports that carried a checkpoint, by directory name."""
-        return {r.checkpoint_dir_name or "": r for r in self.reports if r.has_checkpoint}
+        """The reports that carried a checkpoint, by directory name (rank 0's when several did)."""
+        out: dict[str, Report] = {}
+        for r in sorted(self.reports, key=lambda r: r.rank):
+            if r.has_checkpoint:
+                out.setdefault(r.checkpoint_dir_name or "", r)
+        return out
+
+    def merge_checkpoint(self, name: str, into: str) -> str:
+        """One directory with every rank's files of checkpoint ``name``: what Ray Train's
+        ``report`` makes of the ranks' directories under one ``checkpoint_dir_name``."""
+        os.makedirs(into, exist_ok=True)
+        for r in self.reports:
+            if r.checkpoint_dir_name == name and r.checkpoint_path:
+                for f in os.listdir(r.checkpoint_path):
+                    shutil.copy2(os.path.join(r.checkpoint_path, f), os.path.join(into, f))
+        return into
 
 
 def free_port() -> int:

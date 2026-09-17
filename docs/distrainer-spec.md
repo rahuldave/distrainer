@@ -296,6 +296,11 @@ DiLoCo(model, outer_lr, outer_momentum, nesterov)   # anchor - params averaged -
 def build_sync(cfg, model) -> SegmentSync | None   # CheckpointIO saves state_dict() as parallel.pt, load restores it
 # a segment-end checkpoint resumes exactly under these kinds; a mid-segment one holds rank 0's drifted replica,
 # and a resume restarts every rank from it (positions exact, the other replicas' drift lost)
+def wrap_fsdp(model, parallel, device) -> Module   # parallel.kind fsdp: fully_shard (FSDP2) per direct child, then the root
+class CheckpointIO:                                # two shapes (section 6.2): full from rank 0; sharded, every rank's DCP shard
+    def save(self, model, optimizer, ledger, extra=None, sync=None, sharded=False, rank=0) -> Checkpoint
+    @staticmethod def load(checkpoint, model=None, optimizer=None, sync=None) -> Ledger   # detects the shape; reshards
+    @staticmethod def shape(checkpoint) -> tuple[str, int]                                # ("full", 1) | ("sharded", k)
 
 # writer.py
 class BatchWriter:
@@ -374,8 +379,9 @@ Head container role: it hosts the Ray head, the Train controller, the driver (`t
 <storage_path>/<run_name>/
   checkpoint_manager_snapshot.json         # Train's own bookkeeping (controller restarts)
   checkpoint_g{segment:06d}_p{positions:06d}_n{world_size:02d}_a{attempt:02d}/  # checkpoint_dir_name set by distrainer; positions = cursor*world_size, unique across resizes and attempts
-    model.pt                               # state_dict (rank 0) or model_rank{r}.pt shards
+    model.pt                               # full shape (every kind but fsdp): the unwrapped state_dict, from rank 0
     optimizer.pt
+    .metadata, __{rank}_0.distcp           # sharded shape (fsdp): torch.distributed.checkpoint, one shard per rank, merged by Train
     parallel.pt                            # the segment-end sync's state when it has one (diloco: the anchor and the outer optimizer)
     ledger.json                            # {"segment","cursor","world_size","pass_idx","run_attempt"}
     .metadata.json                         # Checkpoint.set_metadata: ledger + distrainer version (cheap to read)
@@ -454,10 +460,14 @@ scaling:
 failure:
   max_failures: 3
 parallel:
-  kind: ddp                 # ddp (gradients all-reduced every backward) | none (no wrap) | local_sgd | diloco (sync at the segment end)
+  kind: ddp                 # ddp (gradients all-reduced every backward) | none (no wrap) | local_sgd | diloco (sync at the
+                            # segment end) | fsdp (fully_shard; one checkpoint shard per rank)
   outer_lr: 0.7             # diloco: the outer Nesterov SGD over the anchor (Douillard et al. 2023)
   outer_momentum: 0.9
   outer_nesterov: true
+  reshard_after_forward: true   # fsdp: free the gathered parameters after each forward (memory over speed)
+  param_dtype: null         # fsdp mixed precision: fp32 | bf16 | fp16 | null (the gathered copy's dtype)
+  reduce_dtype: null        # fsdp: the gradient reduce-scatter's dtype
 hooks:                         # name -> {entry: "pkg.module:factory", ...args}; factory(cfg, **args)
   remine: {entry: examples.toy_contrastive.remine:RemineHook, segments: 12, initial_segments: 1}
 ```

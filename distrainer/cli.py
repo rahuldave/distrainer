@@ -1,6 +1,6 @@
 """distrainer command line (spec section 6.4).
 
-``inspect <uri>``      print the ledger from a checkpoint's metadata (no weights downloaded)
+``inspect <uri>``      print the ledger and the shape of a checkpoint (no weights downloaded)
 ``export <uri> <dir>`` copy a checkpoint to a local directory
 ``resume <uri> --config cfg.yaml --entry module:function`` start a new run from a checkpoint
 ``log-ls <store>``     list the block log (meta, committed segments, _END)
@@ -39,6 +39,8 @@ def cmd_inspect(args: argparse.Namespace) -> int:
     print(f"checkpoint: {args.uri}")
     print(f"ledger: {ledger.asdict()}")
     print(f"done positions in segment {ledger.segment}: {ledger.done_positions()}")
+    shape, shards = CheckpointIO.shape(ckpt)
+    print(f"shape: {shape}" + (f" ({shards} shards)" if shape == "sharded" else ""))
     if "distrainer" in meta:
         print(f"written by distrainer {meta['distrainer']}")
     return 0
@@ -104,7 +106,7 @@ def cmd_gc(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="distrainer", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("inspect", help="print the ledger of a checkpoint")
+    p = sub.add_parser("inspect", help="print the ledger and the shape of a checkpoint")
     p.add_argument("uri")
     p.set_defaults(fn=cmd_inspect)
     p = sub.add_parser("export", help="copy a checkpoint to a local directory")

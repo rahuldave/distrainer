@@ -26,5 +26,6 @@ def test_inspect_export_log_ls_gc(store, tmp_path, capsys):
     assert main(["inspect", ckpt.path]) == 0
     out = capsys.readouterr().out
     assert "'segment': 1" in out and "done positions in segment 1: 2" in out
+    assert "shape: full" in out
     assert main(["export", ckpt.path, str(tmp_path / "exported")]) == 0
     assert (tmp_path / "exported" / "ledger.json").exists()

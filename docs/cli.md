@@ -15,15 +15,21 @@ optionally `S3_REGION`, default `auto`) plus the credentials `S3_ACCESS_KEY` and
 
 ### `distrainer inspect <checkpoint uri>`
 
-Print the ledger of a checkpoint from its metadata, without downloading the weights.
+Print the ledger of a checkpoint from its metadata and its shape from the directory listing,
+without downloading the weights.
 
 ```
 $ uv run distrainer inspect runs/hello/hello/checkpoint_g000003_p000008_n02_a00
 checkpoint: runs/hello/hello/checkpoint_g000003_p000008_n02_a00
 ledger: {'segment': 3, 'cursor': 4, 'world_size': 2, 'pass_idx': 0, 'run_attempt': 0}
 done positions in segment 3: 8
+shape: full
 written by distrainer 0.0.1
 ```
+
+Under `parallel.kind: fsdp` the line reads `shape: sharded (k shards)`: every rank wrote its
+shard (`__<rank>_0.distcp` and rank 0's `.metadata`, `torch.distributed.checkpoint`) and a
+resume at another world size re-cuts them on load.
 
 Checkpoint directories are named `checkpoint_g<segment>_p<positions done>_n<world size>_a<attempt>`
 and hold `model.pt`, `optimizer.pt`, `ledger.json` and, under `parallel.kind: diloco`, `parallel.pt`

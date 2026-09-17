@@ -178,3 +178,11 @@ def test_parallel_kinds_and_the_outer_optimizer_fields():
         DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_lr": 0}})
     with pytest.raises(ValueError, match="outer_momentum"):
         DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_momentum": 1.0}})
+
+
+def test_parallel_fsdp_fields():
+    cfg = DistrainerConfig.from_dict({"parallel": {"kind": "fsdp", "param_dtype": "bf16"}})
+    assert cfg.parallel.kind == "fsdp" and cfg.parallel.reshard_after_forward is True
+    assert cfg.parallel.param_dtype == "bf16" and cfg.parallel.reduce_dtype is None
+    with pytest.raises(ValueError, match="param_dtype"):
+        DistrainerConfig.from_dict({"parallel": {"kind": "fsdp", "param_dtype": "int8"}})

@@ -1,7 +1,9 @@
 """distrainer.parallel: how the replicas agree, beyond DDP (spec section 5).
 
 ``parallel.kind`` in the config chooses the agreement. ``ddp`` and ``none`` are Ray Train's
-``prepare_model`` wraps and need nothing here. ``local_sgd`` and ``diloco`` train every rank
+``prepare_model`` wraps. ``fsdp`` is :func:`wrap_fsdp`, FSDP2's ``fully_shard`` over a mesh of
+the ranks (the parameters become DTensors, one shard per rank; every rank then writes its own
+checkpoint shard, see ``CheckpointIO``). ``local_sgd`` and ``diloco`` train every rank
 alone for a segment (no wrap, no collective per step) and agree at the segment end, on every
 rank, through a :class:`SegmentSync`: the loop calls ``on_segment_sync(model, optimizer, info)``
 after the last step of a segment, before the policy's checkpoint (so a segment-end checkpoint
@@ -143,6 +145,60 @@ class DiLoCo:
             for a, s in zip(self.anchor, state["anchor"], strict=True):
                 a.copy_(s)
         self.outer.load_state_dict(state["outer"])
+
+
+DTYPES = {"fp32": torch.float32, "bf16": torch.bfloat16, "fp16": torch.float16}
+
+
+def is_sharded(model: Any) -> bool:
+    """True when the module's parameters are DTensors (``fully_shard`` applied)."""
+    from torch.distributed.tensor import DTensor
+
+    return any(isinstance(p, DTensor) for p in _module(model).parameters())
+
+
+def wrap_fsdp(
+    model: torch.nn.Module,
+    parallel: Any,
+    device: torch.device,
+    optimizer: torch.optim.Optimizer | None = None,
+) -> torch.nn.Module:
+    """FSDP2 over the process group: every direct child with parameters is a shard unit, then the
+    root. ``fully_shard`` swaps the parameters for sharded ones under the same names, so an
+    ``optimizer`` built by ``build_model`` over the originals is re-pointed at them (it has no
+    state yet). Without a process group (a driver, the fake fixture) the model stays as it is."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return model
+    from torch.distributed.device_mesh import init_device_mesh
+    from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
+
+    names = {id(p): n for n, p in model.named_parameters()}
+    mesh = init_device_mesh(device.type, (dist.get_world_size(),))
+    policy = MixedPrecisionPolicy(
+        param_dtype=DTYPES.get(parallel.param_dtype or ""),
+        reduce_dtype=DTYPES.get(parallel.reduce_dtype or ""),
+    )
+    kwargs: dict[str, Any] = {
+        "mesh": mesh,
+        "reshard_after_forward": parallel.reshard_after_forward,
+        "mp_policy": policy,
+    }
+    for child in model.children():
+        if any(True for _ in child.parameters(recurse=True)):
+            fully_shard(child, **kwargs)
+    fully_shard(model, **kwargs)
+    if optimizer is not None:
+        if optimizer.state:
+            raise ValueError("parallel.kind fsdp: build_model's optimizer must have no state yet")
+        sharded = dict(model.named_parameters())
+        for group in optimizer.param_groups:
+            try:
+                group["params"] = [sharded[names[id(p)]] for p in group["params"]]
+            except KeyError as exc:
+                raise ValueError(
+                    "parallel.kind fsdp: the optimizer holds a parameter that is not the model's"
+                ) from exc
+    return model
 
 
 def build_sync(cfg: DistrainerConfig, model: Any) -> SegmentSync | None:

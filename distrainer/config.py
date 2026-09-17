@@ -83,7 +83,8 @@ class FailureSpec:
     max_failures: int = 3
 
 
-PARALLEL_KINDS = ("ddp", "none", "local_sgd", "diloco")
+PARALLEL_KINDS = ("ddp", "none", "local_sgd", "diloco", "fsdp")
+PARALLEL_DTYPES = (None, "fp32", "bf16", "fp16")
 
 
 @dataclass
@@ -93,12 +94,18 @@ class ParallelConfig:
     leaves the module unwrapped, so the ranks train independently; ``local_sgd`` trains alone
     for a segment and averages the parameters at the segment end on every rank; ``diloco``
     does the same through an outer SGD with Nesterov momentum over the averaged change
-    (``outer_lr``, ``outer_momentum``, ``outer_nesterov``; Douillard et al. 2023)."""
+    (``outer_lr``, ``outer_momentum``, ``outer_nesterov``; Douillard et al. 2023); ``fsdp``
+    shards the parameters, gradients and optimizer state across the ranks (``fully_shard``,
+    FSDP2: ``reshard_after_forward``, and the mixed precision ``param_dtype`` /
+    ``reduce_dtype`` as fp32 | bf16 | fp16 | null) and writes one checkpoint shard per rank."""
 
     kind: str = "ddp"
     outer_lr: float = 0.7
     outer_momentum: float = 0.9
     outer_nesterov: bool = True
+    reshard_after_forward: bool = True
+    param_dtype: str | None = None
+    reduce_dtype: str | None = None
 
 
 @dataclass
@@ -233,6 +240,9 @@ class DistrainerConfig:
             raise ValueError("parallel.outer_lr must be positive")
         if not 0 <= self.parallel.outer_momentum < 1:
             raise ValueError("parallel.outer_momentum must be in [0, 1)")
+        for name in ("param_dtype", "reduce_dtype"):
+            if getattr(self.parallel, name) not in PARALLEL_DTYPES:
+                raise ValueError(f"parallel.{name} must be one of {list(PARALLEL_DTYPES)}")
         if not self.run_name or "/" in self.run_name:
             raise ValueError("run_name must be non-empty and contain no '/'")
         hook_specs(self.hooks)  # every hook names an entry of the form pkg.module:attr
