@@ -58,6 +58,11 @@ Two things follow from "rank 0 writes the checkpoint":
 DiLoCo's defaults are the paper's (outer lr 0.7, Nesterov momentum 0.9, Douillard et al.
 2023). With `outer_lr: 1` and `outer_momentum: 0` it is local SGD.
 
+Memory: DiLoCo keeps the anchor, the deltas at the sync and the outer momentum, three extra
+copies of the parameters per rank (no optimizer state is sharded under these kinds). A config
+with `local_sgd` or `diloco` and a policy that can checkpoint inside a segment (`every_k`,
+`time`, or `any` with either set) warns at load.
+
 ## 3. FSDP: shards in memory, one checkpoint file per rank
 
 `fsdp` wraps every direct child of the model that has parameters, then the root, with FSDP2's
@@ -71,6 +76,7 @@ one `checkpoint_dir_name`; rank 0 alone adds the ledger and the metadata.
 
 ```
 $ uv run distrainer inspect runs/hello/hello/checkpoint_g000003_p000012_n02_a00
+checkpoint: runs/hello/hello/checkpoint_g000003_p000012_n02_a00
 ledger: {'segment': 3, 'cursor': 6, 'world_size': 2, 'pass_idx': 0, 'run_attempt': 0}
 done positions in segment 3: 12
 shape: sharded (2 shards)

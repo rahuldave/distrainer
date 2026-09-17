@@ -136,7 +136,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(sys.argv[1:] if argv is None else list(argv))
-    return int(args.fn(args))
+    if args.cmd == "resume":
+        return int(args.fn(args))  # a training run keeps its tracebacks
+    try:
+        return int(args.fn(args))
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        # a wrong path or a broken checkpoint or log is a one-line answer, not a traceback
+        print(f"distrainer {args.cmd}: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

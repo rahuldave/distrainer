@@ -170,9 +170,11 @@ def test_parallel_section_defaults_validates_and_round_trips():
 
 
 def test_parallel_kinds_and_the_outer_optimizer_fields():
+    seg = {"checkpoint": {"policy": "segment_end"}}
     for kind in ("ddp", "none", "local_sgd", "diloco"):
-        assert DistrainerConfig.from_dict({"parallel": {"kind": kind}}).parallel.kind == kind
-    cfg = DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_lr": 0.5}})
+        cfg = DistrainerConfig.from_dict({"parallel": {"kind": kind}, **seg})
+        assert cfg.parallel.kind == kind
+    cfg = DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_lr": 0.5}, **seg})
     assert cfg.parallel.outer_lr == 0.5 and cfg.parallel.outer_momentum == 0.9
     with pytest.raises(ValueError, match="outer_lr"):
         DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_lr": 0}})
@@ -186,3 +188,27 @@ def test_parallel_fsdp_fields():
     assert cfg.parallel.param_dtype == "bf16" and cfg.parallel.reduce_dtype is None
     with pytest.raises(ValueError, match="param_dtype"):
         DistrainerConfig.from_dict({"parallel": {"kind": "fsdp", "param_dtype": "int8"}})
+
+
+def test_drifting_kinds_warn_on_a_mid_segment_checkpoint_policy():
+    import warnings
+
+    with pytest.warns(UserWarning, match="segment_end resumes exactly"):
+        DistrainerConfig.from_dict({"parallel": {"kind": "diloco"}})  # policy any
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DistrainerConfig.from_dict(
+            {"parallel": {"kind": "local_sgd"}, "checkpoint": {"policy": "segment_end"}}
+        )
+        # any with neither every_k nor a time budget is segment-aligned: no warning
+        DistrainerConfig.from_dict(
+            {"parallel": {"kind": "diloco"}, "checkpoint": {"policy": "any", "every_k": None}}
+        )
+        DistrainerConfig.from_dict({"parallel": {"kind": "ddp"}})
+    with pytest.warns(UserWarning, match="segment_end resumes exactly"):
+        DistrainerConfig.from_dict(
+            {
+                "parallel": {"kind": "local_sgd"},
+                "checkpoint": {"policy": "time", "time_budget_s": 5},
+            }
+        )

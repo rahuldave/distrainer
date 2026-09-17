@@ -17,7 +17,8 @@ def params(m: torch.nn.Module) -> list[torch.Tensor]:
 
 
 def cfg(**parallel) -> DistrainerConfig:
-    return DistrainerConfig.from_dict({"parallel": parallel} if parallel else {})
+    d = {"checkpoint": {"policy": "segment_end"}}  # the exact policy under the drifting kinds
+    return DistrainerConfig.from_dict({**d, "parallel": parallel} if parallel else d)
 
 
 def test_build_sync_per_kind():

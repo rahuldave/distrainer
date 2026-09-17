@@ -4,6 +4,7 @@ waiting at a segment end) is asserted here."""
 
 import os
 
+import pytest
 import torch
 from conftest import AppendNextSegments
 from procgroup import run_world
@@ -14,6 +15,10 @@ from distrainer.ledger import Ledger
 from distrainer.log import BlockLog
 from distrainer.trainer import CheckpointIO, unwrap
 from integration_tests.cluster.check_audit import check_dealing, check_s1
+
+# the local_sgd and diloco stores below keep checkpoint.policy any with every_k on purpose (the
+# mid-segment assertions), which the config warns about under the drifting kinds
+pytestmark = pytest.mark.filterwarnings("ignore:parallel.kind:UserWarning")
 
 
 def recording_step(model, optimizer, table, info):

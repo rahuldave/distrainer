@@ -175,11 +175,12 @@ def _worker(
 
         train_loop(loop_config)
         _log(rank, "train_loop returned")
+        # no rank tears the group down while another may still be inside a collective; a rank
+        # that raised skips this (the others would wait 60 s for it in a collective anyway)
+        dist.barrier()
     finally:
         with open(os.path.join(out_dir, f"rank{rank}.pkl"), "wb") as f:
             pickle.dump(reports, f)
-        # no rank tears the group down while another may still be inside a collective
-        dist.barrier()
         dist.destroy_process_group()
         _log(rank, "process group down")
         faulthandler.cancel_dump_traceback_later()

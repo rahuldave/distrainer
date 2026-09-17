@@ -240,6 +240,20 @@ class DistrainerConfig:
             raise ValueError("parallel.outer_lr must be positive")
         if not 0 <= self.parallel.outer_momentum < 1:
             raise ValueError("parallel.outer_momentum must be in [0, 1)")
+        c = self.checkpoint
+        mid_segment = c.policy in ("every_k", "time") or (
+            c.policy == "any" and (c.every_k is not None or c.time_budget_s is not None)
+        )
+        if self.parallel.kind in ("local_sgd", "diloco") and mid_segment:
+            import warnings
+
+            warnings.warn(
+                f"parallel.kind {self.parallel.kind} with checkpoint.policy "
+                f"{self.checkpoint.policy!r}: a checkpoint taken inside a segment holds rank 0's "
+                "drifted replica and a resume from it restarts every rank there; "
+                "checkpoint.policy: segment_end resumes exactly",
+                stacklevel=2,
+            )
         for name in ("param_dtype", "reduce_dtype"):
             if getattr(self.parallel, name) not in PARALLEL_DTYPES:
                 raise ValueError(f"parallel.{name} must be one of {list(PARALLEL_DTYPES)}")
