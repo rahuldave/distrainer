@@ -60,7 +60,8 @@ DiLoCo's defaults are the paper's (outer lr 0.7, Nesterov momentum 0.9, Douillar
 
 Memory: DiLoCo keeps the anchor, the deltas at the sync and the outer momentum, three extra
 copies of the parameters per rank (no optimizer state is sharded under these kinds). A config
-with `local_sgd` or `diloco` and a policy other than `segment_end` warns at load.
+with `local_sgd` or `diloco` and a policy that can checkpoint inside a segment (`every_k`,
+`time`, or `any` with either set) warns at load.
 
 ## 3. FSDP: shards in memory, one checkpoint file per rank
 

@@ -200,4 +200,15 @@ def test_drifting_kinds_warn_on_a_mid_segment_checkpoint_policy():
         DistrainerConfig.from_dict(
             {"parallel": {"kind": "local_sgd"}, "checkpoint": {"policy": "segment_end"}}
         )
+        # any with neither every_k nor a time budget is segment-aligned: no warning
+        DistrainerConfig.from_dict(
+            {"parallel": {"kind": "diloco"}, "checkpoint": {"policy": "any", "every_k": None}}
+        )
         DistrainerConfig.from_dict({"parallel": {"kind": "ddp"}})
+    with pytest.warns(UserWarning, match="segment_end resumes exactly"):
+        DistrainerConfig.from_dict(
+            {
+                "parallel": {"kind": "local_sgd"},
+                "checkpoint": {"policy": "time", "time_budget_s": 5},
+            }
+        )

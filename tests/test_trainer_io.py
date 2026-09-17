@@ -147,6 +147,8 @@ def test_shape_and_load_agree_and_inspect_style_reads_never_download(tmp_path):
     snap.write_text("{}")
     with pytest.raises(NotADirectoryError, match="not a checkpoint directory"):
         CheckpointIO.read_ledger(Checkpoint.from_directory(str(snap)))
+    with pytest.raises(FileNotFoundError, match="no checkpoint under"):
+        CheckpointIO.shape(Checkpoint.from_directory(str(tmp_path / "missing")))
     # a sharded checkpoint's optimizer state needs its model
     with pytest.raises(ValueError, match="only with its model"):
         CheckpointIO.load(

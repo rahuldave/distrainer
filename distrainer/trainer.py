@@ -334,6 +334,8 @@ class CheckpointIO:
         import pyarrow.fs as pafs
 
         info = checkpoint.filesystem.get_file_info(checkpoint.path)
+        if info.type == pafs.FileType.NotFound:
+            raise FileNotFoundError(f"no checkpoint under {checkpoint.path}")
         if info.type != pafs.FileType.Directory:
             raise NotADirectoryError(f"{checkpoint.path} is not a checkpoint directory")
         infos = checkpoint.filesystem.get_file_info(pafs.FileSelector(checkpoint.path))

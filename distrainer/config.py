@@ -240,11 +240,11 @@ class DistrainerConfig:
             raise ValueError("parallel.outer_lr must be positive")
         if not 0 <= self.parallel.outer_momentum < 1:
             raise ValueError("parallel.outer_momentum must be in [0, 1)")
-        if self.parallel.kind in ("local_sgd", "diloco") and self.checkpoint.policy not in (
-            "segment_end",
-            "pass_end",
-            "never",
-        ):
+        c = self.checkpoint
+        mid_segment = c.policy in ("every_k", "time") or (
+            c.policy == "any" and (c.every_k is not None or c.time_budget_s is not None)
+        )
+        if self.parallel.kind in ("local_sgd", "diloco") and mid_segment:
             import warnings
 
             warnings.warn(
