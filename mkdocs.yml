@@ -13,6 +13,22 @@ theme:
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
       toggle: { icon: material/brightness-4, name: light }
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: false
+            show_root_heading: true
+            heading_level: 3
+            members_order: source
+            docstring_style: google
+            show_signature_annotations: true
+            separate_signature: true
+            filters: ["!^_"]
+            show_if_no_docstring: true   # a public callable without a docstring shows its signature
 markdown_extensions:
   - tables
   - toc: { permalink: true }
@@ -43,6 +59,7 @@ nav:
       - Examples and scenarios: examples-and-scenarios.md
   - Reference:
       - Specification v0.1: distrainer-spec.md
+      - API reference: api.md
       - Design sketch: distrainer-design.md
       - Research report: ray-sub-epoch-training-report.md
   - Field notes:

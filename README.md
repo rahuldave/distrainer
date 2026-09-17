@@ -59,6 +59,8 @@ the handoffs, the agent workflow and the cheat sheets, which stay out of it.
 - [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
   status; what each driver verb does under KubeRay and under uncloud.
+- [`docs/api.md`](docs/api.md) — the API reference, generated from the docstrings on the site
+  (<https://rahuldave.com/distrainer/api/>); the spec's section 4 is the design contract.
 - [`docs/distrainer-spec.md`](docs/distrainer-spec.md) — the v0.1 specification: interfaces,
   training loop, checkpoint/storage layout, the container harness and its KubeRay and uncloud variants, verification scenarios,
   milestones, and the development workflow.

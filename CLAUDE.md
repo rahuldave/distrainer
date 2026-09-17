@@ -100,7 +100,8 @@ then this file for the rules that are specific to Claude Code sessions.
   handoffs go back to M5.
 - `docs/` is the public site (MkDocs from `mkdocs.yml`, deployed to GitHub Pages by
   `.github/workflows/docs.yml`; `docs/index.md` the home; build locally with
-  `uvx --with mkdocs-material mkdocs build`);
+  `uvx --with "mkdocs<2" --with "mkdocs-material==9.*" --with "mkdocstrings[python]" --with ruff mkdocs build --strict`;
+  `docs/api.md` is generated from the docstrings, so public callables need one);
   `internal_docs/` holds the handoffs, the workflow docs and the cheat sheets. New handoffs
   and agent-facing notes go to `internal_docs/`.
 - `docs/examples-and-scenarios.md` says how every scenario is driven and checked;

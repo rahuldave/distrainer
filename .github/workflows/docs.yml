@@ -1,9 +1,12 @@
-# The docs site: MkDocs (Material) from docs/ to GitHub Pages on every push to main that touches it.
+# The docs site: MkDocs (Material) from docs/ to GitHub Pages on every push to main that touches it
+# (or the library, whose docstrings make docs/api.md through mkdocstrings).
 name: docs
 on:
   push:
     branches: [main]
-    paths: [docs/**, mkdocs.yml, .github/workflows/docs.yml]
+    paths: [docs/**, distrainer/**, mkdocs.yml, .github/workflows/docs.yml]   # distrainer/: the API page
+  pull_request:
+    paths: [docs/**, distrainer/**, mkdocs.yml, .github/workflows/docs.yml]   # the build alone
   workflow_dispatch:
 permissions: { contents: read }
 concurrency: { group: pages, cancel-in-progress: false }
@@ -14,11 +17,12 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.12" }
-      - run: pip install "mkdocs<2" "mkdocs-material==9.*"
-      - run: mkdocs build --site-dir _site
+      - run: pip install "mkdocs<2" "mkdocs-material==9.*" "mkdocstrings[python]>=0.26,<1" ruff   # the API page reads the source statically
+      - run: mkdocs build --strict --site-dir _site
       - uses: actions/upload-pages-artifact@v3
         with: { path: _site }
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions: { contents: read, pages: write, id-token: write }

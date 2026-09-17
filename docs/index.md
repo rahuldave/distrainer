@@ -31,6 +31,7 @@ The code is on [GitHub](https://github.com/rahuldave/distrainer).
 ## Reference
 
 - [The specification (v0.1)](distrainer-spec.md): interfaces, the loop, checkpoints, configuration, the harness, the milestones
+- [API reference](api.md): every public class and function, generated from the docstrings at each build
 - [The design sketch](distrainer-design.md) that preceded the spec
 - [Research: training between batch and epoch granularity in Ray and Anyscale](ray-sub-epoch-training-report.md)
 

@@ -114,9 +114,97 @@ the image example on the synthetic set: fsdp equal to ddp in loss and probe (kNN
   would make mid-segment resumes exact under local_sgd/diloco; `examples/*/harness*.yaml`
   carry no `parallel:` section yet (the default applies).
 
+## 5b. The docs audit against the API (run 2026-09-17, fixes deferred to M10)
+
+An Opus reviewer compared every API mention in the docs and the examples with the code at
+`86a0a16` (after PR #27). The site now has `docs/api.md`, generated from the docstrings by
+`mkdocstrings` at each build (static analysis, no install; `distrainer/**` triggers the
+docs workflow), so the signatures there are the code's; the hand-kept surfaces below drifted.
+Line numbers are from that commit; re-check them before editing.
+
+**The spec (`docs/distrainer-spec.md`), section 4, the interface block.** Missing or wrong:
+`BlockLog.open`, `exists`, the `W` property, `first_seq`, `committed_seqs`, `segments`,
+`segment_path`, `next_pass_differs`; `wait_segment`'s `stop` argument (:216); `resume_start`'s
+`W=` and the planner's `steps_per_segment` / `replayed_positions` (:241); `Ledger.run_attempt`
+and its `asdict` / `to_json` / `from_dict` / `from_json`, `save` returns the path (:254-256);
+`StepContext`'s `segment`, `pass_idx`, `world_size` (:261), the optional `on_checkpoint`,
+`Never`, `build_policy`, `notify_checkpoint` (:260-266); `hook_specs` (:287); the `parallel.py`
+header naming fsdp (:289), `DiLoCo`'s defaults (:295), `is_sharded` / `average_` /
+`group_size` (:299); `CheckpointIO.__init__`, `read_ledger`, `load` raising for a directory of
+neither shape (:301-303); `BatchWriter.__init__(tail, verify_blocks)`, `run` returning the
+segments, `plan`, and `StreamingWriter` altogether (:310-311); **`DistTrainer.__init__` is
+wrong** (no `log` argument, `config` third, `policy` optional, `hooks`,
+`resume_from_checkpoint`, `scaling_config`, `run_config`; :315-317) and its
+`scaling_config` / `run_config` / `loop_config` / `trainer` / `run_dir`; **`TrainInfo` is
+referenced but never defined** (:280, :291, :319-320: `ctx` is a `TrainInfo`, with `train` and
+`parallel` properties), nor `unwrap`, `parallel_strategy`, `checkpoint_dir_name`,
+`train_loop`, `init_ray`.
+
+**Section 5, the loop pseudo-code**, predates M2's report batching and M9: `build_model(info)`
+with a `TrainInfo`, `BlockLog.open` and `steps_per_segment` (:329-330), `CheckpointIO.load(ckpt,
+model, opt, sync)` (:333), `resume_start(ledger, n, W=W)` (:334), `step_info` in `train_step`
+and the sync (:345, :349), `segment_end = cursor == steps` (:348), the `io.save(..., sync=,
+sharded=, rank=)` call with `checkpoint_dir_name` and `delete_local_checkpoint_after_upload`
+(:352), the `elif report_every_step` branch and the final flush instead of `report(metrics)`
+every step (:354-355, contradicting the note at :364), the `keep_from > 0` guard (:359), the
+`finally: loader.close(); audit.close(); io.cleanup_uploaded()` (:361).
+
+**Section 6.2** (:390): the scratch path is `<tempdir>/distrainer/<run_name>/<uuid8>/
+<checkpoint_dir_name>_<uuid6>`, not `/tmp/distrainer/<run>/ckpt_<cursor>`; nothing "deletes
+local dirs older than the last two" (Ray's `delete_local_checkpoint_after_upload` plus
+`cleanup_uploaded`); `load` returns a `Ledger`, not `(state, Ledger)`; add `shape` and
+`read_ledger`. **Section 6.4 / the CLI** (:421): `inspect` prints the shape; `gc` has
+`--keep-blocks`; every command but `resume` turns a bad path or a checkpoint of neither shape
+into one stderr line and status 1.
+
+**Other docs.** `docs/tutorials/batch.md`: the `inspect` sample lacks `shape: full` (:189);
+the checkpoint contents sentence (:179) and the `backward` comment (:98) should name the
+default kind; `info.parallel` in the `TrainInfo` list (:103-105). `docs/tutorials/streaming.md`
+(:148): the hook runs after the segment-end sync and the checkpoint. `docs/cli.md`: the
+directory-contents sentence reads unconditional (:35); the one-line-error rule (:78); the
+`--set parallel.kind=...` row in the scripts table (:96). `docs/collectives.md` (:149-152): the
+DDP row is kind-specific, and two rows are missing (fsdp's all-gather / reduce-scatter; the
+segment-end all-reduce under local_sgd / diloco, before the report row). `docs/parallelism.md`:
+`no_sync` is not what the kinds use (:189), "implements today" (:215), the fsdp shard note
+on rank 0's duties (:72-73). `docs/examples-and-scenarios.md` (:145): shape from the listing.
+`docs/introduction.md`: "focuses on data parallelism" (:122), FSDP as future (:341),
+`prepare_model(model)` (:145). `README.md` (:84-87): the status paragraph still ends at M8
+and names `handoff-m9.md`.
+
+**Examples.** `examples/hello_blocks/train.py`: the `backward` comment (:52) and a docstring
+line that tutorial 7 drives it with `--set parallel.kind=...`; `examples/image_contrastive/
+train.py` (:9-10): the probe's load takes either shape; `distrainer/__init__.py`: the
+docstring should name the surface (the torch-free core re-exported; `distrainer.trainer` and
+`distrainer.parallel` imported directly because they pull in Ray and torch). The other
+example modules are accurate.
+
+**Docstrings missing on public callables** (they show a bare signature on `docs/api.md`;
+about half of the surface). User-facing: `trainer.py` (`MetricAggregator.__init__` / `add`,
+`CheckpointIO.__init__` / `cleanup`, `DistTrainer.__init__` / `scaling_config` /
+`run_config` / `loop_config` / `trainer` / `fit`); `config.py` (every section dataclass but
+`ParallelConfig`, `as_policy_dict`, `min_workers` / `max_workers` / `elastic`,
+`DistrainerConfig` and `from_dict` / `from_yaml` / `allowed_world_sizes` / `validate`,
+`load_config`); `parallel.py` (the protocol's four methods, `LocalSGD`'s four, `DiLoCo`'s
+`__init__` / `on_segment_sync` / `state_dict` / `load_state_dict`); `hooks.py`
+(`SegmentHook.on_segment_end`); `policy.py` (`CheckpointPolicy` and every policy class and
+method); `log.py` (`segment_filename`, `LogMeta`, `Segment` and their `to_json` / `from_json`
+/ `positions`, `BlockLog.__init__` / `open` / `exists` / `meta` / `W` / `segment_path` /
+`has_segment` / `read_segment` / `ended`); `block.py` (`BlockRef`, `to_dict` / `from_dict`,
+`validate_block_id`, `block_locator`, `validate_locator`, `read_block`); `ledger.py` (`Ledger`
+and its six methods); `loader.py` (`LaneLoader`, whose docstring the spec quotes at :270 does
+not exist in the code); `writer.py` (`BatchWriter.__init__` / `run`,
+`StreamingWriter.__init__` / `buffered` / `close`); `planner.py` (`steps_per_segment`).
+Internal: `audit.py`, `storage.py`, `cli.py`'s command functions.
+
+The order for M10: docstrings first (they fix the API page for free), then section 4 of the
+spec rewritten against `docs/api.md` (keep it a contract, not a copy: the shapes and the
+rules, pointing at the API page for signatures), then sections 5 and 6, then the other docs
+and the examples, then `just verify` and `mkdocs build --strict`.
+
 ## 6. M10
 
-1. `gpl` an M10 parent and iteration from this file; move `rslyvvkq` and `sxytmvrk` under it.
+1. `gpl` an M10 parent and iteration from this file; move `rslyvvkq` and `sxytmvrk` under it,
+   and add a docs leaf for section 5b (the docstrings and the spec's section 4 first).
 2. The driver's per-pod GPU count (`sxytmvrk`): `create_pod`'s `gpu.count` from
    `DISTRAINER_RUNPOD_GPU_COUNT`, a `DISTRAINER_TRAINERS` value in the worker pod's env that
    `deploy/ray-worker.sh` turns into `--num-cpus=k --resources='{"trainer": k}'` (the head keeps
