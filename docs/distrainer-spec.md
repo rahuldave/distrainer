@@ -144,6 +144,7 @@ examples/
     probe.py           # the weighted kNN accuracy of the backbone at the end of a run
     train.py           # DistTrainer entrypoint plus the probe
 tests/                 # focused unit tests: log commit/discover, dealer determinism, ledger arithmetic, policy, loader
+                       # (tests/procgroup.py runs n ranks as processes over a Gloo group for the collectives)
 regression_tests/      # bug / API regression tests (added as bugs are found)
 integration_tests/
   cluster/             # scenario runner that drives the cluster through deploy/driver.sh verbs and checks audit logs (S1–S11)

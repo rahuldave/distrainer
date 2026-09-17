@@ -1,4 +1,7 @@
-"""Drive distrainer.trainer.train_loop rank by rank with a fake ray.train (no cluster)."""
+"""Drive distrainer.trainer.train_loop rank by rank with a fake ray.train (no cluster).
+
+The collectives are stubbed out here; ``test_procgroup.py`` runs the same loop on real ranks over
+a Gloo group (``procgroup.py``) for what is *about* the collectives."""
 
 import threading
 
