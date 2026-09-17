@@ -5,7 +5,9 @@ the latest checkpoint, deal the remaining positions over the current world size,
 block call the user's ``train_step``; after every step all ranks call ``ray.train.report`` (a
 barrier), with a checkpoint attached on rank 0 whenever the policy says so. Segment ends run the
 hooks on rank 0 (the ``hooks`` given to ``DistTrainer`` plus those built from ``cfg.hooks``),
-then retention ``gc`` if ``log.gc`` is set, then a collective barrier.
+then retention ``gc`` if ``log.gc`` is set, then a collective barrier. Under ``parallel.kind``
+``local_sgd`` or ``diloco`` the segment end starts with the sync on every rank
+(``distrainer.parallel``), before the policy's checkpoint and rank 0's hooks.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from distrainer.hooks import SegmentHook, build_hooks, hook_specs, load_entry
 from distrainer.ledger import Ledger
 from distrainer.loader import LaneLoader
 from distrainer.log import BlockLog, Segment
+from distrainer.parallel import SegmentSync, build_sync
 from distrainer.planner import lane, resume_start, steps_per_segment
 from distrainer.policy import CheckpointPolicy, StepContext, build_policy, notify_checkpoint
 
@@ -78,7 +81,7 @@ def unwrap(model: torch.nn.Module) -> torch.nn.Module:
 
 def parallel_strategy(parallel: ParallelConfig) -> str | None:
     """Ray Train's ``prepare_model(parallel_strategy=...)`` argument for a ``parallel:`` kind."""
-    return {"ddp": "ddp", "none": None}[parallel.kind]
+    return {"ddp": "ddp", "none": None, "local_sgd": None, "diloco": None}[parallel.kind]
 
 
 def init_ray(cfg: DistrainerConfig, **kwargs: Any) -> None:
@@ -147,7 +150,8 @@ def checkpoint_dir_name(ledger: Ledger) -> str:
 
 
 class CheckpointIO:
-    """Write and read distrainer checkpoints: ``model.pt``, ``optimizer.pt``, ``ledger.json``.
+    """Write and read distrainer checkpoints: ``model.pt``, ``optimizer.pt``, ``ledger.json``, and
+    ``parallel.pt`` when the segment-end sync has state (DiLoCo's anchor and outer optimizer).
 
     ``save`` writes into a non-temporary worker-local directory (required for ASYNC upload) and
     attaches the ledger as cheap ``Checkpoint`` metadata; ``load`` restores states and returns
@@ -156,6 +160,7 @@ class CheckpointIO:
 
     MODEL = "model.pt"
     OPTIMIZER = "optimizer.pt"
+    PARALLEL = "parallel.pt"
 
     def __init__(self, scratch_dir: str | None = None, run_name: str = "run"):
         base = scratch_dir or os.path.join(tempfile.gettempdir(), "distrainer", run_name)
@@ -168,6 +173,7 @@ class CheckpointIO:
         optimizer: torch.optim.Optimizer | None,
         ledger: Ledger,
         extra: dict[str, Any] | None = None,
+        sync: SegmentSync | None = None,
     ) -> Any:
         from ray.train import Checkpoint
 
@@ -178,6 +184,9 @@ class CheckpointIO:
         torch.save(unwrap(model).state_dict(), os.path.join(path, self.MODEL))
         if optimizer is not None:
             torch.save(optimizer.state_dict(), os.path.join(path, self.OPTIMIZER))
+        sync_state = sync.state_dict() if sync is not None else {}
+        if sync_state:
+            torch.save(sync_state, os.path.join(path, self.PARALLEL))
         ledger.save(path)
         checkpoint = Checkpoint.from_directory(path)
         checkpoint.set_metadata(
@@ -190,7 +199,10 @@ class CheckpointIO:
         checkpoint: Any,
         model: torch.nn.Module | None = None,
         optimizer: torch.optim.Optimizer | None = None,
+        sync: SegmentSync | None = None,
     ) -> Ledger:
+        """Restore what is given; a ``sync`` takes its saved state, or resets to the loaded model
+        when the checkpoint has none (a run under another kind)."""
         with checkpoint.as_directory() as path:
             if model is not None:
                 state = torch.load(os.path.join(path, CheckpointIO.MODEL), map_location="cpu")
@@ -198,6 +210,12 @@ class CheckpointIO:
             opt_path = os.path.join(path, CheckpointIO.OPTIMIZER)
             if optimizer is not None and os.path.exists(opt_path):
                 optimizer.load_state_dict(torch.load(opt_path, map_location="cpu"))
+            if sync is not None:
+                sync_path = os.path.join(path, CheckpointIO.PARALLEL)
+                if os.path.exists(sync_path):
+                    sync.load_state_dict(torch.load(sync_path, map_location="cpu"))
+                elif model is not None:
+                    sync.reset(model)
             return Ledger.load(path)
 
     @staticmethod
@@ -281,6 +299,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     info = TrainInfo(rank=rank, world_size=n, config=cfg, device=device)
     model, optimizer = build_model(info)
     model = ray.train.torch.prepare_model(model, parallel_strategy=parallel_strategy(cfg.parallel))
+    sync = build_sync(cfg, model)  # every rank's segment-end agreement (local SGD, DiLoCo), or None
 
     # hooks and gc are writers and run on rank 0 only; they get a BlockLog of their own rather
     # than the reader instance the loader's producer thread polls
@@ -299,7 +318,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
     # may start from an explicit checkpoint instead (Train v2 deprecated resume_from_checkpoint)
     checkpoint = ray.train.get_checkpoint() or loop_config.get("initial_checkpoint")
     if checkpoint is not None:
-        ledger = CheckpointIO.load(checkpoint, model, optimizer)
+        ledger = CheckpointIO.load(checkpoint, model, optimizer, sync)
     last_ckpt_segment = ledger.segment  # gc keeps retention_segments behind this
     seq, start_step = resume_start(ledger, n, W=W)
     resumed_at_segment_end = checkpoint is not None and ledger.done_positions() == W
@@ -362,6 +381,10 @@ def train_loop(loop_config: dict[str, Any]) -> None:
             ledger.world_size = n
             ledger.pass_idx = segment.pass_idx
             segment_end = ledger.cursor == steps
+            if segment_end and sync is not None:
+                # every rank, before the checkpoint below (which then holds the synced weights)
+                # and before rank 0's hooks; the same collectives on every rank
+                sync.on_segment_sync(model, optimizer, step_info)
             pass_end = segment_end and log.next_pass_differs(segment)
             sctx = StepContext(
                 position=position,
@@ -386,7 +409,7 @@ def train_loop(loop_config: dict[str, Any]) -> None:
             # decides identically on every rank) and metrics are averaged in between
             if policy.should_checkpoint(sctx):
                 notify_checkpoint(policy, sctx)
-                ckpt = io.save(model, optimizer, ledger) if rank == 0 else None
+                ckpt = io.save(model, optimizer, ledger, sync=sync) if rank == 0 else None
                 last_ckpt_segment = ledger.segment
                 n_reports += 1
                 ray.train.report(

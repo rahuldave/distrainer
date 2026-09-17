@@ -83,16 +83,22 @@ class FailureSpec:
     max_failures: int = 3
 
 
-PARALLEL_KINDS = ("ddp", "none")
+PARALLEL_KINDS = ("ddp", "none", "local_sgd", "diloco")
 
 
 @dataclass
 class ParallelConfig:
-    """How the replicas agree (spec section 5): ``ddp`` wraps in DistributedDataParallel (the
-    gradients all-reduced inside every ``backward``); ``none`` leaves the module unwrapped, so
-    the ranks train independently (no collective per step)."""
+    """How the replicas agree (spec section 5, ``distrainer.parallel``): ``ddp`` wraps in
+    DistributedDataParallel (the gradients all-reduced inside every ``backward``); ``none``
+    leaves the module unwrapped, so the ranks train independently; ``local_sgd`` trains alone
+    for a segment and averages the parameters at the segment end on every rank; ``diloco``
+    does the same through an outer SGD with Nesterov momentum over the averaged change
+    (``outer_lr``, ``outer_momentum``, ``outer_nesterov``; Douillard et al. 2023)."""
 
     kind: str = "ddp"
+    outer_lr: float = 0.7
+    outer_momentum: float = 0.9
+    outer_nesterov: bool = True
 
 
 @dataclass
@@ -223,6 +229,10 @@ class DistrainerConfig:
             raise ValueError(
                 f"parallel.kind must be one of {list(PARALLEL_KINDS)}, got {self.parallel.kind!r}"
             )
+        if self.parallel.outer_lr <= 0:
+            raise ValueError("parallel.outer_lr must be positive")
+        if not 0 <= self.parallel.outer_momentum < 1:
+            raise ValueError("parallel.outer_momentum must be in [0, 1)")
         if not self.run_name or "/" in self.run_name:
             raise ValueError("run_name must be non-empty and contain no '/'")
         hook_specs(self.hooks)  # every hook names an entry of the form pkg.module:attr

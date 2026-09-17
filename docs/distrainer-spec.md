@@ -286,6 +286,17 @@ def build_hooks(cfg: DistrainerConfig) -> list[SegmentHook]
     # factory(cfg, **args) -> SegmentHook, called on rank 0 inside the worker, config order
 def load_entry(entry: str) -> Any                             # "pkg.module:attr", also used by the CLI
 
+# parallel.py  (parallel.kind local_sgd | diloco; ddp and none are prepare_model wraps)
+class SegmentSync(Protocol):
+    def on_segment_sync(self, model, optimizer, info: TrainInfo) -> None
+    # every rank, after the last step of a segment, before the policy's checkpoint and rank 0's hooks
+    def state_dict(self) -> dict; def load_state_dict(self, state) -> None; def reset(self, model) -> None
+LocalSGD()                      # all-reduce average of the parameters and float buffers
+DiLoCo(model, outer_lr, outer_momentum, nesterov)   # anchor - params averaged -> outer Nesterov SGD over the anchor
+def build_sync(cfg, model) -> SegmentSync | None   # CheckpointIO saves state_dict() as parallel.pt, load restores it
+# a segment-end checkpoint resumes exactly under these kinds; a mid-segment one holds rank 0's drifted replica,
+# and a resume restarts every rank from it (positions exact, the other replicas' drift lost)
+
 # writer.py
 class BatchWriter:
     """Turn a finished corpus of blocks into a log. For each pass p: globally permute all N blocks with
@@ -330,6 +341,7 @@ for segment, (position, ref, table) in loader:
     audit.append(rank, n, segment.seq, ledger.cursor, position, ref.block_id)
     ledger.cursor += 1; ledger.world_size = n
     segment_end = (ledger.cursor == W // n)
+    if segment_end and sync: sync.on_segment_sync(model, opt, ctx)   # local_sgd / diloco: every rank, before the checkpoint
     pass_end    = segment_end and log.next_pass_differs(segment)    # or ended()
     if policy.should_checkpoint(StepContext(position, ledger.cursor, segment_end, pass_end, ...)):
         report(metrics, checkpoint=save(model, opt, ledger) if rank == 0 else None,
@@ -364,6 +376,7 @@ Head container role: it hosts the Ray head, the Train controller, the driver (`t
   checkpoint_g{segment:06d}_p{positions:06d}_n{world_size:02d}_a{attempt:02d}/  # checkpoint_dir_name set by distrainer; positions = cursor*world_size, unique across resizes and attempts
     model.pt                               # state_dict (rank 0) or model_rank{r}.pt shards
     optimizer.pt
+    parallel.pt                            # the segment-end sync's state when it has one (diloco: the anchor and the outer optimizer)
     ledger.json                            # {"segment","cursor","world_size","pass_idx","run_attempt"}
     .metadata.json                         # Checkpoint.set_metadata: ledger + distrainer version (cheap to read)
 ```
@@ -441,7 +454,10 @@ scaling:
 failure:
   max_failures: 3
 parallel:
-  kind: ddp                 # ddp (the gradients all-reduced in every backward) | none (no wrap, no collective per step)
+  kind: ddp                 # ddp (gradients all-reduced every backward) | none (no wrap) | local_sgd | diloco (sync at the segment end)
+  outer_lr: 0.7             # diloco: the outer Nesterov SGD over the anchor (Douillard et al. 2023)
+  outer_momentum: 0.9
+  outer_nesterov: true
 hooks:                         # name -> {entry: "pkg.module:factory", ...args}; factory(cfg, **args)
   remine: {entry: examples.toy_contrastive.remine:RemineHook, segments: 12, initial_segments: 1}
 ```

@@ -26,7 +26,8 @@ written by distrainer 0.0.1
 ```
 
 Checkpoint directories are named `checkpoint_g<segment>_p<positions done>_n<world size>_a<attempt>`
-and hold `model.pt`, `optimizer.pt` and `ledger.json`.
+and hold `model.pt`, `optimizer.pt`, `ledger.json` and, under `parallel.kind: diloco`, `parallel.pt`
+(the anchor and the outer optimizer of the segment-end sync).
 
 ### `distrainer export <checkpoint uri> <dir>`
 

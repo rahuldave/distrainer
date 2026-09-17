@@ -167,3 +167,14 @@ def test_parallel_section_defaults_validates_and_round_trips():
         DistrainerConfig.from_dict({"parallel": {"kind": "tensor"}})
     with pytest.raises(ValueError, match="unknown keys in parallel"):
         DistrainerConfig.from_dict({"parallel": {"kind": "ddp", "buckets": 3}})
+
+
+def test_parallel_kinds_and_the_outer_optimizer_fields():
+    for kind in ("ddp", "none", "local_sgd", "diloco"):
+        assert DistrainerConfig.from_dict({"parallel": {"kind": kind}}).parallel.kind == kind
+    cfg = DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_lr": 0.5}})
+    assert cfg.parallel.outer_lr == 0.5 and cfg.parallel.outer_momentum == 0.9
+    with pytest.raises(ValueError, match="outer_lr"):
+        DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_lr": 0}})
+    with pytest.raises(ValueError, match="outer_momentum"):
+        DistrainerConfig.from_dict({"parallel": {"kind": "diloco", "outer_momentum": 1.0}})
