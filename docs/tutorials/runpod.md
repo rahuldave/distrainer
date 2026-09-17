@@ -3,7 +3,7 @@
 The M8 tutorial, written slice by slice as the milestone lands. Sections 1 to 4 cover what is
 done: the example and the machine learning in it, running it on a laptop, the GPU image and the
 pipeline that builds it. Sections 5 and 6 (the RunPod driver, the run on pods) are written with
-their slices; until then `docs/handoff-m8.md` section 6 holds the plan, the API facts and the
+their slices; until then `internal_docs/handoff-m8.md` section 6 holds the plan, the API facts and the
 cost estimate. The mechanics of every example and scenario are in
 `docs/examples-and-scenarios.md`; the flags in `docs/cli.md`.
 

@@ -4,7 +4,7 @@ Written 2026-09-16 at the end of the M7/M7b session for the thread that picks up
 Read `CLAUDE.md` and `AGENTS.md` first (workflow rules), then this file, then
 `docs/tutorials/aws.md` (both beds, the registry, which image for which machine),
 `docs/uncloud-gotchas.md` (the AWS section at the end) and the two cheat sheets under
-`docs/cheatsheets/`. Verify the Gest ids and branch state with `gest task show` and `git status`
+`internal_docs/cheatsheets/`. Verify the Gest ids and branch state with `gest task show` and `git status`
 before relying on them.
 
 ## 1. Where things stand
@@ -98,7 +98,7 @@ up: one scenario at a time.
 - Docs: tutorial 5 (`docs/tutorials/aws.md`) as the operations guide for both beds, tutorial 4
   section 9 pointing at it, the AWS section of `docs/uncloud-gotchas.md`, running-modes C, the
   verb map and config tables, docs/cli.md, `.env.example`, the spec's section 11 and the
-  milestone list, the cheat sheets under `docs/cheatsheets/`.
+  milestone list, the cheat sheets under `internal_docs/cheatsheets/`.
 
 ## 4. Behaviours learned in M7 and M7b that will bite again
 
@@ -122,7 +122,7 @@ up: one scenario at a time.
 - **Credentials**: every new AWS service needed a policy added in the console (EC2, the scoped
   IAM policy, ECR); do the whole list of tutorial 5 section 2 before a session, not during it.
   The auto-mode classifier refuses to inspect other profiles or list policies; ask Rahul.
-- Everything in the M6 list still applies (`docs/handoff-m7.md` section 4).
+- Everything in the M6 list still applies (`internal_docs/handoff-m7.md` section 4).
 
 ## 5. Review follow-ups still open
 
@@ -143,7 +143,7 @@ up: one scenario at a time.
 - `harness-s3.yaml` and `harness-stream-s3.yaml` name a personal bucket; anyone else edits and
   rebuilds. The lifecycle policy counts manifests (twelve), not builds.
 - `stop-worker` and `cp-from-head` are used by no scenario under any driver.
-- The M4 to M6 lists in `docs/handoff-m7.md` section 5 are unchanged.
+- The M4 to M6 lists in `internal_docs/handoff-m7.md` section 5 are unchanged.
 
 ## 6. M8: a GPU contrastive example on RunPod
 

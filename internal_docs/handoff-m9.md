@@ -97,7 +97,7 @@ brings the compose, KubeRay and uncloud beds back); nothing else changed there.
   poll its file; macOS has no `setsid`.
 - **A login shell on a pod starts in `/root`**, its environment is what the entrypoint
   exported, and RunPod puts `RUNPOD_API_KEY` in it: never print a pod's environment.
-- Everything in the M7 list still applies (`docs/handoff-m8.md` section 4).
+- Everything in the M7 list still applies (`internal_docs/handoff-m8.md` section 4).
 
 ## 5. Review follow-ups still open
 
@@ -113,7 +113,7 @@ brings the compose, KubeRay and uncloud beds back); nothing else changed there.
   under RunPod; `cp-from-head` is used by no scenario.
 - The `RUNPOD_API_KEY` in every pod is RunPod's doing; a pod-scoped key would be better if
   RunPod offers one.
-- The M4 to M7 lists in `docs/handoff-m8.md` section 5 are unchanged.
+- The M4 to M7 lists in `internal_docs/handoff-m8.md` section 5 are unchanged.
 
 ## 6. The next phase: before DiLoCo, FSDP and the rest
 

@@ -92,11 +92,15 @@ then this file for the rules that are specific to Claude Code sessions.
 
 ## Where to pick up
 
-- Milestone status and the detailed plan for the next work are in `docs/handoff-m9.md`
-  (written at the end of the M8 session): Gest ids, what M8 delivered (the RunPod driver, the
-  GPU image, the image example), the behaviours learned on pods that will bite again, open
-  review follow-ups, and what comes before DiLoCo and FSDP (`docs/parallelism.md` is the map).
-  `docs/handoff-m8.md` is the M7 -> M8 one; earlier handoffs go back to M5.
+- Milestone status and the plan for the next work are in `internal_docs/handoff-m10.md`
+  (written at the end of the M9 session): Gest ids, what M9 delivered (the process-group
+  tests, the `parallel:` section, local SGD, DiLoCo, FSDP with sharded checkpoints), the
+  behaviours learned, open follow-ups, and M10 (the GPU runs on RunPod, the driver's per-pod
+  GPU count, the M8 follow-ups). `internal_docs/handoff-m9.md` is the M8 -> M9 one; earlier
+  handoffs go back to M5.
+- `docs/` is the public site (GitHub Pages from `main:/docs`, `docs/index.md` the home);
+  `internal_docs/` holds the handoffs, the workflow docs and the cheat sheets. New handoffs
+  and agent-facing notes go to `internal_docs/`.
 - `docs/examples-and-scenarios.md` says how every scenario is driven and checked;
   `docs/running-modes.md` says where things run.
 - Memory on this Mac is tight with the container cluster up: one cluster scenario at a time,

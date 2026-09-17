@@ -10,6 +10,9 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 
 ## Read first
 
+The docs are also a site: <https://rahuldave.github.io/distrainer/> (`docs/`); `internal_docs/` holds
+the handoffs, the agent workflow and the cheat sheets, which stay out of it.
+
 - [`docs/introduction.md`](docs/introduction.md) — a from-zero introduction to distributed
   training, Ray Train, Ray Data, what Anyscale adds, and how distrainer's block abstraction works.
 - [`docs/tutorials/batch.md`](docs/tutorials/batch.md) — tutorial 1: build a block log, train on
@@ -28,16 +31,18 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   architecture, the scenarios, day-to-day operation, the bill.
 - [`docs/tutorials/runpod.md`](docs/tutorials/runpod.md) — tutorial 6: the image contrastive example (SimCLR on
   CIFAR-10 blocks, the machine learning explained), its GPU image and the Actions pipeline that builds it, RunPod pods (M8, in progress).
+- [`docs/tutorials/parallel.md`](docs/tutorials/parallel.md) — tutorial 7: the parallel kinds (DDP, local SGD,
+  DiLoCo, FSDP with sharded checkpoints) chosen by the `parallel:` section, run on the CPU.
 - [`docs/collectives.md`](docs/collectives.md) — the primitives every distributed training is built from
   (barrier, broadcast, all-reduce, all-gather, reduce-scatter, send and receive), and where the loop uses them.
 - [`docs/parallelism.md`](docs/parallelism.md) — the kinds of parallel training explained with those primitives
   (DDP, FSDP, tensor and pipeline, local SGD and DiLoCo), the head and rank 0, and where distrainer fits.
-- [`docs/handoff-m9.md`](docs/handoff-m9.md) — the handoff after M8: what is there, what RunPod taught, and what
-  comes before DiLoCo and FSDP.
+- [`internal_docs/handoff-m10.md`](internal_docs/handoff-m10.md) — the handoff after M9: what is there, what the
+  parallel kinds taught, and what M10 runs on GPUs (`internal_docs/handoff-m9.md` is the M8 → M9 one).
 - [`docs/runpod-gotchas.md`](docs/runpod-gotchas.md) — what bit on RunPod pods (pull times, capacity, the
   global-networking address, the injected API key).
-- [`docs/cheatsheets/orbstack.md`](docs/cheatsheets/orbstack.md) and
-  [`docs/cheatsheets/uncloud.md`](docs/cheatsheets/uncloud.md) — app-independent cheat sheets for the
+- [`internal_docs/cheatsheets/orbstack.md`](internal_docs/cheatsheets/orbstack.md) and
+  [`internal_docs/cheatsheets/uncloud.md`](internal_docs/cheatsheets/uncloud.md) — app-independent cheat sheets for the
   two tools the harness runs on.
 - [`docs/uncloud-gotchas.md`](docs/uncloud-gotchas.md) — the running list of what uncloud does
   that the driver works around: membership, names, placement, memory caps, timing.
@@ -48,9 +53,9 @@ number (the ledger cursor) that survives restarts and changes in the number of w
 - [`docs/running-modes.md`](docs/running-modes.md) — the four ways to run the same code: laptop
   single-node Ray, OrbStack containers as Ray nodes, uncloud machines, KubeRay; where the driver
   runs, which storage works where, how failures are injected, which scenarios each validates.
-- [`docs/handoff-m8.md`](docs/handoff-m8.md) — where development stands after M7 (the AWS bed),
+- [`internal_docs/handoff-m8.md`](internal_docs/handoff-m8.md) — where development stands after M7 (the AWS bed),
   what it taught, and the pointers for what comes next, for whoever picks it up next
-  (`docs/handoff-m7.md`, `docs/handoff-m6.md` and `docs/handoff-m5.md` are the earlier ones).
+  (`internal_docs/handoff-m7.md`, `internal_docs/handoff-m6.md` and `internal_docs/handoff-m5.md` are the earlier ones).
 - [`docs/examples-and-scenarios.md`](docs/examples-and-scenarios.md) — the two example workloads,
   their configs and knobs, and every verification scenario: how it is driven, what it asserts, its
   status; what each driver verb does under KubeRay and under uncloud.
@@ -58,8 +63,8 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   training loop, checkpoint/storage layout, the container harness and its KubeRay and uncloud variants, verification scenarios,
   milestones, and the development workflow.
 - [`docs/distrainer-design.md`](docs/distrainer-design.md) — the design sketch that preceded the spec.
-- [`docs/gest_codex_workflow.md`](docs/gest_codex_workflow.md) and
-  [`docs/tag_dependency_workflow.md`](docs/tag_dependency_workflow.md) — the agent workflow behind
+- [`internal_docs/gest_codex_workflow.md`](internal_docs/gest_codex_workflow.md) and
+  [`internal_docs/tag_dependency_workflow.md`](internal_docs/tag_dependency_workflow.md) — the agent workflow behind
   `AGENTS.md` and `CLAUDE.md`: Gest tasks and iterations, tag classification, dependency impact.
 - [`docs/ray-sub-epoch-training-report.md`](docs/ray-sub-epoch-training-report.md) — research on
   Ray / Anyscale sub-epoch training and shard handling that motivated the design.
@@ -78,7 +83,7 @@ on an uncloud cluster of OrbStack machines through a third driver, `deploy/drive
 (`DISTRAINER_DRIVER=uncloud`), with the scenario runner reading the audit trail from the object
 store when nothing is shared. M7 (PR #17) ran the same cluster on three EC2 instances with an S3 bucket as
 the store (`deploy/uncloud/aws.sh`, tutorial 5); M8 (PR #21) put a GPU contrastive example on RunPod
-pods through a fourth driver (`deploy/drivers/runpod.sh`, tutorial 6); `docs/handoff-m9.md` says what it
+pods through a fourth driver (`deploy/drivers/runpod.sh`, tutorial 6); `internal_docs/handoff-m9.md` says what it
 taught and what comes next.
 Milestones are in the spec (section 12);
 development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
