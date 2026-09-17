@@ -92,10 +92,11 @@ then this file for the rules that are specific to Claude Code sessions.
 
 ## Where to pick up
 
-- Milestone status and the detailed plan for the next work are in `docs/handoff-m6.md`
-  (written at the end of the M5 session): Gest ids, what M5 delivered (the KubeRay driver and
-  manifests, `ray[default]`), the behaviours learned in M2 to M5 that will bite again, open
-  review follow-ups, and the uncloud (mode C) pointers. `docs/handoff-m5.md` is the M4 -> M5 one.
+- Milestone status and the detailed plan for the next work are in `docs/handoff-m9.md`
+  (written at the end of the M8 session): Gest ids, what M8 delivered (the RunPod driver, the
+  GPU image, the image example), the behaviours learned on pods that will bite again, open
+  review follow-ups, and what comes before DiLoCo and FSDP (`docs/parallelism.md` is the map).
+  `docs/handoff-m8.md` is the M7 -> M8 one; earlier handoffs go back to M5.
 - `docs/examples-and-scenarios.md` says how every scenario is driven and checked;
   `docs/running-modes.md` says where things run.
 - Memory on this Mac is tight with the container cluster up: one cluster scenario at a time,

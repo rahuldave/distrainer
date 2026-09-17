@@ -28,6 +28,12 @@ number (the ledger cursor) that survives restarts and changes in the number of w
   architecture, the scenarios, day-to-day operation, the bill.
 - [`docs/tutorials/runpod.md`](docs/tutorials/runpod.md) — tutorial 6: the image contrastive example (SimCLR on
   CIFAR-10 blocks, the machine learning explained), its GPU image and the Actions pipeline that builds it, RunPod pods (M8, in progress).
+- [`docs/collectives.md`](docs/collectives.md) — the primitives every distributed training is built from
+  (barrier, broadcast, all-reduce, all-gather, reduce-scatter, send and receive), and where the loop uses them.
+- [`docs/parallelism.md`](docs/parallelism.md) — the kinds of parallel training explained with those primitives
+  (DDP, FSDP, tensor and pipeline, local SGD and DiLoCo), the head and rank 0, and where distrainer fits.
+- [`docs/handoff-m9.md`](docs/handoff-m9.md) — the handoff after M8: what is there, what RunPod taught, and what
+  comes before DiLoCo and FSDP.
 - [`docs/runpod-gotchas.md`](docs/runpod-gotchas.md) — what bit on RunPod pods (pull times, capacity, the
   global-networking address, the injected API key).
 - [`docs/cheatsheets/orbstack.md`](docs/cheatsheets/orbstack.md) and
@@ -71,8 +77,9 @@ cluster scenarios with pods as Ray nodes on OrbStack's Kubernetes through a seco
 on an uncloud cluster of OrbStack machines through a third driver, `deploy/drivers/uncloud.sh`
 (`DISTRAINER_DRIVER=uncloud`), with the scenario runner reading the audit trail from the object
 store when nothing is shared. M7 (PR #17) ran the same cluster on three EC2 instances with an S3 bucket as
-the store (`deploy/uncloud/aws.sh`, tutorial 5); `docs/handoff-m8.md` says what it taught and
-what comes next.
+the store (`deploy/uncloud/aws.sh`, tutorial 5); M8 (PR #21) put a GPU contrastive example on RunPod
+pods through a fourth driver (`deploy/drivers/runpod.sh`, tutorial 6); `docs/handoff-m9.md` says what it
+taught and what comes next.
 Milestones are in the spec (section 12);
 development follows the `agent_gest_git_skills` workflow (section 14) and is tracked in GitHub
 issues #1 to #7, #14 and #16.
