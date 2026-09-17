@@ -262,4 +262,4 @@ The full list is `docs/uncloud-gotchas.md`. The four that cost the most time:
   compose and KubeRay modes.
 - `docs/examples-and-scenarios.md`, "Under uncloud": what every driver verb does on each side.
 - `docs/uncloud-gotchas.md`: the running list.
-- `docs/handoff-m7.md`: what building this taught, and what comes next (the cloud stage).
+- `internal_docs/handoff-m7.md`: what building this taught, and what comes next (the cloud stage).

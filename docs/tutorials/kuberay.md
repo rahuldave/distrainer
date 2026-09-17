@@ -242,7 +242,7 @@ orb config set k8s.enable false      # Kubernetes off; the compose harness does 
   cluster.
 - **The removed pod trains on after `just scale 2`.** That is the grace period; see section 5.
 - **Out of memory.** The VM has 8 GB: the head takes about 1.4 GB and each worker about 0.6 GB
-  (measured in M3, `docs/handoff-m5.md`), plus Kubernetes itself. One cluster at a time, compose
+  (measured in M3, `internal_docs/handoff-m5.md`), plus Kubernetes itself. One cluster at a time, compose
   containers down, and stop stray containers.
 
 ## 10. Where to go next
@@ -252,4 +252,4 @@ orb config set k8s.enable false      # Kubernetes off; the compose harness does 
 - `docs/examples-and-scenarios.md`, "Under KubeRay": what every driver verb does on each side.
 - [Tutorial 4](uncloud.md): the same run on a cluster of machines (uncloud), where nothing is
   shared and the object store is the only storage.
-- `docs/handoff-m6.md`: what building this taught; `docs/handoff-m7.md` is the same after M6.
+- `internal_docs/handoff-m6.md`: what building this taught; `internal_docs/handoff-m7.md` is the same after M6.

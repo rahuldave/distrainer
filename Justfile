@@ -108,7 +108,7 @@ local-scenarios S="all":
   uv run python integration_tests/single_node/run_scenarios.py --scenario {{S}}
 
 docs:
-  @ls docs
+  @ls docs docs/tutorials internal_docs
 
 # --- agent context targets (see agent_gest_git_skills templates/just/agent-contract.just) ---
 

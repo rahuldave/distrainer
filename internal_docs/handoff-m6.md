@@ -93,11 +93,11 @@ if a scenario is short of RAM.
   or a tool uses `bash -lc`.
 - **`kubectl apply --server-side -k <kustomize url>`** installs the operator without Helm and is
   idempotent; the base targets the `default` namespace.
-- Everything in the M3 and M4 lists still applies (`docs/handoff-m5.md` section 4).
+- Everything in the M3 and M4 lists still applies (`internal_docs/handoff-m5.md` section 4).
 
 ## 5. Review follow-ups still open
 
-The M4 list in `docs/handoff-m5.md` section 5 is unchanged. New in M5:
+The M4 list in `internal_docs/handoff-m5.md` section 5 is unchanged. New in M5:
 
 - `stop-worker` under KubeRay ends in a replacement pod (the operator keeps `replicas`), where
   compose leaves the container stopped; no scenario uses the verb, but the semantics differ.

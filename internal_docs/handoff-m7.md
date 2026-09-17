@@ -17,7 +17,7 @@ Written 2026-09-14 at the end of the M6 session for the thread that picks up the
   numbers). S6 and S11 need a shared mount and skip.
 - Nothing is scheduled for the cloud stage yet (real VMs, S3 or R2): section 6 is the plan. It is
   Gest task `rpmyqnzs` under the v0.1 root (`qvuukpsm`), not in an iteration; create the
-  iteration with `gpl` when it starts, as `docs/handoff-m6.md` did for M6.
+  iteration with `gpl` when it starts, as `internal_docs/handoff-m6.md` did for M6.
 
 ## 2. Environment checklist
 
@@ -114,11 +114,11 @@ The long form is `docs/uncloud-gotchas.md`. The ones that shaped the code:
 - `uc` details: `search internal.` makes bare names resolve; `x-machines` takes a comma string,
   not a space one; `uc volume rm` ignores `UNCLOUD_AUTO_CONFIRM`; `uc exec` chatter is on stderr;
   no `uc cp`, no per-container kill, no `uc ctx rm`.
-- Everything in the M3 to M5 lists still applies (`docs/handoff-m6.md` section 4).
+- Everything in the M3 to M5 lists still applies (`internal_docs/handoff-m6.md` section 4).
 
 ## 5. Review follow-ups still open
 
-The M4 and M5 lists in `docs/handoff-m6.md` section 5 are unchanged. New in M6:
+The M4 and M5 lists in `internal_docs/handoff-m6.md` section 5 are unchanged. New in M6:
 
 - The worker index sorts by machine then container id: stable across a kill and restart, not
   across a scale or a redeploy (documented; no scenario kills after scaling).

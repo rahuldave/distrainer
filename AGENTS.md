@@ -21,7 +21,7 @@ request, it must say why in the final response.
 - Primary docs/specs: `docs/distrainer-spec.md` (v0.1 rev 3, the contract),
   `docs/introduction.md`, `docs/distrainer-design.md`,
   `docs/ray-sub-epoch-training-report.md`
-- Detailed workflow playbook: `docs/gest_codex_workflow.md`
+- Detailed workflow playbook: `internal_docs/gest_codex_workflow.md`
 - Claude Code adapter and session rules: `CLAUDE.md` (roles, subagent policy,
   tool notes). Read it together with this file.
 
@@ -57,7 +57,7 @@ vocabulary and classify the work against it. Record selected existing tags, new
 dynamic tags, and near-miss rejected tags when useful. Store machine-readable
 metadata such as `classification.tags.reviewed=true`,
 `classification.tags.new=<comma-separated-new-tags>`, and
-`impact.ast_grep.required=true|false`. Use `docs/tag_dependency_workflow.md` for
+`impact.ast_grep.required=true|false`. Use `internal_docs/tag_dependency_workflow.md` for
 the exact workflow.
 
 For code-facing changes, identify changed semantic contracts and use `ast-grep`

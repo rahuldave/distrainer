@@ -22,10 +22,14 @@ flowchart TB
   Q -- split --> MP["model parallel: one replica across several devices"]
   MP --> TP["tensor parallel: a layer split, a collective per layer"]
   MP --> PP["pipeline parallel: layers in stages, send and receive between them"]
-  DDP -. "distrainer today" .-> DDP
-  FSDP -. "a wrapping and a checkpoint change" .-> FSDP
-  LSGD -. "the segment end is the sync" .-> LSGD
+  DDP -. "parallel.kind: ddp (the default)" .-> DDP
+  FSDP -. "parallel.kind: fsdp (M9)" .-> FSDP
+  LSGD -. "parallel.kind: local_sgd | diloco (M9)" .-> LSGD
 ```
+
+Since M9 every kind on the left of the map is a setting: the `parallel:` section of the config
+picks it (tutorial 7, `docs/tutorials/parallel.md`), and the same log, dealer, ledger and audit
+serve all of them.
 
 ## 1. Who is who: the head, the driver, the ranks, and rank 0
 
@@ -372,9 +376,11 @@ different data centers, and a rank that arrives late only delays the sync. The c
 statistical (the average of drifted replicas is not the replica of the average), which the
 outer optimizer and a small `H` keep in check.
 
-**Checkpoint.** Rank 0's weights after a sync plus the outer optimizer state. **Restart**:
-every rank loads the synced weights. **Resize**: at a sync point the new ranks join with the
-averaged weights; nothing else changes.
+**Checkpoint.** Rank 0's weights after a sync plus the outer optimizer state (`parallel.pt`:
+DiLoCo's anchor and momentum). **Restart**: every rank loads the synced weights. **Resize**: at
+a sync point the new ranks join with the averaged weights; nothing else changes. A checkpoint
+taken *inside* a segment holds rank 0's replica, which has drifted from the others'; a resume
+from it restarts every rank there (the positions stay exact, the other replicas' drift is lost).
 
 ## 3. What in distrainer makes it a good fit, and for what
 
@@ -414,9 +420,9 @@ flowchart LR
 
 | training | fit | why, and what would be better |
 |---|---|---|
-| DDP | built | the dealer *is* data parallelism; the resize is a re-deal; the checkpoint is one file from rank 0 |
-| FSDP / ZeRO | a `build_model` change plus sharded checkpoints | the data side is DDP's; `CheckpointIO` must write one shard per rank and reshard on a resize; the ledger is unchanged |
-| local SGD / DiLoCo | a natural fit | the segment end is already a barrier on every rank: sync there, run the steps in between with the all-reduce off (`no_sync`); the audit and the ledger are unchanged; slow links become tolerable |
+| DDP | built (`kind: ddp`) | the dealer *is* data parallelism; the resize is a re-deal; the checkpoint is one file from rank 0 |
+| FSDP | built (`kind: fsdp`, M9) | FSDP2's `fully_shard` per top-level child; the data side is DDP's; every rank writes its checkpoint shard (`torch.distributed.checkpoint`) under the same name and a resume at another world size re-cuts them; the ledger is unchanged |
+| local SGD / DiLoCo | built (`kind: local_sgd` \| `diloco`, M9) | no wrap and no collective per step; at the segment end every rank runs the sync (an average of the weights, or DiLoCo's outer Nesterov step over the averaged change) before the checkpoint and before rank 0's hooks; `H = W / n`; the audit and the ledger are unchanged; a mid-segment checkpoint holds rank 0's drifted replica, so `checkpoint.policy: segment_end` is the exact choice |
 | tensor parallel | poor | a distrainer rank would have to become a *group* of devices, the loop would need a device mesh, checkpoints are per-slice, and the elastic resize cannot re-deal a tensor split; use Megatron, NeMo or torchtitan for the model side and, at most, distrainer as the data layer feeding each group |
 | pipeline parallel | poor | the same, plus a block would have to be split into micro-batches inside the step; the frameworks above own that schedule |
 

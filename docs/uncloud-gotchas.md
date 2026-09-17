@@ -161,5 +161,5 @@ What `deploy/uncloud/aws.sh` and the cloud run of 2026-09-16 taught, on top of t
   eight minutes (`pushing layers 310 s`), where a registry should skip blobs it holds. The
   docker-container builder has its own cache and garbage collection, and its exporter may
   compress differently from build to build; whether the dependency layer was rebuilt or merely
-  recompressed is the open question (an open item in `docs/handoff-m8.md`). Until then, count a
+  recompressed is the open question (an open item in `internal_docs/handoff-m8.md`). Until then, count a
   push per code change, not per dependency change.

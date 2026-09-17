@@ -1,0 +1,120 @@
+# Handoff: after M9 (the parallel kinds on the CPU): what is there, what it taught, and M10
+
+Written 2026-09-17 at the end of the M9 session for the thread that picks up M10. Read
+`CLAUDE.md` and `AGENTS.md` first (workflow rules), then this file, then tutorial 7
+(`docs/tutorials/parallel.md`) and `docs/parallelism.md`. Verify the Gest ids and the branch
+state with `gest task show` and `git status` before relying on them.
+
+## 1. Where things stand
+
+- M0 to M9 are merged to `main`. M9, the parallel kinds proven on the CPU: PR #24, issue #23,
+  squash `94aea7e` (Gest parent `nsqzpzxv`, iteration `zrtkpqzm`); the docs split and the site
+  followed in the next PR. The docs are a GitHub Pages site built by Jekyll from `main:/docs`
+  (`docs/index.md` the home, `docs/_config.yml`, `docs/_layouts/default.html` with the Mermaid
+  renderer); `internal_docs/` holds the handoffs, the workflow docs and the cheat sheets and is
+  not on the site.
+- **M9 was re-scoped mid-session** (Rahul: no pod runs while Fable's weekly quota was at 99%
+  and the session billed the API). The GPU runs and the driver's per-pod GPU count are M10;
+  their Gest leaves `rslyvvkq` (the runs) and `sxytmvrk` (the GPU count) still sit under the M9
+  parent and must be moved under an M10 parent by `gpl` (M8's shape: a depth-1 parent, an
+  iteration with phases, one GitHub issue).
+- **Nothing ran on a GPU in M9.** RunPod: every pod terminated since M8; the bucket
+  `distrainer-rahuldave` and the GHCR image `ghcr.io/rahuldave/distrainer-gpu:latest` are as
+  M8 left them. **Rotate the RunPod API key** before renting anything (the M8 handoff's warning
+  still stands).
+
+## 2. Environment checklist
+
+```bash
+just setup && just verify                       # laptop gate (246 unit tests, smoke)
+just test tests/test_procgroup.py               # 10 tests on real ranks over Gloo, about 90 s
+PROCGROUP_DEBUG=1 PROCGROUP_TIMEOUT_S=60 just test tests/test_procgroup.py -k diloco
+uv run python examples/hello_blocks/train.py --config examples/hello_blocks/local.yaml --set parallel.kind=diloco
+uv run python examples/image_contrastive/train.py --config examples/image_contrastive/local-synthetic.yaml --set parallel.kind=fsdp
+```
+
+The RunPod lines of `internal_docs/handoff-m9.md` section 2 are unchanged for M10.
+
+## 3. What M9 delivered
+
+- `tests/procgroup.py`: `run_world(cfg, n, step, build_model, out_dir, checkpoint=None,
+  loop_extra=None)` spawns `n` ranks (torch.multiprocessing, spawn) that join a Gloo group on
+  a free localhost port, patch the `ray.train` names `train_loop` looks up at call time onto the
+  group (`prepare_model` the real DDP wrap when the kind asks for it, `barrier` and
+  `broadcast_from_rank_zero` as `torch.distributed` calls, `report` recorded per rank,
+  checkpoints returned as directories, `merge_checkpoint` doing what Ray does with the ranks'
+  directories). A stuck rank dumps every thread's stack after the deadline.
+- `parallel:` section (`ParallelConfig` in `config.py`): `kind` ddp | none | local_sgd |
+  diloco | fsdp, DiLoCo's `outer_lr` / `outer_momentum` / `outer_nesterov`, FSDP's
+  `reshard_after_forward` / `param_dtype` / `reduce_dtype`; `TrainInfo.parallel`.
+- `distrainer/parallel.py`: the `SegmentSync` protocol, `LocalSGD`, `DiLoCo` (anchor + outer
+  Nesterov SGD, state in `parallel.pt`), `build_sync`, `wrap_fsdp` (FSDP2 `fully_shard` per
+  direct child then the root; the optimizer re-pointed at the sharded parameters), `is_sharded`.
+- The loop: the sync on every rank right after the last step of a segment, before the
+  policy's checkpoint and rank 0's hooks; under fsdp every rank reports its checkpoint shard.
+- `CheckpointIO`: two shapes (full from rank 0; sharded, one DCP file per rank merged by Ray
+  under one `checkpoint_dir_name`), shape detection and resharding on load, driver-side loads
+  without a group, `shape()` from the listing, `distrainer inspect` printing it.
+- Docs: spec sections 4, 5, 6.2, 7, 12; `docs/cli.md`; `docs/parallelism.md` brought to what
+  is built; tutorial 7; the site; this file.
+
+Numbers from the CPU (hello_blocks, 2 workers, 4 segments, the toy MSE): final loss 0.049 under
+ddp, 0.052 local_sgd, 0.338 diloco (a tiny problem with few syncs; expected, not a defect);
+the image example on the synthetic set: fsdp equal to ddp in loss and probe (kNN 1.000).
+
+## 4. Behaviours learned in M9 that will bite again
+
+- **`torch.multiprocessing.ProcessContext.join(timeout)` returns as soon as one rank has
+  finished**, not when all have; it must be looped until it returns True. Read as a hang for
+  an hour of the session.
+- **A mid-segment checkpoint under local_sgd or diloco holds rank 0's drifted replica.** A
+  resume from it restarts every rank from that replica (positions exact, the others' drift
+  lost). A segment-end checkpoint resumes exactly. `checkpoint.policy: segment_end` is the
+  setting for those kinds; the spec, the module and tutorial 7 say so.
+- **`fully_shard` swaps the module's parameters for DTensor-backed ones under the same
+  names**, so an optimizer built before the wrap no longer references the model's parameters
+  (`get_optimizer_state_dict` fails with a KeyError). `wrap_fsdp` re-points the param groups by
+  name; an optimizer that already has state is refused.
+- **Ray Train v2 merges the checkpoint directories of every reporting rank** under one
+  `checkpoint_dir_name` (its `report` docstring says so); the sharded shape relies on it. The
+  process-group harness imitates it with `merge_checkpoint`.
+- **FSDP2 and `torch.distributed.checkpoint` work on the CPU over Gloo** (torch 2.14), and a
+  DCP directory loads into a plain module with no process group (a UserWarning about the
+  single-process assumption, silenced in `CheckpointIO`). No GPU is needed to test fsdp.
+- **The image encoder returns a view from the FSDP2-wrapped module**: torch warns that an
+  in-place op on it would skip the all-gather. The results equal ddp; the fix is a `.clone()`
+  (or a fresh tensor) at the end of `Encoder.forward` in `examples/image_contrastive/model.py`.
+- **The toy in the tests diverges numerically** (lr 0.1 on `(w x)^2` with `x` up to 16: weights
+  of 1e4 by segment 3); the tests assert determinism and structure, never convergence.
+- **`distrainer inspect` on `checkpoint_manager_snapshot.json`** (which `ls checkpoint_*`
+  matches) raises a raw `NotADirectoryError` from `ledger.py`; a clear message is wanted.
+- Everything in the M8 list still applies (`internal_docs/handoff-m9.md` section 4).
+
+## 5. Review follow-ups still open
+
+- The M8 list (`internal_docs/handoff-m9.md` section 5) is unchanged: the 7.5 GB image,
+  `kill-worker` stopping the pod, the runner's lag settings as environment, the image
+  example's `all_gather` path with no unit test (now possible: run `info_nce` on two ranks of
+  the process-group harness), the personal bucket names, `wipe-shared` a no-op, the account
+  key in every pod.
+- From M9: the encoder view (section 4); the `inspect` message; the fsdp shard-unit policy is
+  fixed at "every direct child" with no knob; a per-rank checkpoint shape (the DCP machinery)
+  would make mid-segment resumes exact under local_sgd/diloco; `examples/*/harness*.yaml`
+  carry no `parallel:` section yet (the default applies).
+
+## 6. M10
+
+1. `gpl` an M10 parent and iteration from this file; move `rslyvvkq` and `sxytmvrk` under it.
+2. The driver's per-pod GPU count (`sxytmvrk`): `create_pod`'s `gpu.count` from
+   `DISTRAINER_RUNPOD_GPU_COUNT`, a `DISTRAINER_TRAINERS` value in the worker pod's env that
+   `deploy/ray-worker.sh` turns into `--num-cpus=k --resources='{"trainer": k}'` (the head keeps
+   advertising no trainer), `ps` showing the count; stub-API tests in
+   `tests/test_runpod_driver.py` mirroring `test_up`'s create-payload assertions.
+3. The runs (`rslyvvkq`), detached with `nohup`, one at a time, pods kept for the session:
+   the image example under `diloco` on CA-MTL-1 + EU-RO-1 against M8's 2.5 s per step and
+   probe 0.385; S2, S3, S4 under `local_sgd` in EU-RO-1; the image example under `fsdp` on one
+   two-GPU pod. Budget as M8 (30 USD ceiling) unless Rahul says otherwise; key rotation first.
+4. The follow-ups of section 5 that the runs touch: `kill-worker` through the drain marker,
+   the runner's lag defaults per driver, the `all_gather` test, the encoder view.
+5. Record every number in `internal_docs/handoff-m11.md`; docs to `docs/` (the site) only when
+   user-facing.
